@@ -1,9 +1,7 @@
 """可插入经审计数据合同的 HTTP 边界。公司字段由合同明示，默认关闭真实请求。"""
-from contextvars import ContextVar
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import json
-import logging
 import re
 from urllib.parse import urlsplit
 
@@ -36,20 +34,9 @@ ROW_REFERENCE = re.compile(r"第\s*([0-9]+)\s*行")
 ROW_NOT_FOUND = re.compile(r"(?:上传完成\s*[,，]\s*)?第\s*([0-9]+)\s*行数据不存在在线列表[;；。]?")
 
 
-# httpx 的 INFO 日志会显示完整 URL，httpcore 的 DEBUG 日志会显示网络细节。
-# 只过滤本适配器调用线程内的传输日志，应用其他 HTTP 客户端保留原有日志行为。
-_private_request = ContextVar("loss_repricing_private_request", default=False)
-
-
-class _PrivateRequestFilter(logging.Filter):
-    def filter(self, record):
-        return not _private_request.get()
-
-
-for _logger_name in (
-    "httpx", "httpcore.connection", "httpcore.http11", "httpcore.http2", "httpcore.proxy", "httpcore.socks",
-):
-    logging.getLogger(_logger_name).addFilter(_PrivateRequestFilter())
+# 兼容既有适配器导入；所有真实请求复用同一个日志脱敏上下文。
+from app.adapters.transport_privacy import private_request as _private_request
+from app.adapters.sales_auth import SalesAuth
 
 
 def _utcnow():
@@ -250,6 +237,7 @@ class HttpAdapter:
         self._client = client if client is not None else httpx.Client(
             timeout=TIMEOUT, verify=True, follow_redirects=False, trust_env=False,
         )
+        self._vendor_auth = SalesAuth(settings, self._client)
         self._services = {}
         self._collections = {}
         self._sites = {}
@@ -277,7 +265,8 @@ class HttpAdapter:
                 password_login = (
                     service == "erp" and self._erp_credentials is not None
                     and self._erp_credentials["base_url"] == origin + "/open"
-                )
+                ) or (service == "vendor" and self._vendor_auth.configured
+                      and self._vendor_auth.origin == origin)
                 if not token and not password_login:
                     raise ValueError("缺少服务凭据")
                 self._services[service] = origin
@@ -351,6 +340,10 @@ class HttpAdapter:
         try:
             context = _private_request.set(True)
             try:
+                if (service == "vendor" and self._vendor_auth.configured
+                        and self._vendor_auth.origin == self._services[service]):
+                    # 仅获取/更新认证，不在401或未知业务结果后重发请求，提交仍只发一次。
+                    self._tokens[service] = self._vendor_auth.get_token()
                 if service == "erp" and not self._tokens[service]:
                     # 使用本轮登录所得令牌；不复用Apifox面板或其他系统的令牌。
                     login = self._client.post(

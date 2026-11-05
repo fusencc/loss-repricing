@@ -224,3 +224,9 @@ Uraw = 11/0.5 = 22
 - `queried_at` 是本地完成采集的UTC时间；`effective_date=null` 表示接口未提供生效日期。上游 now 为响应时间，不能映射为 fx_date。`direction_confirmed=false`、`pricing_ready=false`，不能因查询成功标为当日汇率验收。
 - 非标准币种不推断别名；重复币种、缺失/非正/非有限汇率只标记对应行，独立有效币种继续展示。不用默认1修补外币汇率。
 - 查询会访问真实ERP，即使当前定价运行模式为demo；仅管理员主动点击触发，无启动预取或自动轮询，无模拟回执混入真实来源。
+
+### 销售系统凭证配置与更新（2026-11-05）
+
+`LR_VENDOR_USERNAME`、`LR_VENDOR_PASSWORD`为本人销售系统业务账号，仅保存在忽略的.env中，不使用YApi文档站账号替代。`LR_VENDOR_API_URL`为已确认销售系统源地址。客户端在相同来源的真实合同允许请求时按expires_in秒数复用Token，提前重新登录更新，Token仅进程内缓存。合同/站点/店铺未验收与真实提交关闭不因认证成功解除；scope不是已核实的调价权限。
+
+认证文档、JSON与form实测差异、更新边界和源码位置统一见`docs/data-contract-evidence.md`“销售系统账号认证实测与自动取证”。业务公式和价格精度不变。

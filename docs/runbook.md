@@ -143,3 +143,12 @@ Compose规划为独立`db/api/worker/web`服务，MySQL 8.4；入口预留本机
 生产配置校验要求独立MySQL、足够长度的管理员密码与会话密钥、Secure Cookie。还需在入口实际配置TLS和访问控制；设置Secure Cookie本身不等于已经有TLS。当前Compose入口仅绑定回环，外部入口尚需单独部署和验收。
 
 Compose中的真实提交开关保留关闭。生产前需要实际容器构建、迁移、健康、资源、重启恢复与权限核验。本机未安装Docker，以上容器路径尚未完成本地验证；没有完成生产部署。
+
+销售系统自动认证：填写.env内`LR_VENDOR_USERNAME`/`LR_VENDOR_PASSWORD`，凭据不发到日志或Git。只测登录可在根目录PowerShell执行：
+
+```powershell
+$env:PYTHONPATH='backend'
+.venv/Scripts/python -m app.probe_sales_auth --renew-login
+```
+
+此命令只调用销售系统登录接口两次，不查询/修改商品，不提交调价文件。Token只缓存内存，后续正常请求前按expires_in自动重新登录。当前未验证refresh_token接口；重复登录可能复用现有Token。命令成功不代表已获调价权限。

@@ -198,3 +198,14 @@ L_TH = ROUNDUP(max(w,20)/10,0)*1
 用户提供内部开放接口登录/汇率查询文档，本会话实际登录查询成功：业务 success=true、code=200，data 为 currency/rate/rateDescr 列表。文档测试环境地址直接查询返回“服务未找到”；项目现有配置的公司ERP地址登录和查询成功。配置地址不因此宣称为已验收生产环境。
 
 实现：`backend/app/adapters/erp_rates.py`，合同版本 `erp-rates-readonly-v1`；管理员API与设置页只读查询已实现。data.rate 的方向按数值推断为CNY/外币单位，仍未确认为公司最终核算口径；data 无生效日期，不使用 now 冒充汇率日期。原始业务响应及认证信息未写入Git。查询可用不等于真实自动定价可用，其他数据源和执行合同继续独立验收。
+
+## 2026-11-05 销售系统账号认证实测与自动取证
+
+用户授权使用本人业务账号测试登录与凭证更新，并明确禁止真实调价。新增 `adapters/sales_auth.py`、`app.probe_sales_auth`；`HttpAdapter`在vendor来源与已确认销售服务地址一致时自动获取有效Token。账号密码仅配置在本项目被Git忽略的.env，令牌在进程内缓存，不写业务数据库/日志/Git。配置名 `LR_VENDOR_API_URL`、`LR_VENDOR_USERNAME`、`LR_VENDOR_PASSWORD`，保留原静态 `LR_VENDOR_TOKEN` 兼容来源合同。
+
+- 官方提供的YApi basic-server/21040发布POST `/api-auth/oauth/user/token`，入口经销售系统网关`/Api`前缀调用。请求header包含文档指定客户端参数；具体值及业务凭据不记录于本规范。
+- **文档与实测差异**：文档标application/json；本账号JSON请求HTTP400，旧源码已见的form编码请求HTTP200，返回顶层access_token、token_type、expires_in、refresh_token、scope。实现固定使用实测成功的form，不在运行中尝试多个编码。
+- 初次expires_in=179999秒（49小时59分59秒），scope=app；再次登录取证成功，剩余有效期递减，服务可能复用仍有效的Token，不宣称每次登录均换发不同Token或重置有效期。
+- 有效期使用从请求开始计时的monotonic时间；到期前最多60秒重新登录，短寿命令牌预留10%。重新登录失败不返回旧令牌。刷新接口未发布，未猜测grant_type/刷新路径，未使用refresh_token做真实刷新测试；当前更新方式为重新调用已实测登录接口。
+- 自动认证只解决身份凭证生命周期，不改变来源合同、公司费用模型、店铺授权、试点或真实执行开关。scope=app不能证明priceUpload权限。所有业务请求（尤其提交）失败后不因换Token而自动重发。
+- 本次真实测试仅调用认证接口，未上传文件、未调价、未调用修改图片或其他写业务接口。首次及后续探测均未证明调价权限或平台生效。

@@ -22,11 +22,17 @@ class Settings(BaseSettings):
     live_submit_enabled: bool = False
     live_contract_path: Path = PROJECT_ROOT / "deploy" / "live-contract.json"
     snapshot_path: Path = PROJECT_ROOT / "runtime" / "snapshot.json"
-    vendor_token: str = ""
+    vendor_token: str = Field(default="", repr=False)
+    vendor_api_url: str = "http://121.46.237.218:8071"
+    vendor_username: str = Field(default="", repr=False)
+    vendor_password: SecretStr = Field(default_factory=lambda: SecretStr(""))
     erp_token: str = ""
     erp_open_api_url: str = "http://103.198.125.2:16777/open"
     erp_username: str = Field(default="", repr=False)
     erp_password: SecretStr = Field(default_factory=lambda: SecretStr(""))
+    erp_capture_platform: str = "Tiktok"
+    erp_capture_platform_id: str = "9B583641B0CA11EDAAB1AC1F6B9B9987"
+    erp_capture_bloc: str = "集团二部"
     worker_poll_seconds: int = 5
     coordination_required: bool = True
     live_writer_exclusive: bool = False
