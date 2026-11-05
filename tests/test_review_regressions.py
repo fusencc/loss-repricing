@@ -386,3 +386,118 @@ def test_direct_claim_serializes_aliases_even_with_precomputed_decisions(context
     assert service._claim(second_id, second) is None
     with factory() as session:
         assert session.query(Execution).count() == 1
+
+
+@pytest.mark.parametrize('outcome', ['verified', 'failed'])
+def test_execution_dependent_proposal_follows_terminal_outcome_without_rewriting_history(client, outcome):
+    login(client)
+    state = client.app.state
+    source = RenamedSource(state.config.runtime_dir)
+    service = PricingService(state.factory, source, state.config)
+    enable(state.factory)
+    submitted = service.run_batch('pending-original')
+    blocked = service.run_batch('pending-dependent')
+    historical_before = client.get(f'/api/batches/{blocked}').json()
+    if outcome == 'verified':
+        source.waiting = False
+    else:
+        source.lookup = lambda *args: LookupResult('rejected', message='确认逐行拒绝')
+    service.reconcile()
+    current = client.get('/api/items').json()
+    affected = [row for row in current if row['key']['item_id'] in {'DEMO-I000', 'DEMO-I001', 'DEMO-I004', 'DEMO-I006'}]
+    assert len(affected) == 4
+    assert all(row['batch_id'] == submitted and row['execution']['state'] == outcome for row in affected)
+    assert all(row['phase'] == outcome for row in affected)
+    pending = client.get('/api/items?status=待处理').json()
+    if outcome == 'verified':
+        assert not any(row['id'] in {r['id'] for r in affected} for row in pending)
+        assert client.get('/api/overview').json()['counts']['已核验'] == 4
+    else:
+        assert all(row in pending for row in affected)
+        assert all(row['reason'] == '确认逐行拒绝' for row in affected)
+    assert client.get(f'/api/batches/{blocked}').json() == historical_before
+    assert source.calls == 4
+
+
+def test_terminal_dependency_does_not_hide_newer_independent_mapping_exception(client):
+    login(client)
+    state = client.app.state
+    source = RenamedSource(state.config.runtime_dir)
+    service = PricingService(state.factory, source, state.config)
+    enable(state.factory)
+    service.run_batch('pending-with-new-business-exception')
+    original_collect = source.collect
+    def ambiguous_collect(day):
+        snapshot = original_collect(day)
+        alias = snapshot.lines[0].model_copy(deep=True)
+        alias.key.sku += '-ambiguous'
+        alias.row_id += '-ambiguous'
+        snapshot.lines.append(alias)
+        return snapshot
+    source.collect = ambiguous_collect
+    blocked = service.run_batch('new-business-exception')
+    source.waiting = False
+    service.reconcile()
+    affected = [row for row in client.get('/api/items').json() if row['key']['item_id'] == 'DEMO-I000']
+    assert len(affected) == 1
+    assert affected[0]['batch_id'] == blocked
+    assert affected[0]['decision']['reason_code'] == 'ambiguous_target_alias'
+    assert affected[0]['status'] == '待处理'
+    assert source.calls == 4
+
+
+def test_current_projection_keeps_multiple_pending_dependencies_until_all_resolve(client):
+    from uuid import uuid4
+    login(client)
+    state = client.app.state
+    source = RenamedSource(state.config.runtime_dir)
+    service = PricingService(state.factory, source, state.config)
+    enable(state.factory)
+    service.run_batch('two-old-pending')
+    with state.factory.begin() as session:
+        original = session.scalar(select(Execution).join(Item).where(Item.key['item_id'].as_string() == 'DEMO-I000'))
+        item = session.get(Item, original.item_id)
+        key = VariantKey.model_validate(item.key)
+        key.sku += '-old-alias'
+        data = {c.name: getattr(item, c.name) for c in Item.__table__.columns}
+        alias_item_id = str(uuid4())
+        data.update(id=alias_item_id, variant_id=key.identity(), key=key.model_dump(mode='json'))
+        session.add(Item(**data))
+        session.flush()
+        data = {c.name: getattr(original, c.name) for c in Execution.__table__.columns}
+        data.update(id=str(uuid4()), item_id=alias_item_id, request={**original.request, 'key': key.model_dump(mode='json')})
+        session.add(Execution(**data))
+        original_id = original.id
+    service.run_batch('blocked-behind-two-pending')
+    rows = [row for row in client.get('/api/items').json() if row['key']['item_id'] == 'DEMO-I000']
+    assert len(rows) == 3
+    assert len([row for row in rows if row['execution']]) == 2
+    source.lookup = lambda eid, *args: LookupResult('rejected') if eid == original_id else LookupResult('unknown')
+    service.reconcile()
+    rows = [row for row in client.get('/api/items').json() if row['key']['item_id'] == 'DEMO-I000']
+    assert len(rows) == 2
+    assert any(row['id'] == alias_item_id and row['status'] == '待核验' for row in rows)
+    assert any(row['decision']['reason_code'] == 'pending_submission' for row in rows)
+    assert source.calls == 4
+
+
+def test_old_terminal_result_does_not_replace_new_external_pending_source(client):
+    login(client)
+    state = client.app.state
+    source = RenamedSource(state.config.runtime_dir)
+    source.waiting = False
+    service = PricingService(state.factory, source, state.config)
+    enable(state.factory)
+    service.run_batch('already-verified')
+    original_collect = source.collect
+    def external_pending(day):
+        snapshot = original_collect(day)
+        for row in snapshot.online:
+            row.pending_submission = True
+        return snapshot
+    source.collect = external_pending
+    current_batch = service.run_batch('new-external-pending')
+    rows = client.get('/api/items').json()
+    assert len(rows) == 8
+    assert all(row['batch_id'] == current_batch and row['decision']['reason_code'] == 'pending_submission' for row in rows)
+    assert source.calls == 4

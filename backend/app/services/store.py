@@ -67,20 +67,36 @@ def claim_job(factory, owner, now):
 
 
 def current_items(session):
-    """全局运营视图：按批次创建时间及记录ID选当前目标，另保留全部未终结执行。
+    """全局运营视图：最新目标记录，加上全部未终结执行；状态筛选在投影后执行。
 
-    旧记录的核验更新时间不能使其覆盖较新的评估；先选当前集合再按状态筛选。
-    批次详情直接读取原记录，因此历史判定和追溯证据不丢失。
+    唯一的历史结果提升情形：最新记录仅因已有提交待核验而挂起，且这个依赖后来
+    已终结。此时展示真实核验/失败记录，不修改旧批次，也不掩盖较新的业务异常。
     """
+    from collections import defaultdict
     from app.models import Item, Batch, Execution
     from app.domain.types import VariantKey
-    pending = set(session.scalars(select(Execution.item_id).where(
-        Execution.state.in_(["submitting", "accepted", "unknown", "mismatch"]))))
-    rows = session.scalars(select(Item).join(Batch).order_by(Batch.created_at.desc(), Item.id.desc()))
-    seen, result = set(), []
-    for item in rows:
-        target = VariantKey.model_validate(item.key).target_identity()
-        if target not in seen or item.id in pending:
-            result.append(item)
-        seen.add(target)
+    executions = {execution.item_id: execution for execution in session.scalars(select(Execution))}
+    pending_states = {"submitting", "accepted", "unknown", "mismatch"}
+    groups = defaultdict(list)
+    for item in session.scalars(select(Item).join(Batch).order_by(Batch.created_at.desc(), Item.id.desc())):
+        groups[VariantKey.model_validate(item.key).target_identity()].append(item)
+    result = []
+    for rows in groups.values():
+        latest = rows[0]
+        pending = [row for row in rows if row.id in executions and executions[row.id].state in pending_states]
+        if (not pending and latest.id not in executions and latest.phase == "blocked"
+                and latest.decision.get("reason_code") == "pending_submission"):
+            # 旧记录没有显式依赖ID，以评估时刻还原依赖：请求在该时刻已存在，
+            # 核验在其后终结。更早已结束的本地请求不能解释外部来源的未知提交。
+            observed = parse_stamp(latest.decision.get("trace", {}).get("evaluated_at") or latest.updated_at)
+            resolved = [row for row in rows if row.id in executions
+                        and executions[row.id].state in {"verified", "failed"}
+                        and parse_stamp(executions[row.id].created_at) <= observed
+                        <= parse_stamp(executions[row.id].updated_at)]
+            if resolved:
+                latest = max(resolved, key=lambda row: (executions[row.id].updated_at,
+                                                       executions[row.id].created_at, row.id))
+        result.append(latest)
+        # 多个历史未知执行必须逐个显示；一个已结束不代表其他请求也已结束。
+        result.extend(row for row in pending if row.id != latest.id)
     return result
