@@ -1,0 +1,54 @@
+name: loss-repricing
+services:
+  db:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: loss_repricing
+      MYSQL_USER: loss_repricing
+      MYSQL_PASSWORD: ${LR_DB_PASSWORD:?Set independent LR_DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${LR_DB_ROOT_PASSWORD:?Set independent LR_DB_ROOT_PASSWORD}
+    volumes: ["database:/var/lib/mysql"]
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_PASSWORD mysql -u$$MYSQL_USER -e 'SELECT 1' $$MYSQL_DATABASE"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    mem_limit: 1g
+    restart: unless-stopped
+  api:
+    build: {context: ., dockerfile: backend/Dockerfile}
+    env_file: .env
+    environment: &app_env
+      LR_DATABASE_URL: mysql+pymysql://loss_repricing:${LR_DB_PASSWORD}@db:3306/loss_repricing?charset=utf8mb4
+      LR_RUNTIME_DIR: /app/runtime
+      LR_LIVE_CONTRACT_PATH: /app/deploy/live-contract.json
+      LR_SNAPSHOT_PATH: /app/runtime/snapshot.json
+      LR_LIVE_SUBMIT_ENABLED: "false"
+    command: ["sh", "-c", "python -m alembic -c backend/alembic.ini upgrade head && exec uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000"]
+    depends_on: {db: {condition: service_healthy}}
+    volumes: ["runtime:/app/runtime"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+    mem_limit: 512m
+    restart: unless-stopped
+  worker:
+    build: {context: ., dockerfile: backend/Dockerfile}
+    env_file: .env
+    environment: *app_env
+    command: ["python", "-m", "app.worker"]
+    depends_on: {api: {condition: service_healthy}}
+    volumes: ["runtime:/app/runtime"]
+    mem_limit: 512m
+    restart: unless-stopped
+  web:
+    build: {context: ., dockerfile: frontend/Dockerfile}
+    ports: ["127.0.0.1:18765:80"]
+    depends_on: {api: {condition: service_healthy}}
+    mem_limit: 128m
+    restart: unless-stopped
+volumes:
+  database:
+  runtime:
