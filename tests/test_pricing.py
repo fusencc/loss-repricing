@@ -217,11 +217,42 @@ def test_invalid_exchange_rates_cannot_fall_back_to_identity(rates):
     assert not result.ready
 
 
-def test_cny_loss_uses_units_per_cny():
-    result = single(line_fields={"currency": "CNY", "loss_amount": "-2"})
+@pytest.mark.parametrize("site", ["MY", "PH", "SG", "TH", "VN"])
+def test_online_currency_must_match_site_even_when_exchange_rate_exists(site):
+    variant = key(site=site)
+    batch = snapshot(
+        [line(variant, currency="CNY", loss_amount="-2")],
+        [online(variant, currency="CNY")],
+        contracts={site: contract(site)},
+    )
+    result = evaluate(batch, NOW)[0]
+    assert (result.status, result.ready, result.upload_price) == ("待处理", False, None)
+
+
+@pytest.mark.parametrize(
+    ("site", "currency", "rate", "station_loss", "upload_price"),
+    [
+        ("MY", "MYR", "0.6", "1.2", "11.20"),
+        ("PH", "PHP", "8", "16", "26.00"),
+        ("SG", "SGD", "0.2", "0.4", "10.40"),
+        ("TH", "THB", "5", "10", "20.00"),
+        ("VN", "VND", "3500", "7000", "7010.00"),
+    ],
+)
+def test_cny_loss_uses_units_per_cny_in_each_valid_station_currency(
+    site, currency, rate, station_loss, upload_price,
+):
+    variant = key(site=site)
+    batch = snapshot(
+        [line(variant, currency="CNY", loss_amount="-2")],
+        [online(variant, currency=currency)],
+        fx_rates={"CNY": "1", currency: rate},
+        contracts={site: contract(site)},
+    )
+    result = evaluate(batch, NOW)[0]
     assert result.ready
-    assert result.station_loss == Decimal("1.2")
-    assert result.upload_price == Decimal("11.20")
+    assert result.station_loss == Decimal(station_loss)
+    assert result.upload_price == Decimal(upload_price)
 
 
 def test_discount_uses_actual_over_retail_and_is_applied_after_upload_rounding():

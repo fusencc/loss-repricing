@@ -9,6 +9,7 @@ from .types import Decision, DecisionStatus, OnlineState, Site, Snapshot, Source
 BEIJING = timezone(timedelta(hours=8), name="Asia/Shanghai")
 REQUIRED_SOURCES = frozenset({"loss_allocatable", "loss_pending", "blocked_allocatable", "blocked_pending"})
 PRICE_CONTEXT = Context(prec=50)
+SITE_CURRENCIES: dict[Site, str] = {"MY": "MYR", "PH": "PHP", "SG": "SGD", "TH": "THB", "VN": "VND"}
 SITE_ERRORS = {
     "MY": Decimal("0.02"),
     "PH": Decimal("0.02"),
@@ -150,6 +151,11 @@ def _decide(
     loss_currency = active_rows[0].currency
     if not loss_currency.strip() or any(row.currency != loss_currency for row in active_rows):
         return finish("conflicting_currency", "同一在线子 SKU 的候选亏损币种缺失或冲突")
+    # 在线售价、一次毛利模型和上传价采用站点币。ERP 亏损原币独立校验并换汇。
+    station_currency = SITE_CURRENCIES[key.site]
+    trace["station_currency"] = station_currency
+    if online.currency != station_currency:
+        return finish("invalid_station_currency", f"在线币种与 {key.site} 站点币 {station_currency} 不一致")
     if online.observed_at.astimezone(BEIJING).date() != snapshot.business_date or online.observed_at > now:
         return finish("stale_online", "在线价格与保护数据须为本业务日有效快照")
 
@@ -198,14 +204,8 @@ def _decide(
         return finish("unverified_site_contract", "缺少经确认的站点上传字段、价格档位或合同版本")
 
     from_rate = snapshot.fx_rates.get(loss_currency)
-    to_rate = snapshot.fx_rates.get(online.currency)
-    if (
-        not online.currency.strip()
-        or from_rate is None
-        or from_rate <= 0
-        or to_rate is None
-        or to_rate <= 0
-    ):
+    to_rate = snapshot.fx_rates.get(station_currency)
+    if from_rate is None or from_rate <= 0 or to_rate is None or to_rate <= 0:
         return finish("invalid_fx", "亏损原币或站点币缺少正数汇率")
 
     retail = online.retail_price
@@ -234,7 +234,7 @@ def _decide(
 
         # 站点币亏损 = 原币亏损 / 原币每 CNY 单位 × 站点币每 CNY 单位。
         # 同币种换算精确为原值。跨币种先乘后除，减少中间的小数误差。
-        station_loss = unit_loss if loss_currency == online.currency else unit_loss * to_rate / from_rate
+        station_loss = unit_loss if loss_currency == station_currency else unit_loss * to_rate / from_rate
         target_actual = current + station_loss
         discount = current / retail
         # 上传的是含 VAT 零售价。用价格比值反推并按站点步长舍入，可支持 0.025 等档位。
