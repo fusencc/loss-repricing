@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from email import policy
 from email.parser import BytesParser
@@ -83,7 +83,8 @@ def contract():
         },
         "sites": {
             "MY": {"verified": True, "price_step": "0.01", "rounding": "ROUND_HALF_UP",
-                   "upload_column": "直发仓税后价格", "version": "my-v1", "fee_model_version": "fees-v1"},
+                   "upload_column": "直发仓税后价格", "version": "my-v1", "fee_model_version": "fees-v1",
+                   "warehouses": ["direct"]},
         },
         "submit": {
             "verified": True, "version": "upload-v1", "shop_labels": {"001": "模板专用店名"},
@@ -91,13 +92,14 @@ def contract():
         },
         "lookup": {
             "verified": True, "version": "lookup-v1", "service": "vendor", "method": "POST", "path": "/actual",
+            "max_age_seconds": 300,  # 合成测试合同，不是公司已确认阈值。
             "json": {
                 "shop": "{shop_id}", "pid": "{product_id}", "item": "{item_id}", "sku": "{sku}",
                 "site": "{site}", "platform": "{platform}", "warehouse": "{warehouse}",
                 "run": "{execution_id}", "job": "{task_id}",
             },
             "field_map": KEY_MAP | {
-                "actual_price": "value", "observed_at": "readTime", "effective_at": "effectiveTime",
+                "actual_price": "value", "currency": "ccy", "observed_at": "readTime", "effective_at": "effectiveTime",
                 "price_basis": "basis", "row_status": "state", "task_id": "job",
             },
             "rejected_status": "denied",
@@ -106,8 +108,10 @@ def contract():
 
 
 @pytest.fixture
-def make_adapter(tmp_path):
+def make_adapter(tmp_path, monkeypatch):
     from app.adapters.http import HttpAdapter
+
+    monkeypatch.setattr("app.adapters.http._utcnow", lambda: datetime.fromisoformat(OBSERVED))
 
     def make(config, handler, *, enabled=True):
         path = tmp_path / "contract.json"
@@ -124,6 +128,53 @@ def make_adapter(tmp_path):
 
 def never_call(request):
     pytest.fail("此合同不能发出 HTTP 请求")
+
+
+def test_open_api_password_login_is_lazy_and_reuses_token(contract, tmp_path):
+    from app.adapters.http import HttpAdapter
+
+    contract["services"]["erp"] = {
+        "base_url": "http://103.198.125.2:16777", "allow_http_for_internal": True,
+    }
+    contract_path = tmp_path / "contract.json"
+    contract_path.write_text(json.dumps(contract), encoding="utf-8")
+    settings = Settings(
+        live_contract_path=contract_path, erp_token="", vendor_token="test-secret-v",
+        erp_username="sample-user", erp_password="sample-password",
+    )
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.path)
+        if request.url.path == "/open/system/innerOpen/login":
+            assert json.loads(request.content) == {
+                "username": "sample-user", "password": "sample-password",
+            }
+            return httpx.Response(200, json={
+                "success": True, "code": 200, "data": {"accessToken": "sample-token"},
+            })
+        assert request.headers["Authorization"] == "Bearer sample-token"
+        return httpx.Response(200, json={"success": True, "code": 200, "data": []})
+
+    adapter = HttpAdapter(settings, client=httpx.Client(transport=httpx.MockTransport(handler)))
+    assert calls == []
+    for _ in range(2):
+        assert adapter._request("POST", "erp", "/open/shop/queryShop", json={})["success"]
+    assert calls.count("/open/system/innerOpen/login") == 1
+
+
+def test_open_api_credentials_never_sent_to_another_origin(contract, tmp_path):
+    from app.adapters.http import HttpAdapter
+
+    contract_path = tmp_path / "contract.json"
+    contract_path.write_text(json.dumps(contract), encoding="utf-8")
+    settings = Settings(
+        live_contract_path=contract_path, erp_token="", vendor_token="test-secret-v",
+        erp_username="sample-user", erp_password="sample-password",
+    )
+    adapter = HttpAdapter(settings, client=httpx.Client(transport=httpx.MockTransport(never_call)))
+    with pytest.raises(SourceUnavailable):
+        adapter._request("POST", "erp", "/open/shop/queryShop", json={})
 
 
 def collection_response(request):
@@ -275,7 +326,11 @@ def test_disabled_submit_does_not_call_http(contract, make_adapter):
     ({"product": PRODUCT | {"warehouse": "overseas"}}, "unknown"),
     ({"readTime": None}, "unknown"),
     ({"readTime": "2026-11-05T09:00:00"}, "unknown"),
+    ({"readTime": "2026-11-05T08:54:59+08:00", "effectiveTime": None}, "unknown"),
+    ({"readTime": "2026-11-05T08:55:00+08:00", "effectiveTime": None}, "accepted"),
     ({"basis": "retail_including_vat"}, "unknown"),
+    ({"ccy": "CNY"}, "unknown"),
+    ({"ccy": None}, "unknown"),
     ({"value": None}, "unknown"),
     ({"state": "denied", "job": "different"}, "unknown"),
     ({"state": "denied", "value": None}, "rejected"),
@@ -285,14 +340,50 @@ def test_lookup_requires_actual_price_and_same_identity_or_bound_rejection(contr
         payload = json.loads(request.content)
         assert (payload["run"], payload["job"], payload["sku"], payload["shop"]) == ("exec-one", "job-1", "004", "001")
         return httpx.Response(200, json={
-            "product": PRODUCT, "value": "11.075", "readTime": OBSERVED,
+            "product": PRODUCT, "value": "11.075", "ccy": "MYR", "readTime": OBSERVED,
             "effectiveTime": OBSERVED, "basis": "actual_including_vat", "state": "applied", "job": "job-1",
         } | change)
 
     result = make_adapter(contract, handler).lookup("exec-one", "job-1", VariantKey(**IDENTITY))
     assert result.status == expected
     if expected == "accepted":
-        assert result.actual_price == Decimal("11.075") and result.observed_at.isoformat() == OBSERVED
+        assert result.actual_price == Decimal("11.075")
+        assert result.observed_at.isoformat() == change.get("readTime", OBSERVED)
+
+
+def test_missing_lookup_currency_mapping_disables_submission(contract, make_adapter):
+    del contract["lookup"]["field_map"]["currency"]
+    adapter = make_adapter(contract, never_call)
+    assert not adapter.readiness()["contract_ready"]
+    assert adapter.submit("exec-one", decision()).status == "rejected"
+
+
+def test_missing_lookup_currency_response_remains_unknown(contract, make_adapter):
+    def handler(request):
+        return httpx.Response(200, json={
+            "product": PRODUCT, "value": "11.075", "readTime": OBSERVED,
+            "effectiveTime": OBSERVED, "basis": "actual_including_vat", "state": "applied", "job": "job-1",
+        })
+
+    result = make_adapter(contract, handler).lookup("exec-one", "job-1", VariantKey(**IDENTITY))
+    assert result.status == "unknown" and result.actual_price is None
+
+
+@pytest.mark.parametrize("warehouses", [None, [], ["overseas"]])
+def test_upload_requires_confirmed_warehouse_scope(contract, make_adapter, warehouses):
+    if warehouses is None:
+        del contract["sites"]["MY"]["warehouses"]
+    else:
+        contract["sites"]["MY"]["warehouses"] = warehouses
+    assert make_adapter(contract, never_call).submit("exec-one", decision()).status == "rejected"
+
+
+@pytest.mark.parametrize("age", [None, 0, -1, True, "300"])
+def test_lookup_needs_confirmed_positive_observation_age(contract, make_adapter, age):
+    contract["lookup"]["max_age_seconds"] = age
+    adapter = make_adapter(contract, never_call)
+    assert not adapter.readiness()["contract_ready"]
+    assert adapter.submit("exec-one", decision()).status == "rejected"
 
 
 def test_example_is_disabled_before_any_request(make_adapter):
@@ -324,7 +415,7 @@ def test_numeric_task_echo_matches_upload_identifier(contract, make_adapter):
             return httpx.Response(200, json={"resp_code": 0, "resp_msg": "上传完成", "datas": {"job": 42}})
         assert json.loads(request.content)["job"] == "42"
         return httpx.Response(200, json={
-            "product": PRODUCT, "value": None, "readTime": OBSERVED, "effectiveTime": None,
+            "product": PRODUCT, "value": None, "ccy": None, "readTime": OBSERVED, "effectiveTime": None,
             "basis": "actual_including_vat", "state": "denied", "job": 42,
         })
 

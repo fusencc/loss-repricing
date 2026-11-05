@@ -1,6 +1,6 @@
 """可插入经审计数据合同的 HTTP 边界。公司字段由合同明示，默认关闭真实请求。"""
 from contextvars import ContextVar
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import json
 import logging
@@ -17,7 +17,7 @@ from app.adapters.normalization import (
     source_stamp, source_time, valid_path, variant_key,
 )
 from app.config import Settings
-from app.domain.engine import REQUIRED_SOURCES
+from app.domain.engine import REQUIRED_SOURCES, SITE_CURRENCIES
 from app.domain.types import Decision, SiteContract, Snapshot, VariantKey
 
 
@@ -50,6 +50,10 @@ for _logger_name in (
     "httpx", "httpcore.connection", "httpcore.http11", "httpcore.http2", "httpcore.proxy", "httpcore.socks",
 ):
     logging.getLogger(_logger_name).addFilter(_PrivateRequestFilter())
+
+
+def _utcnow():
+    return datetime.now(timezone.utc)
 
 
 def _label(value):
@@ -212,6 +216,7 @@ def _check_lookup(spec, services):
     if (
         spec.get("verified") is not True or not {"shop_id", "product_id"} <= used
         or not used & {"item_id", "sku"}
+        or type(spec.get("max_age_seconds")) is not int or spec["max_age_seconds"] <= 0
     ):
         raise ValueError("实际价查询合同未确认")
     _fields(spec, LOOKUP_FIELDS, LOOKUP_OPTIONAL)
@@ -228,6 +233,20 @@ class HttpAdapter:
     def __init__(self, settings: Settings, client: httpx.Client | None = None):
         self._enabled = settings.live_submit_enabled
         self._tokens = {"erp": settings.erp_token, "vendor": settings.vendor_token}
+        self._erp_credentials = None
+        # 凭据从独立环境变量或本机.env读取，不写入数据合同、业务快照或日志。
+        # 登录合同依据衡哲开放文档 /474419940e0，已于2026-11-05实测正式环境。
+        if (
+            settings.erp_open_api_url in {
+                "http://103.198.125.2:16777/open", "http://103.198.125.5:15672/open",
+            }
+            and settings.erp_username and settings.erp_password.get_secret_value()
+        ):
+            self._erp_credentials = {
+                "base_url": settings.erp_open_api_url,
+                "username": settings.erp_username,
+                "password": settings.erp_password.get_secret_value(),
+            }
         self._client = client if client is not None else httpx.Client(
             timeout=TIMEOUT, verify=True, follow_redirects=False, trust_env=False,
         )
@@ -254,9 +273,14 @@ class HttpAdapter:
         services = config.get("services")
         for service, token in self._tokens.items():
             try:
-                if not token:
+                origin = _origin(services[service])
+                password_login = (
+                    service == "erp" and self._erp_credentials is not None
+                    and self._erp_credentials["base_url"] == origin + "/open"
+                )
+                if not token and not password_login:
                     raise ValueError("缺少服务凭据")
-                self._services[service] = _origin(services[service])
+                self._services[service] = origin
             except (KeyError, TypeError, ValueError, httpx.InvalidURL):
                 # 各请求只使用所属服务的独立环境令牌。异常不回显配置内容。
                 continue
@@ -280,9 +304,11 @@ class HttpAdapter:
                     if (
                         spec.get("verified") is not True or contract.price_step <= 0
                         or contract.upload_column not in VAT_UPLOAD_COLUMNS or not _label(contract.version)
-                        or not _label(spec.get("fee_model_version"))
+                        or not _label(spec.get("fee_model_version")) or not contract.warehouses
                     ):
                         continue
+                    for warehouse in contract.warehouses:
+                        identity_text(warehouse)
                 except BAD_DATA:
                     continue
                 self._sites[site] = contract
@@ -320,9 +346,26 @@ class HttpAdapter:
         }
 
     def _request(self, method, service, path, *, headers=None, **kwargs):
+        if service not in self._services:
+            raise SourceUnavailable("来源服务或凭据尚未配置")
         try:
             context = _private_request.set(True)
             try:
+                if service == "erp" and not self._tokens[service]:
+                    # 使用本轮登录所得令牌；不复用Apifox面板或其他系统的令牌。
+                    login = self._client.post(
+                        self._erp_credentials["base_url"] + "/system/innerOpen/login",
+                        json={key: self._erp_credentials[key] for key in ("username", "password")},
+                        timeout=TIMEOUT, follow_redirects=False,
+                    )
+                    login.raise_for_status()
+                    payload = login.json()
+                    if payload.get("success") is not True or payload.get("code") != 200:
+                        raise SourceUnavailable("ERP开放接口登录未成功")
+                    token = payload["data"].get("accessToken") or payload["data"].get("token")
+                    if not isinstance(token, str) or not token.strip():
+                        raise SourceUnavailable("ERP开放接口登录未返回有效令牌")
+                    self._tokens[service] = re.sub(r"^Bearer\s+", "", token, flags=re.IGNORECASE).strip()
                 response = self._client.request(
                     method, self._services[service] + path,
                     headers={"Authorization": f"Bearer {self._tokens[service]}", **(headers or {})},
@@ -332,7 +375,7 @@ class HttpAdapter:
                 return response.json(parse_float=Decimal)
             finally:
                 _private_request.reset(context)
-        except (httpx.HTTPError, httpx.InvalidURL, UnicodeError, ValueError, TypeError):
+        except (httpx.HTTPError, httpx.InvalidURL, UnicodeError, *BAD_DATA):
             # 不携带响应、请求 URL、令牌或上游异常链。提交请求的异常由上层归为未知。
             raise SourceUnavailable("来源接口暂不可用或返回格式无效") from None
 
@@ -424,7 +467,8 @@ class HttpAdapter:
         if not self._enabled or not self.readiness()["contract_ready"]:
             return SubmitResult("rejected", message="真实提交未开启或合同尚未确认")
         site = self._sites.get(decision.key.site)
-        if site is None or not decision.ready or site.upload_column != decision.upload_column:
+        if (site is None or not decision.ready or site.upload_column != decision.upload_column
+                or decision.key.warehouse not in site.warehouses):
             return SubmitResult("rejected", message="商品未通过站点合同或算价校验")
         spec = self._submit
         try:
@@ -492,8 +536,16 @@ class HttpAdapter:
                 raise ValueError("拒绝回执无法绑定")
             if fields["price_basis"] != PRICE_BASIS:
                 raise ValueError("实际价口径不匹配")
+            # 依据设计中的同币种有效价核验：站点身份不能替代回读金额币种证据。
+            # currency 为内部规范名，真实字段须由合同映射；缺失时保持未知，不猜测或换汇。
+            if fields["currency"] != SITE_CURRENCIES[key.site]:
+                raise ValueError("实际价币种与站点币不一致")
             actual_price = money(fields["actual_price"])
             observed_at = source_time(fields["observed_at"])
+            # “当前有效价”需要合同明确可接受的来源年龄；本项目不替公司猜一个统一阈值。
+            # 过期观测只能说明过去的价，不得结束未知执行或解锁新提交。
+            if (_utcnow() - observed_at).total_seconds() > spec["max_age_seconds"]:
+                raise ValueError("实际价观测已超过合同有效期")
             effective = fields.get("effective_at")
             effective_at = source_time(effective) if effective is not None else None
             if actual_price <= 0 or (effective_at is not None and effective_at > observed_at):

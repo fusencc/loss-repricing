@@ -60,6 +60,12 @@ def create_app(settings=None):
         return response
 
     app.include_router(router)
+    from app.api.erp_rates import router as erp_rates_router
+    app.include_router(erp_rates_router)
+    from app.api.coordination import router as coordination_router
+    app.include_router(coordination_router)
+    from app.api.notifications import router as notifications_router
+    app.include_router(notifications_router)
     frontend = PROJECT_ROOT / "frontend" / "dist"
     if frontend.is_dir():
         app.mount("/assets", StaticFiles(directory=frontend / "assets"), name="assets")

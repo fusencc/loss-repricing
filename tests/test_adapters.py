@@ -19,6 +19,9 @@ def test_demo_has_complete_source_and_persistent_effective_receipt(tmp_path):
     recreated = DemoAdapter(tmp_path)
     result = recreated.lookup("exec-one", response.task_id, d.key)
     assert result.status == "accepted" and result.actual_price == d.upload_price * d.discount
+    current = next(row for row in recreated.collect(snapshot.business_date).online if row.key == d.key)
+    assert current.retail_price == d.upload_price
+    assert current.marketing_price == result.actual_price
 
 
 def test_demo_unknown_execution_does_not_invent_success(tmp_path):

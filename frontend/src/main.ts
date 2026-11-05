@@ -1,6 +1,6 @@
 import { createApp, h } from 'vue'
 import {
-  ElAlert, ElButton, ElConfigProvider, ElDialog, ElDrawer, ElForm, ElFormItem,
+  ElAlert, ElButton, ElCheckbox, ElConfigProvider, ElDialog, ElDrawer, ElForm, ElFormItem,
   ElIcon, ElInput, ElLoading, ElOption, ElSelect, ElSwitch, ElTable, ElTableColumn, ElTag,
 } from 'element-plus'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
@@ -10,7 +10,7 @@ import './style.css'
 
 const app = createApp({ render: () => h(ElConfigProvider, { locale: zhCn }, () => h(App)) })
 for (const component of [
-  ElAlert, ElButton, ElDialog, ElDrawer, ElForm, ElFormItem, ElIcon, ElInput,
+  ElAlert, ElButton, ElCheckbox, ElDialog, ElDrawer, ElForm, ElFormItem, ElIcon, ElInput,
   ElOption, ElSelect, ElSwitch, ElTable, ElTableColumn, ElTag,
 ]) {
   app.use(component)

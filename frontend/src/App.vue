@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ArrowRight, Bell, CircleCheck, Connection, DataAnalysis, Files, Lock, RefreshRight, Setting, SwitchButton, WarningFilled } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import axios from 'axios'
+import * as dd from 'dingtalk-jsapi'
 import {
   api, display, errorMessage, modeLabel, stateLabel, statuses, timeLabel,
   type Batch, type Contracts, type Identifier, type Item, type ItemStatus,
@@ -11,12 +12,19 @@ import {
 import ItemTable from './ItemTable.vue'
 import ItemDrawer from './ItemDrawer.vue'
 import SettingsPanel from './SettingsPanel.vue'
+import ErpRatesPanel from './ErpRatesPanel.vue'
 import ProtectionPanel from './ProtectionPanel.vue'
+import CoordinationPanel from './CoordinationPanel.vue'
+import ScopesPanel from './ScopesPanel.vue'
+import NotificationsPanel from './NotificationsPanel.vue'
+import type { Principal } from './api'
 
 const pages = [
   { id: 'overview', label: '运行概览', icon: DataAnalysis, description: '查看当前环境、处理进度和最近批次。' },
   { id: 'batches', label: '运行批次', icon: Files, description: '按业务日期查看批次、商品结果和计算依据。' },
   { id: 'exceptions', label: '异常处理', icon: Bell, description: '查看待处理和待核验商品，按需要重新评估。' },
+  { id: 'notifications', label: '通知收件箱', icon: Bell, description: '查看范围内通知，确认业务处理，区分投递与价格生效。' },
+  { id: 'coordination', label: '账号与归属', icon: Lock, description: '配置独立账号、负责范围与自动托管授权。' },
   { id: 'settings', label: '运行配置', icon: Setting, description: '管理暂停开关、试点范围和定时检查。' },
   { id: 'protections', label: '保护名单', icon: Lock, description: '按店铺、站点和主 SKU 管理人工保护。' },
 ] as const
@@ -29,6 +37,19 @@ function route(): Page {
 const page = ref<Page>(route())
 const currentPage = computed(() => pages.find(entry => entry.id === page.value)!)
 const username = ref('')
+const principal = ref<Principal | null>(null)
+const isAdmin = computed(() => principal.value?.role === 'admin')
+const visiblePages = computed(() => pages.filter(entry => isAdmin.value || !['settings', 'protections', 'coordination'].includes(entry.id)))
+const dingConfig = ref<{ enabled?: boolean; configured?: boolean; corp_id?: string; client_id?: string; message?: string }>({})
+async function setPrincipal() { const { data } = await api.get<Principal>('/auth/me'); principal.value = data; username.value = data.username; if (!visiblePages.value.some(p => p.id === page.value)) page.value = 'overview' }
+async function dingLogin() {
+  loginBusy.value = true; loginError.value = ''
+  try {
+    if (dd.env.platform === 'notInDingTalk') throw new Error('请在钉钉内打开此页面，或使用独立账号登录。')
+    const code = await new Promise<string>((resolve, reject) => dd.requestAuthCode({ corpId: dingConfig.value.corp_id || '', clientId: dingConfig.value.client_id || '', onSuccess: (r: { code?: string; authCode?: string }) => resolve(r.code || r.authCode || ''), onFail: reject }))
+    await api.post('/auth/dingtalk', { code }); await setPrincipal(); await loadPage()
+  } catch (error) { loginError.value = errorMessage(error) } finally { loginBusy.value = false }
+}
 const initialized = ref(false)
 const credentials = ref({ username: '', password: '' })
 const loginError = ref('')
@@ -85,6 +106,7 @@ const interceptor = api.interceptors.response.use(response => response, (error: 
 
 function endSession() {
   username.value = ''
+  principal.value = null
   overview.value = null
   batches.value = []
   items.value = []
@@ -105,13 +127,13 @@ async function init() {
     .then(response => { healthMode.value = response.data.mode })
     .catch(() => undefined)
   try {
-    const { data } = await api.get<{ username: string }>('/auth/me')
-    username.value = data.username
+    await setPrincipal()
   } catch (error) {
     if (!axios.isAxiosError(error) || error.response?.status !== 401) loginError.value = errorMessage(error)
   } finally {
     initialized.value = true
   }
+  try { dingConfig.value = (await api.get('/auth/dingtalk-config')).data } catch { /* 本地账号仍可登录 */ }
   await health
   if (username.value) await loadPage()
 }
@@ -120,10 +142,10 @@ async function login() {
   loginError.value = ''
   loginBusy.value = true
   try {
-    const { data } = await api.post<{ username: string }>('/auth/login', {
+    await api.post('/auth/login', {
       username: credentials.value.username.trim(), password: credentials.value.password,
     })
-    username.value = data.username
+    await setPrincipal()
     credentials.value.password = ''
     await loadPage()
   } catch (error) {
@@ -154,7 +176,8 @@ function showStatus(status: ItemStatus) {
   navigate('exceptions')
 }
 function onRoute() {
-  page.value = route()
+  const target = route()
+  page.value = principal.value && !visiblePages.value.some(p => p.id === target) ? 'overview' : target
 }
 watch(page, () => {
   activeBatch.value = null
@@ -191,7 +214,7 @@ async function loadPage() {
         settings.value = configuration.data
         contracts.value = readiness.data
       }
-    } else {
+    } else if (targetPage === 'protections' && isAdmin.value) {
       const { data } = await api.get<Protection[]>('/protections')
       if (currentRequest === pageRequest) protections.value = data
     }
@@ -352,7 +375,7 @@ onUnmounted(() => {
   <main v-else-if="!username" class="login-shell">
     <div class="login-card">
       <div class="brand-mark"><el-icon><DataAnalysis /></el-icon></div>
-      <p class="eyebrow">电商运营 · 管理员入口</p>
+      <p class="eyebrow">电商运营 · 销售协作入口</p>
       <h1>亏损补亏工作台</h1>
       <p class="muted">登录后查看调价批次、处理异常和核验结果。</p>
       <span v-if="mode" class="mode-pill" :class="`mode-${mode}`">{{ modeLabel(mode) }}</span>
@@ -362,6 +385,8 @@ onUnmounted(() => {
         <el-alert v-if="loginError" :title="loginError" type="error" show-icon :closable="false" />
         <el-button class="login-button" type="primary" native-type="submit" :loading="loginBusy" :disabled="!credentials.username.trim() || !credentials.password">登录工作台</el-button>
       </el-form>
+      <el-button class="login-button" :disabled="!dingConfig.enabled || loginBusy" @click="dingLogin">钉钉账号登录</el-button>
+      <p class="muted">{{ dingConfig.message || (dingConfig.enabled ? '已绑定的账号可在钉钉内免登。' : '钉钉免登未配置；请使用分配的独立账号。') }}</p>
     </div>
   </main>
 
@@ -373,7 +398,7 @@ onUnmounted(() => {
       </a>
       <p class="nav-label">运营管理</p>
       <nav aria-label="运营管理">
-        <a v-for="entry in pages" :key="entry.id" :href="`#${entry.id}`" :aria-current="page === entry.id ? 'page' : undefined" :class="{ selected: page === entry.id }">
+        <a v-for="entry in visiblePages" :key="entry.id" :href="`#${entry.id}`" :aria-current="page === entry.id ? 'page' : undefined" :class="{ selected: page === entry.id }">
           <el-icon><component :is="entry.icon" /></el-icon><span>{{ entry.label }}</span>
         </a>
       </nav>
@@ -385,7 +410,7 @@ onUnmounted(() => {
         <div class="breadcrumb"><span>运营工作台</span><el-icon><ArrowRight /></el-icon><strong>{{ currentPage.label }}</strong></div>
         <div class="topbar-actions">
           <span v-if="mode" class="mode-pill" :class="`mode-${mode}`"><span class="mode-dot"></span>{{ modeLabel(mode) }}</span>
-          <span class="user-name">{{ username }}</span>
+          <span class="user-name">{{ principal?.display_name || username }} · {{ { admin: '管理员', manager: '主管', sales: '销售员' }[principal?.role || 'sales'] }}</span>
           <el-button text :icon="SwitchButton" :loading="logoutBusy" @click="logout">退出</el-button>
         </div>
       </header>
@@ -408,19 +433,20 @@ onUnmounted(() => {
               <p class="eyebrow"><el-icon><Connection /></el-icon> 当前运行环境</p>
               <h2>{{ mode ? modeLabel(mode) : '正在读取环境' }}</h2>
               <p>{{ modeCopy }}</p>
-              <div v-if="overview" class="hero-badges">
+              <div v-if="overview && isAdmin" class="hero-badges">
                 <span v-if="overview.settings.paused" class="hero-badge warning">全局已暂停</span>
                 <span v-else class="hero-badge">{{ overview.settings.autonomous_enabled ? '自动运行已开启' : '自动运行未开启' }}</span>
                 <span class="hero-badge">{{ overview.settings.schedule_enabled ? '定时检查已开启' : '定时检查未开启' }}</span>
                 <span v-if="overview.delayed" class="hero-badge warning">数据检查已延迟</span>
               </div>
             </div>
-            <div class="hero-actions">
+            <div v-if="isAdmin" class="hero-actions">
               <el-button v-if="mode === 'demo'" type="primary" :loading="actionBusy && actionLabel === '运行演示批次'" :disabled="actionBusy || !!activeJob" @click="runJob('/demo/run', '运行演示批次')">运行演示批次</el-button>
               <el-button v-else-if="mode === 'file'" type="primary" :loading="actionBusy && actionLabel === '启动批次'" :disabled="actionBusy || !!activeJob" @click="runJob('/batches/run', '启动批次')">启动批次</el-button>
               <el-button plain :disabled="actionBusy || !!activeJob" @click="runJob('/reconcile', '回读核验')">回读核验</el-button>
             </div>
           </section>
+          <ScopesPanel v-if="!isAdmin" />
           <section class="stats" aria-label="商品处理状态">
             <button v-for="card in statusCards" :key="card.label" class="stat-card" type="button" @click="showStatus(card.label)">
               <span class="stat-label"><span :class="`stat-dot ${card.color}`"></span>{{ card.label }}<el-icon><ArrowRight /></el-icon></span>
@@ -443,8 +469,8 @@ onUnmounted(() => {
               <p v-else class="empty-inline">{{ overview ? '暂无运行批次。' : '等待批次数据。' }}</p>
               <div class="panel-footer">累计批次 <strong>{{ overview?.batch_count ?? '—' }}</strong></div>
             </section>
-            <section class="panel overview-panel">
-              <header class="panel-heading"><h2>执行就绪状态</h2><el-button type="primary" link @click="navigate('settings')">查看配置 <el-icon><ArrowRight /></el-icon></el-button></header>
+            <section v-if="isAdmin" class="panel overview-panel">
+              <header class="panel-heading"><h2>执行就绪状态</h2><el-button v-if="isAdmin" type="primary" link @click="navigate('settings')">查看配置 <el-icon><ArrowRight /></el-icon></el-button></header>
               <dl v-if="overview" class="readiness-list">
                 <div><dt>真实提交开关</dt><dd>{{ overview.readiness.live_enabled ? '已开启' : '未开启' }}</dd></div>
                 <div><dt>数据接口就绪</dt><dd>{{ overview.readiness.contract_ready ? '已就绪' : '待补齐' }}</dd></div>
@@ -494,14 +520,17 @@ onUnmounted(() => {
           <ItemTable :items="items" :loading="loading" @select="openItem" />
         </section>
 
-        <div v-else-if="page === 'settings'" v-loading="loading" class="page-content">
+        <NotificationsPanel v-else-if="page === 'notifications'" :admin="isAdmin" @select="openItem" />
+        <CoordinationPanel v-else-if="page === 'coordination' && isAdmin" />
+        <div v-else-if="page === 'settings' && isAdmin" v-loading="loading" class="page-content">
+          <ErpRatesPanel />
           <SettingsPanel v-if="settings && contracts" :settings="settings" :contracts="contracts" :live-enabled="overview?.readiness.live_enabled ?? false" :save="saveSettings" />
         </div>
 
-        <ProtectionPanel v-else :protections="protections" :loading="loading" :add="addProtection" :remove="removeProtection" />
+        <ProtectionPanel v-else-if="page === 'protections' && isAdmin" :protections="protections" :loading="loading" :add="addProtection" :remove="removeProtection" />
       </main>
     </div>
-    <ItemDrawer :open="drawerOpen" :item="item" :loading="itemLoading" :error="itemError" :busy="actionBusy || !!activeJob || itemLoading" @close="closeItem" @reevaluate="reevaluate" />
+    <ItemDrawer :actor-role="principal?.role || 'sales'" :actor-id="principal?.id || ''" :admin="isAdmin" :open="drawerOpen" :item="item" :loading="itemLoading" :error="itemError" :busy="actionBusy || !!activeJob || itemLoading" @close="closeItem" @refresh="item && openItem(item)" @reevaluate="reevaluate" />
   </div>
 </template>
 

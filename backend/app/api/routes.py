@@ -9,10 +9,14 @@ from sqlalchemy import select, func
 from app.models import Batch, Item, Execution, Job, Protection, Audit, WorkerLease
 from app.db import transaction
 from app.services.store import settings_value, update_settings, enqueue, utcnow, stamp, BEIJING, current_items
-from app.api.auth import COOKIE, require_admin, make_session, password_matches
+from app.api.auth import COOKIE, require_admin, require_user, make_session, password_matches
+from app.services.coordination import can_access, verify_password, principal
+from app.models.coordination import UserAccount
+from app.api.coordination import item_collaboration
+from dataclasses import asdict
 
 router = APIRouter(prefix="/api")
-secured = APIRouter(dependencies=[Depends(require_admin)])
+secured = APIRouter(dependencies=[Depends(require_user)])
 
 
 class Login(BaseModel):
@@ -49,14 +53,43 @@ def batch_view(batch):
     return {k: v for k, v in columns(batch).items() if k not in {"snapshot", "run_key"}}
 
 
-def item_view(session, item):
+def item_view(session, item, actor=None):
     value = columns(item)
     from app.domain.types import VariantKey
     value["target_id"] = VariantKey.model_validate(item.key).target_identity()
     execution = session.scalar(select(Execution).where(Execution.item_id == item.id))
     value["execution"] = columns(execution) if execution else None
     value["evidence"] = execution.evidence if execution else {}
+    if actor: value.update(item_collaboration(session,item,actor))
     return value
+
+
+def consistent_main_sku(item):
+    rows=item.decision.get('trace',{}).get('online_rows',[])
+    if not rows or any(not isinstance(r,dict) or r.get('key')!=item.key for r in rows):return None
+    values={r.get('main_sku') for r in rows}
+    return next(iter(values)) if len(values)==1 else None
+
+
+def visible_batch(session,batch_id,actor):
+    return actor.role=="admin" or any(can_access(session,actor,i.key) for i in session.scalars(select(Item).where(Item.batch_id==batch_id)))
+
+def scoped_batch(session,batch,actor):
+    value=batch_view(batch)
+    if actor.role!="admin":
+        rows=[i for i in session.scalars(select(Item).where(Item.batch_id==batch.id)) if can_access(session,actor,i.key)]
+        value['summary']=dict(Counter(i.status for i in rows));value['error']=None
+    return value
+
+def job_visible(session,job,actor):
+    # Batch jobs can contain unrelated errors/counts. Only an explicit owned item or correction is visible.
+    item_id=job.payload.get('item_id')
+    if job.kind=='correction':
+        from app.models.coordination import Correction
+        c=session.get(Correction,job.payload.get('correction_id'))
+        item_id=c.item_id if c else None
+    item=session.get(Item,item_id) if item_id else None
+    return bool(item and can_access(session,actor,item.key))
 
 
 @router.get("/health")
@@ -74,18 +107,27 @@ def login(body: Login, request: Request, response: Response):
     recent = [t for t in attempts.get(address, []) if now - t < 300]
     if len(recent) >= 10:
         raise HTTPException(429, "尝试次数过多，请5分钟后再试")
-    if body.username != config.admin_username or not password_matches(body.password, config.admin_password):
-        attempts[address] = recent + [now]
-        raise HTTPException(401, "账号或密码不正确")
-    attempts.pop(address, None)
-    response.set_cookie(COOKIE, make_session(body.username, config.session_secret), httponly=True,
-                        secure=config.secure_cookie, samesite="strict", max_age=28800, path="/")
-    return {"username": body.username}
+    user=None
+    if body.username == config.admin_username and password_matches(body.password, config.admin_password):
+        token=make_session(body.username,config.session_secret)
+        result={"id":"admin","username":body.username,"display_name":"管理员","role":"admin","can_correct":True}
+    else:
+        with request.app.state.factory() as session:
+            user=session.scalar(select(UserAccount).where(UserAccount.username==body.username))
+            if not user or not user.active or not verify_password(body.password,user.password_hash):
+                attempts[address]=recent+[now]
+                raise HTTPException(401,"账号或密码不正确")
+            token=make_session(user.username,config.session_secret,user.id,user.session_version)
+            result=asdict(principal(user))
+    attempts.pop(address,None)
+    response.set_cookie(COOKIE,token,httponly=True,secure=config.secure_cookie,samesite="strict",max_age=28800,path="/")
+    return result
+
 
 
 @secured.get("/auth/me")
-def me(user=Depends(require_admin)):
-    return {"username": user}
+def me(user=Depends(require_user)):
+    return asdict(user)
 
 
 @secured.post("/auth/logout")
@@ -95,33 +137,35 @@ def logout(response: Response):
 
 
 @secured.get("/overview")
-def overview(request: Request):
+def overview(request: Request, actor=Depends(require_user)):
     state = request.app.state
     with state.factory() as session:
         counts = {name: 0 for name in ["本轮不调", "待处理", "待核验", "已核验"]}
-        counts.update(Counter(item.status for item in current_items(session)))
-        latest = session.scalar(select(Batch).order_by(Batch.created_at.desc()).limit(1))
+        visible=[i for i in current_items(session) if can_access(session,actor,i.key)]
+        visible_batch_ids={b.id for b in session.scalars(select(Batch))} if actor.role=="admin" else {i.batch_id for i in session.scalars(select(Item)) if can_access(session,actor,i.key)}
+        counts.update(Counter(item.status for item in visible))
+        latest = session.scalar(select(Batch).where(Batch.id.in_(visible_batch_ids)).order_by(Batch.created_at.desc()).limit(1)) if visible_batch_ids else None
         worker = session.get(WorkerLease, "worker")
         today = utcnow().astimezone(BEIJING)
         delayed = today.hour >= 11 and (latest is None or latest.business_date != today.date().isoformat())
-        return {"mode": state.config.adapter_mode, "counts": counts, "batch_count": session.scalar(select(func.count()).select_from(Batch)),
-                "latest_batch": batch_view(latest) if latest else None, "worker": columns(worker) if worker else {"heartbeat": None, "last_error": None},
-                "settings": settings_value(state.factory), "readiness": {**state.adapter.readiness(), "live_enabled": state.config.live_submit_enabled},
+        return {"mode": state.config.adapter_mode, "counts": counts, "batch_count": len(visible_batch_ids),
+                "latest_batch": scoped_batch(session,latest,actor) if latest else None, "worker": columns(worker) if worker and actor.role=="admin" else {"heartbeat": None, "last_error": None},
+                "settings": settings_value(state.factory) if actor.role=="admin" else {}, "readiness": {**state.adapter.readiness(), "live_enabled": state.config.live_submit_enabled} if actor.role=="admin" else {},
                 "delayed": delayed}
 
 
 @secured.get("/batches")
-def batches(request: Request):
+def batches(request: Request, actor=Depends(require_user)):
     with request.app.state.factory() as session:
-        return [batch_view(b) for b in session.scalars(select(Batch).order_by(Batch.created_at.desc()).limit(200))]
+        return [scoped_batch(session,b,actor) for b in session.scalars(select(Batch).order_by(Batch.created_at.desc())) if visible_batch(session,b.id,actor)][:200]
 
 
-@secured.post("/batches/run")
+@secured.post("/batches/run", dependencies=[Depends(require_admin)])
 def run(request: Request):
     return {"job_id": enqueue(request.app.state.factory, "run", {})}
 
 
-@secured.post("/demo/run")
+@secured.post("/demo/run", dependencies=[Depends(require_admin)])
 def demo(request: Request):
     if request.app.state.config.adapter_mode != "demo":
         raise HTTPException(409, "只有演示环境可运行演示批次")
@@ -133,16 +177,16 @@ def demo(request: Request):
 
 
 @secured.get("/batches/{batch_id}")
-def batch_detail(batch_id: str, request: Request):
+def batch_detail(batch_id: str, request: Request, actor=Depends(require_user)):
     with request.app.state.factory() as session:
         batch = session.get(Batch, batch_id)
-        if not batch:
+        if not batch or not visible_batch(session,batch_id,actor):
             raise HTTPException(404, "批次不存在")
-        return {**batch_view(batch), "items": [item_view(session, i) for i in session.scalars(select(Item).where(Item.batch_id == batch_id))]}
+        return {**scoped_batch(session,batch,actor), "items": [item_view(session,i,actor) for i in session.scalars(select(Item).where(Item.batch_id==batch_id)) if can_access(session,actor,i.key)]}
 
 
 @secured.get("/items")
-def items(request: Request, status: str | None = None, batch_id: str | None = None):
+def items(request: Request, status: str | None = None, batch_id: str | None = None, actor=Depends(require_user)):
     with request.app.state.factory() as session:
         if batch_id:
             query = select(Item).where(Item.batch_id == batch_id).order_by(Item.updated_at.desc(), Item.id.desc())
@@ -151,19 +195,19 @@ def items(request: Request, status: str | None = None, batch_id: str | None = No
             rows = session.scalars(query).all()
         else:
             rows = [row for row in current_items(session) if not status or row.status == status]
-        return [item_view(session, row) for row in rows[:1000]]
+        return [item_view(session,row,actor) for row in rows if can_access(session,actor,row.key)][:1000]
 
 
 @secured.get("/items/{item_id}")
-def item_detail(item_id: str, request: Request):
+def item_detail(item_id: str, request: Request, actor=Depends(require_user)):
     with request.app.state.factory() as session:
         item = session.get(Item, item_id)
-        if not item:
+        if not item or not can_access(session,actor,item.key):
             raise HTTPException(404, "记录不存在")
-        return item_view(session, item)
+        return item_view(session,item,actor)
 
 
-@secured.post("/items/{item_id}/reevaluate")
+@secured.post("/items/{item_id}/reevaluate", dependencies=[Depends(require_admin)])
 def reevaluate(item_id: str, request: Request, body: Reevaluate = Reevaluate()):
     with transaction(request.app.state.factory) as session:
         if not session.get(Item, item_id):
@@ -173,26 +217,26 @@ def reevaluate(item_id: str, request: Request, body: Reevaluate = Reevaluate()):
     return {"job_id": enqueue(request.app.state.factory, "run", {"item_id": item_id})}
 
 
-@secured.post("/reconcile")
+@secured.post("/reconcile", dependencies=[Depends(require_admin)])
 def reconcile(request: Request):
     return {"job_id": enqueue(request.app.state.factory, "reconcile", {})}
 
 
 @secured.get("/jobs/{job_id}")
-def job_detail(job_id: str, request: Request):
+def job_detail(job_id: str, request: Request, actor=Depends(require_user)):
     with request.app.state.factory() as session:
         job = session.get(Job, job_id)
-        if not job:
+        if not job or (actor.role!="admin" and not job_visible(session,job,actor)):
             raise HTTPException(404, "任务不存在")
         return {k: v for k, v in columns(job).items() if k not in {"owner", "dedupe_key", "payload"}}
 
 
-@secured.get("/settings")
+@secured.get("/settings", dependencies=[Depends(require_admin)])
 def get_runtime_settings(request: Request):
     return settings_value(request.app.state.factory)
 
 
-@secured.patch("/settings")
+@secured.patch("/settings", dependencies=[Depends(require_admin)])
 def patch_settings(body: Changes, request: Request):
     changes = body.model_dump(exclude_unset=True, exclude_none=True)
     if "pilot_shops" in changes:
@@ -204,12 +248,12 @@ def patch_settings(body: Changes, request: Request):
 
 
 @secured.get("/protections")
-def get_protections(request: Request):
+def get_protections(request: Request, actor=Depends(require_user)):
     with request.app.state.factory() as session:
-        return [columns(p) for p in session.scalars(select(Protection).where(Protection.active.is_(True)).order_by(Protection.created_at.desc()))]
+        return [columns(p) for p in session.scalars(select(Protection).where(Protection.active.is_(True)).order_by(Protection.created_at.desc())) if actor.role=="admin" or any(i.key.get("shop_id")==p.shop_id and i.key.get("site")==p.site and consistent_main_sku(i)==p.main_sku and can_access(session,actor,i.key) for i in session.scalars(select(Item)))]
 
 
-@secured.post("/protections")
+@secured.post("/protections", dependencies=[Depends(require_admin)])
 def add_protection(body: Protect, request: Request):
     with transaction(request.app.state.factory) as session:
         p = Protection(id=str(uuid4()), **body.model_dump(), active=True, created_at=stamp())
@@ -217,7 +261,7 @@ def add_protection(body: Protect, request: Request):
     return columns(p)
 
 
-@secured.delete("/protections/{protection_id}")
+@secured.delete("/protections/{protection_id}", dependencies=[Depends(require_admin)])
 def remove_protection(protection_id: str, request: Request):
     with transaction(request.app.state.factory) as session:
         protection = session.get(Protection, protection_id)
@@ -227,7 +271,7 @@ def remove_protection(protection_id: str, request: Request):
     return {"ok": True}
 
 
-@secured.get("/contracts")
+@secured.get("/contracts", dependencies=[Depends(require_admin)])
 def contracts(request: Request):
     return {"mode": request.app.state.config.adapter_mode, **request.app.state.adapter.readiness()}
 

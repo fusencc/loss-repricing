@@ -45,6 +45,9 @@ class Worker:
         now = time.time() if now is None else now
         if not self.acquire(now):
             return
+        if getattr(getattr(self.service, "config", None), "coordination_required", False):
+            from app.services.notifications import dispatch_notices
+            dispatch_notices(self.factory, self.service.config)
         config = settings_value(self.factory)
         local = datetime.fromtimestamp(now, timezone.utc).astimezone(BEIJING)
         if config["schedule_enabled"] and local.hour >= 8:
@@ -63,6 +66,9 @@ class Worker:
                             if job.payload.get("item_id") else self.service.run_batch(job.id))
             elif job.kind == "reconcile":
                 self.service.reconcile()
+            elif job.kind == "correction":
+                from app.services.corrections import run_correction
+                batch_id = run_correction(self.service, job.payload["correction_id"])
             else:
                 raise ValueError("未知任务类型")
         except SourceUnavailable:

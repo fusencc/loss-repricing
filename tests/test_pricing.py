@@ -26,7 +26,7 @@ def line(variant, **overrides):
     return SourceLine(**{
         "row_id": "001", "order_id": "0001", "source": "loss_allocatable",
         "key": variant, "main_sku": "主款", "quantity": "1", "loss_amount": "-1.2",
-        "currency": "MYR", "basis": "unit", **overrides,
+        "currency": "MYR", "basis": "unit", "allocation_reliable": True, **overrides,
     })
 
 
@@ -36,6 +36,7 @@ def online(variant, **overrides):
         "marketing_price": None, "current_margin": "-1", "fee_scope": "normal",
         "fee_model": FeeModel(revenue_factor="1", fixed_cost="10", version="f1", verified=True),
         "observed_at": NOW, "sales_7d": 20, "sales_start": START, "sales_end": END,
+        "sales_complete": True, "history_known": True,
         **overrides,
     })
 
@@ -43,7 +44,7 @@ def online(variant, **overrides):
 def contract(site="MY", **overrides):
     return SiteContract(**{
         "site": site, "verified": True, "price_step": "0.01",
-        "rounding": "ROUND_HALF_UP", "upload_column": "新零售价", "version": "c1",
+        "rounding": "ROUND_HALF_UP", "upload_column": "新零售价", "version": "c1", "warehouses": ["仓一"],
         **overrides,
     })
 

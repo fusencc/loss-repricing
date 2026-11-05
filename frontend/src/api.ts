@@ -56,6 +56,9 @@ export interface Item {
     trace: unknown
   } | null
   execution: Record<string, unknown> | null
+  control?: { mode: string; version: number; reason: string; handback_pending: boolean }
+  ownership?: Ownership | null
+  capabilities?: Record<string, boolean>
   evidence?: unknown
   updated_at: string
 }
@@ -141,9 +144,17 @@ export function errorMessage(error: unknown) {
   if (!axios.isAxiosError(error)) return error instanceof Error ? error.message : '操作失败，请重试。'
   if (!error.response) return '连接服务失败，请稍后重试。'
   const detail: unknown = error.response.data?.detail
+  if (error.response.status === 409) return `记录已发生变化，请刷新后按最新版本重试。${typeof detail === 'string' ? detail : ''}`
+  if (error.response.status === 403) return '当前账号没有该操作或商品范围的权限，请刷新归属后重试。'
   if (typeof detail === 'string' && detail) return detail
   if (Array.isArray(detail)) {
     return detail.map(entry => typeof entry?.msg === 'string' ? entry.msg : display(entry)).join('；')
   }
   return `操作失败（HTTP ${error.response.status}）。`
 }
+
+export interface Principal { id: string; username: string; display_name: string; role: 'admin' | 'manager' | 'sales'; can_correct: boolean }
+export interface UserAccount extends Principal { active: boolean; dingtalk_userid?: string | null }
+export interface Ownership { id: Identifier; platform: string; shop_id: string; site: string; target_id?: string | null; owner_id: string; owner_name?: string; supervisor_name?: string; supervisor_id?: string | null; autonomous: boolean }
+export interface Correction { id: Identifier; desired_actual: string; reason: string; state: string; control_version: number; requested_by: string; created_at: string; result?: unknown }
+export interface Notice { id: Identifier; recipient_id: string; batch_id: Identifier | null; item_ids: Identifier[]; summary: { title?: string; total?: number; exceptions?: number }; delivery_state: string; synthetic: boolean; ack_at: string | null; created_at: string; last_error?: string | null }

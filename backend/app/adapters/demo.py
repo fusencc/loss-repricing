@@ -5,6 +5,7 @@ from pathlib import Path
 import json
 from hashlib import sha256
 from app.domain.types import Snapshot, VariantKey, SourceLine, OnlineState, FeeModel, SiteContract
+from app.domain.money import MoneyRatio
 from app.adapters.base import SubmitResult, LookupResult, SourceUnavailable
 
 
@@ -25,6 +26,14 @@ class DemoAdapter:
         if business_date != now.astimezone(self.timezone).date():
             raise SourceUnavailable("演示来源只提供当日快照")
         sources = ["loss_allocatable", "loss_pending", "blocked_allocatable", "blocked_pending"]
+        latest = {}
+        for path in self.path.glob("*.json"):
+            receipt = json.loads(path.read_text(encoding="utf-8"))
+            if not receipt.get("upload_price"):
+                continue  # 兼容早期只保存回读证据的模拟历史，不反推缺失税价列。
+            identity = receipt["variant_id"]
+            if identity not in latest or receipt["effective_at"] > latest[identity]["effective_at"]:
+                latest[identity] = receipt
         lines, online = [], []
         # 固定的手工可验样本：MY售价10，亏损1，折扣0.5，上传22，毛利11*0.9-9.5=0.4。
         for index, (site, currency, scenario) in enumerate([
@@ -47,14 +56,24 @@ class DemoAdapter:
                 retail_price=price * 2, marketing_price=price, current_margin=Decimal("0.03") if scenario == "no_loss" else Decimal("-0.05"),
                 fee_scope="normal", fee_model=FeeModel(revenue_factor=Decimal("0.9"), fixed_cost=fixed,
                                                       version="demo-no-marketing-v1", verified=True),
-                observed_at=now, sales_7d=21 if scenario == "protected" else 6,
+                observed_at=now, sales_7d=21 if scenario == "protected" else 6, sales_complete=True,
                 sales_start=business_date - timedelta(days=7), sales_end=business_date - timedelta(days=1),
                 history_known=scenario != "history", activity_locked=scenario == "activity"))
+        # 模拟来源也反映自己已生效的价格，避免下一轮把固定样本旧价误判为人工修改。
+        for row in online:
+            receipt = latest.get(row.key.identity())
+            if receipt:
+                row.retail_price = Decimal(receipt["upload_price"])
+                actual = Decimal(receipt["actual_price"])
+                if row.marketing_price is not None:
+                    row.marketing_price = actual
+                row.current_margin = (row.fee_model.profit_exact(MoneyRatio(actual)) / MoneyRatio(actual)).decimal()
+                row.last_increase_at = datetime.fromisoformat(receipt["effective_at"])
         return Snapshot(as_of=now, business_date=business_date, fx_date=business_date,
             fx_rates={"CNY": "1", "MYR": "0.6", "PHP": "8", "SGD": "0.2", "THB": "5", "VND": "3500"},
             lines=lines, online=online, complete_sources=sources,
             contracts={site: SiteContract(site=site, verified=True, price_step="1" if site == "VN" else "0.01",
-                rounding="ROUND_HALF_UP", upload_column="税后价格", version="demo-only-v1") for site in ["MY", "PH", "SG", "TH", "VN"]},
+                rounding="ROUND_HALF_UP", upload_column="税后价格", version="demo-only-v1", warehouses=["direct"]) for site in ["MY", "PH", "SG", "TH", "VN"]},
             source_versions={"erp": "synthetic-v1", "sales": "synthetic-v1", "fees": "demo-no-marketing-v1"})
 
     def _receipt_path(self, execution_id):
@@ -63,7 +82,9 @@ class DemoAdapter:
     def submit(self, execution_id, decision):
         path = self._receipt_path(execution_id)
         if not path.exists():
-            receipt = {"variant_id": decision.key.identity(), "actual_price": str(decision.upload_price * decision.discount),
+            # 直接使用引擎已按上传档位恢复的模拟实际价，不以默认Decimal精度重算展示折扣。
+            receipt = {"variant_id": decision.key.identity(), "actual_price": decision.trace["rounded_actual"],
+                       "upload_price": str(decision.upload_price),
                        "effective_at": datetime.now(timezone.utc).isoformat()}
             # 一个执行ID只创建一次回执；模拟外部系统的幂等键，而非复用本地批次状态。
             with path.open("x", encoding="utf-8") as stream:

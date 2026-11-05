@@ -661,7 +661,8 @@
       "price_step": "0.01",
       "rounding": "ROUND_HALF_UP",
       "upload_column": "税后价格",
-      "version": "demo-only-v1"
+      "version": "demo-only-v1",
+      "warehouses": ["direct"]
     },
     "PH": {
       "site": "PH",
@@ -669,7 +670,8 @@
       "price_step": "0.01",
       "rounding": "ROUND_HALF_UP",
       "upload_column": "税后价格",
-      "version": "demo-only-v1"
+      "version": "demo-only-v1",
+      "warehouses": ["direct"]
     },
     "SG": {
       "site": "SG",
@@ -677,7 +679,8 @@
       "price_step": "0.01",
       "rounding": "ROUND_HALF_UP",
       "upload_column": "税后价格",
-      "version": "demo-only-v1"
+      "version": "demo-only-v1",
+      "warehouses": ["direct"]
     },
     "TH": {
       "site": "TH",
@@ -685,7 +688,8 @@
       "price_step": "0.01",
       "rounding": "ROUND_HALF_UP",
       "upload_column": "税后价格",
-      "version": "demo-only-v1"
+      "version": "demo-only-v1",
+      "warehouses": ["direct"]
     },
     "VN": {
       "site": "VN",
@@ -693,7 +697,8 @@
       "price_step": "1",
       "rounding": "ROUND_HALF_UP",
       "upload_column": "税后价格",
-      "version": "demo-only-v1"
+      "version": "demo-only-v1",
+      "warehouses": ["direct"]
     }
   },
   "complete_sources": [

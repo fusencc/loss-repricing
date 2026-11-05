@@ -16,7 +16,8 @@ from app.services.store import update_settings, settings_value
 def context(tmp_path):
     engine, factory = create_database(f"sqlite:///{tmp_path / 'db.sqlite'}")
     Base.metadata.create_all(engine)
-    cfg = Settings(runtime_dir=tmp_path, _env_file=None)
+    # 本组独立验证既有执行协议；销售权限在test_coordination_execution中覆盖。
+    cfg = Settings(runtime_dir=tmp_path, coordination_required=False, _env_file=None)
     yield factory, cfg, DemoAdapter(tmp_path)
     engine.dispose()
 

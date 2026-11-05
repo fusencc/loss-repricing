@@ -6,7 +6,7 @@ from app.main import create_app
 
 @pytest.fixture
 def client(tmp_path):
-    config = Settings(database_url=f"sqlite:///{tmp_path/'api.db'}", runtime_dir=tmp_path,
+    config = Settings(database_url=f"sqlite:///{tmp_path/'api.db'}", runtime_dir=tmp_path, coordination_required=False,
         admin_password="test-local-password", session_secret="test-session-secret-32-characters-long", _env_file=None)
     with TestClient(create_app(config)) as client:
         yield client

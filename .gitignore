@@ -10,6 +10,8 @@ dist/
 .env
 .env.*
 !.env.example
+# 真实合同可包含内部服务地址及业务映射；仅提交未确认的example模板。
+deploy/live-contract.json
 runtime/*
 !runtime/.gitkeep
 .superpowers/

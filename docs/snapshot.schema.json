@@ -137,12 +137,12 @@
           "type": "string"
         },
         "sales_complete": {
-          "default": true,
+          "default": false,
           "title": "Sales Complete",
           "type": "boolean"
         },
         "history_known": {
-          "default": true,
+          "default": false,
           "title": "History Known",
           "type": "boolean"
         },
@@ -178,6 +178,31 @@
           "default": true,
           "title": "Sellable",
           "type": "boolean"
+        },
+        "price_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Price Version"
+        },
+        "last_changed_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last Changed At"
         }
       },
       "required": [
@@ -240,6 +265,13 @@
         "version": {
           "title": "Version",
           "type": "string"
+        },
+        "warehouses": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Warehouses",
+          "type": "array"
         }
       },
       "required": [
@@ -317,7 +349,7 @@
           "type": "string"
         },
         "allocation_reliable": {
-          "default": true,
+          "default": false,
           "title": "Allocation Reliable",
           "type": "boolean"
         },

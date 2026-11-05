@@ -1,6 +1,7 @@
 """持久任务和业务记录。时间统一保存UTC ISO文本，避免MySQL丢失时区。"""
 from sqlalchemy import String, Text, JSON, Boolean, Float, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
+from app.models.notifications import Notice
 from app.db import Base
 
 
@@ -99,3 +100,5 @@ class WorkerLease(Base):
     expires: Mapped[float] = mapped_column(Float)
     heartbeat: Mapped[str] = mapped_column(String(40))
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+from .coordination import UserAccount, Ownership, TargetControl, Correction

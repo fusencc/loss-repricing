@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import ItemCoordination from './ItemCoordination.vue'
 import { display, statusType, stateLabel, timeLabel, type Item } from './api'
 
-const props = defineProps<{ open: boolean; item: Item | null; loading: boolean; error: string; busy: boolean }>()
-const emit = defineEmits<{ close: []; reevaluate: [id: Item['id'], note: string] }>()
+const props = defineProps<{ actorRole: string; actorId: string; admin: boolean; open: boolean; item: Item | null; loading: boolean; error: string; busy: boolean }>()
+const emit = defineEmits<{ close: []; refresh: []; reevaluate: [id: Item['id'], note: string] }>()
 const note = ref('')
 watch(() => props.item?.id, () => { note.value = '' })
 
@@ -58,6 +59,7 @@ const traceRows = computed(() => {
           <div v-for="(label, key) in identity" :key="key"><dt>{{ label }}</dt><dd>{{ display(item.key[key]) }}</dd></div>
           <div><dt>更新时间（北京时间）</dt><dd>{{ timeLabel(item.updated_at) }}</dd></div>
         </dl>
+        <ItemCoordination :actor-role="actorRole" :actor-id="actorId" :item="item" @refresh="emit('refresh')" />
         <section v-if="item.decision" class="drawer-section">
           <h3>补亏计算</h3>
           <p class="muted">目标实际价为当前实际价加站点币单件亏损。含 VAT 上传价为目标实际价除以折扣系数。</p>
@@ -82,7 +84,7 @@ const traceRows = computed(() => {
           <details class="evidence"><summary>展开提交与回读记录</summary><pre>{{ display(item.execution) }}</pre></details>
           <details class="evidence"><summary>展开来源证据</summary><pre>{{ display(item.evidence) }}</pre></details>
         </section>
-        <section v-if="item.status === '待处理'" class="drawer-section">
+        <section v-if="admin && item.status === '待处理'" class="drawer-section">
           <h3>重新评估</h3>
           <p class="muted">按当前规则重新获取来源数据并评估。</p>
           <el-input v-model="note" placeholder="补充处理说明（选填）" maxlength="500" />

@@ -19,7 +19,7 @@ ONLINE_FIELDS = KEY_FIELDS | {
     "fee_model.revenue_factor", "fee_model.fixed_cost", "fee_model.version", "fee_model.verified",
 }
 FX_FIELDS = frozenset({"fx_date", "rates"})
-LOOKUP_FIELDS = KEY_FIELDS | {"actual_price", "observed_at", "price_basis"}
+LOOKUP_FIELDS = KEY_FIELDS | {"actual_price", "currency", "observed_at", "price_basis"}
 LOOKUP_OPTIONAL = frozenset({"effective_at", "row_status", "task_id", "execution_id"})
 # 请求日期只是查询条件。动态字段及空值必须从已确认的响应字段取证。
 LINE_CONSTANTS = {"basis", "allocation_reliable", "fee_scope", "abnormal"} | KEY_FIELDS

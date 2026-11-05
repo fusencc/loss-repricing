@@ -6,6 +6,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import AwareDatetime, BaseModel, Field, StrictInt, StrictStr
 
+from .money import MoneyRatio
+
 
 Site = Literal["MY", "PH", "SG", "TH", "VN"]
 Source = Literal["loss_allocatable", "loss_pending", "blocked_allocatable", "blocked_pending"]
@@ -53,7 +55,8 @@ class SourceLine(BaseModel):
     loss_amount: FiniteDecimal
     currency: StrictStr
     basis: Literal["unit", "line", "order"]
-    allocation_reliable: bool = True
+    # 缺少证据即未确认；仅整单粒度依赖该标记，不能默认为可可靠分摊。
+    allocation_reliable: bool = False
     fee_scope: StrictStr = "normal"
     abnormal: bool = False
     source_ref: StrictStr = ""
@@ -69,7 +72,11 @@ class FeeModel(BaseModel):
 
     def profit(self, price: Decimal) -> Decimal:
         """输入站点币实际售价，只核算正常一次毛利，排除广告和营销费用。"""
-        return price * self.revenue_factor - self.fixed_cost
+        return self.profit_exact(MoneyRatio(price)).decimal()
+
+    def profit_exact(self, price: MoneyRatio) -> MoneyRatio:
+        """G(P)=P×a-b；循环小数价格延迟除法，零毛利不能由近似尾差变成负值。"""
+        return price * MoneyRatio(self.revenue_factor) - MoneyRatio(self.fixed_cost)
 
 
 class OnlineState(BaseModel):
@@ -88,14 +95,18 @@ class OnlineState(BaseModel):
     sales_7d: StrictInt | None = None
     sales_start: date
     sales_end: date
-    sales_complete: bool = True
-    history_known: bool = True
+    # 完整销量与确证历史必须由来源明示；文件缺字段不能获得乐观放行。
+    sales_complete: bool = False
+    history_known: bool = False
     # 只接受已确认生效的时间戳。提交结果未知由 pending_submission 独立锁定。
     last_increase_at: AwareDatetime | None = None
     pending_submission: bool = False
     protected: bool = False
     activity_locked: bool = False
     sellable: bool = True
+    # 接口确实提供时才映射；缺失不推断没有人工改价，也不猜测操作者。
+    price_version: StrictStr | None = None
+    last_changed_at: AwareDatetime | None = None
 
 
 class SiteContract(BaseModel):
@@ -107,6 +118,8 @@ class SiteContract(BaseModel):
     rounding: PriceRounding
     upload_column: StrictStr
     version: StrictStr
+    # 同一站点不代表所有仓配可用同一税价列；空范围关闭算价，值由已确认来源合同提供。
+    warehouses: list[StrictStr] = Field(default_factory=list)
 
 
 class Snapshot(BaseModel):

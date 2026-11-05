@@ -1,6 +1,8 @@
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
-from decimal import Context, Decimal, DecimalException, localcontext
+from decimal import Decimal, DecimalException, localcontext
+
+from .money import MoneyRatio, PRICE_CONTEXT
 
 from .types import Decision, DecisionStatus, OnlineState, Site, Snapshot, SourceLine
 
@@ -8,7 +10,11 @@ from .types import Decision, DecisionStatus, OnlineState, Site, Snapshot, Source
 # 业务时间统一为当前中国标准时间，Windows 环境也可直接使用此固定时差。
 BEIJING = timezone(timedelta(hours=8), name="Asia/Shanghai")
 REQUIRED_SOURCES = frozenset({"loss_allocatable", "loss_pending", "blocked_allocatable", "blocked_pending"})
-PRICE_CONTEXT = Context(prec=50)
+# 依据：已确认设计“数据与算价说明”；完整变量/单位见 docs/calculation-and-sources.md。
+# direct-loss-v1 是本项目规则版本，不是公司费率或接口已验收的标志。
+FORMULA_VERSION = "direct-loss-v1"
+# 保存/展示为50位有效数字；档位、容限、毛利正负以 Decimal 精确比值判定。
+# 不能先把循环小数近似为50位，再用其决定整档/半档或毛利是否为零。
 SITE_CURRENCIES: dict[Site, str] = {"MY": "MYR", "PH": "PHP", "SG": "SGD", "TH": "THB", "VN": "VND"}
 SITE_ERRORS = {
     "MY": Decimal("0.02"),
@@ -90,6 +96,9 @@ def _decide(
     contract = snapshot.contracts.get(key.site)
     row_ids = list(dict.fromkeys(row.row_id for row in rows if row.row_id.strip()))
     trace = {
+        "formula_version": FORMULA_VERSION,
+        "arithmetic": "decimal-ratio-v1",
+        "decimal_precision": PRICE_CONTEXT.prec,
         "business_date": snapshot.business_date.isoformat(),
         "evaluated_at": now.isoformat(),
         "as_of": snapshot.as_of.isoformat(),
@@ -210,6 +219,8 @@ def _decide(
         or not contract.version.strip()
     ):
         return finish("unverified_site_contract", "缺少经确认的站点上传字段、价格档位或合同版本")
+    if key.warehouse not in contract.warehouses:
+        return finish("unsupported_warehouse", "当前仓配未包含在已确认站点上传及费用合同的适用范围")
 
     from_rate = snapshot.fx_rates.get(loss_currency)
     to_rate = snapshot.fx_rates.get(station_currency)
@@ -232,30 +243,34 @@ def _decide(
             elif row.basis == "order" and not row.allocation_reliable:
                 excluded_rows[row.row_id] = "unreliable_order_allocation"
             else:
-                magnitude = row.loss_amount.copy_abs()
-                valid_losses[row.row_id] = magnitude if row.basis == "unit" else magnitude / row.quantity
+                magnitude = MoneyRatio(row.loss_amount.copy_abs())
+                valid_losses[row.row_id] = magnitude if row.basis == "unit" else magnitude / MoneyRatio(row.quantity)
         if not valid_losses:
             return finish("no_valid_loss", "没有可可靠归一到单件的负亏损明细")
-        trace["candidate_unit_losses"] = {row_id: str(value) for row_id, value in valid_losses.items()}
+        trace["candidate_unit_losses"] = {row_id: str(value.decimal()) for row_id, value in valid_losses.items()}
         selected = min(valid_losses, key=lambda row_id: (valid_losses[row_id], row_id))
-        unit_loss = valid_losses[selected]
+        unit_ratio = valid_losses[selected]
 
-        # 站点币亏损 = 原币亏损 / 原币每 CNY 单位 × 站点币每 CNY 单位。
-        # 同币种换算精确为原值。跨币种先乘后除，减少中间的小数误差。
-        station_loss = unit_loss if loss_currency == station_currency else unit_loss * to_rate / from_rate
-        target_actual = current + station_loss
-        discount = current / retail
-        # 上传的是含 VAT 零售价。用价格比值反推并按站点步长舍入，可支持 0.025 等档位。
-        raw_upload = target_actual * retail / current
-        ticks = (raw_upload / contract.price_step).to_integral_value(rounding=contract.rounding)
-        upload_price = ticks * contract.price_step
+        # 站点币亏损 = 原币单件亏损 × 站点币每 CNY 单位 / 原币每 CNY 单位。
+        # 保留精确 Decimal 比值直到档位与毛利判定，避免1/3等近似值少算一档。
+        station_ratio = (unit_ratio if loss_currency == station_currency
+                         else unit_ratio * MoneyRatio(to_rate) / MoneyRatio(from_rate))
+        target_ratio = MoneyRatio(current) + station_ratio
+        discount = MoneyRatio(current, retail).decimal()
+        # 含 VAT 上传价 = T×R/P；按精确商余数舍入，可支持0.025档位及半档边界。
+        raw_ratio = target_ratio * MoneyRatio(retail) / MoneyRatio(current)
+        upload_price = raw_ratio.round_to_step(contract.price_step, contract.rounding)
 
-        # 用上传后零售价恢复实际售价，复算站点币误差与正常一次毛利。
-        rounded_actual = upload_price * current / retail
-        error = abs(rounded_actual - target_actual)
+        rounded_ratio = MoneyRatio(upload_price) * MoneyRatio(current) / MoneyRatio(retail)
+        error_ratio = (rounded_ratio - target_ratio).absolute()
         tolerance = allowed_error(key.site)
-        target_profit = model.profit(target_actual)
-        rounded_profit = model.profit(rounded_actual)
+        target_profit_ratio = model.profit_exact(target_ratio)
+        rounded_profit_ratio = model.profit_exact(rounded_ratio)
+        # 下面的有限小数仅用于持久化/展示；分支仍使用精确比值，不给负毛利加容差。
+        unit_loss, station_loss = unit_ratio.decimal(), station_ratio.decimal()
+        target_actual, raw_upload = target_ratio.decimal(), raw_ratio.decimal()
+        rounded_actual, error = rounded_ratio.decimal(), error_ratio.decimal()
+        target_profit, rounded_profit = target_profit_ratio.decimal(), rounded_profit_ratio.decimal()
     except DecimalException:
         return finish("invalid_calculation", "价格、汇率或费用模型超出可计算范围")
 
@@ -263,6 +278,7 @@ def _decide(
         "loss_fx_rate": str(from_rate),
         "station_fx_rate": str(to_rate),
         "raw_upload_price": str(raw_upload),
+        "exact_target_actual": {"numerator": str(target_ratio.numerator), "denominator": str(target_ratio.denominator)},
         "rounded_actual": str(rounded_actual),
         "actual_price_error": str(error),
         "allowed_error": str(tolerance),
@@ -274,8 +290,8 @@ def _decide(
         "target_actual": target_actual, "upload_price": upload_price,
         "predicted_profit": rounded_profit, "upload_column": contract.upload_column,
     }
-    if upload_price <= 0 or error > tolerance:
+    if upload_price <= 0 or error_ratio > MoneyRatio(tolerance):
         return finish("rounding_error", "站点价格档位导致实际价无效或超出误差容限", **prices)
-    if target_profit < 0 or rounded_profit < 0:
+    if target_profit_ratio.numerator < 0 or rounded_profit_ratio.numerator < 0:
         return finish("fee_shortfall", "直接补亏后的目标价或舍入后实际价仍亏损", **prices)
     return finish("ready", "补亏价格通过站点精度及正常一次毛利核验", ready=True, **prices)
