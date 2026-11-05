@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { display, statusType, timeLabel, type Item } from './api'
+import { display, statusType, stateLabel, timeLabel, type Item } from './api'
 
 const props = defineProps<{ open: boolean; item: Item | null; loading: boolean; error: string; busy: boolean }>()
 const emit = defineEmits<{ close: []; reevaluate: [id: Item['id'], note: string] }>()
@@ -17,7 +17,7 @@ const decisionFields = {
   unit_loss: '单件亏损', loss_currency: '亏损原币',
   station_loss: '单件亏损（站点币）', target_actual: '目标实际价（站点币）',
   upload_price: '含 VAT 上传价', predicted_profit: '预测正常一次毛利',
-  selected_row_id: '选中来源行', source_row_ids: '候选来源行', reason_code: '规则结果码',
+  selected_row_id: '选中来源行', source_row_ids: '候选来源行',
 } as const
 
 const traceLabels: Record<string, string> = {
@@ -66,6 +66,7 @@ const traceRows = computed(() => {
               <dt>{{ label }}</dt>
               <dd>{{ key === 'source_row_ids' ? item.decision.source_row_ids?.join('、') || '—' : display(item.decision[key]) }}</dd>
             </div>
+            <div v-if="item.decision.reason_code === 'ready'"><dt>规则检查</dt><dd>规则检查通过</dd></div>
           </dl>
           <details class="evidence">
             <summary>展开计算过程</summary>
@@ -77,7 +78,7 @@ const traceRows = computed(() => {
         </section>
         <section class="drawer-section">
           <h3>执行与证据</h3>
-          <p class="muted">执行阶段 {{ display(item.phase) }}</p>
+          <p class="muted">执行进度：{{ stateLabel(item.phase) }}</p>
           <details class="evidence"><summary>展开提交与回读记录</summary><pre>{{ display(item.execution) }}</pre></details>
           <details class="evidence"><summary>展开来源证据</summary><pre>{{ display(item.evidence) }}</pre></details>
         </section>

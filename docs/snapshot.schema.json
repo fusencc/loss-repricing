@@ -1,0 +1,484 @@
+{
+  "$defs": {
+    "FeeModel": {
+      "description": "经确认的一次毛利模型，系数无量纲，固定项和输出均为站点币。",
+      "properties": {
+        "revenue_factor": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "title": "Revenue Factor"
+        },
+        "fixed_cost": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "title": "Fixed Cost"
+        },
+        "version": {
+          "title": "Version",
+          "type": "string"
+        },
+        "verified": {
+          "default": false,
+          "title": "Verified",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "revenue_factor",
+        "fixed_cost",
+        "version"
+      ],
+      "title": "FeeModel",
+      "type": "object"
+    },
+    "OnlineState": {
+      "description": "在线子 SKU 的当前快照。含 VAT 零售价和营销实际售价均为站点币。",
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/VariantKey"
+        },
+        "main_sku": {
+          "title": "Main Sku",
+          "type": "string"
+        },
+        "currency": {
+          "title": "Currency",
+          "type": "string"
+        },
+        "retail_price": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "title": "Retail Price"
+        },
+        "marketing_price": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Marketing Price"
+        },
+        "current_margin": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "title": "Current Margin"
+        },
+        "fee_scope": {
+          "title": "Fee Scope",
+          "type": "string"
+        },
+        "fee_model": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FeeModel"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "observed_at": {
+          "format": "date-time",
+          "title": "Observed At",
+          "type": "string"
+        },
+        "sales_7d": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sales 7D"
+        },
+        "sales_start": {
+          "format": "date",
+          "title": "Sales Start",
+          "type": "string"
+        },
+        "sales_end": {
+          "format": "date",
+          "title": "Sales End",
+          "type": "string"
+        },
+        "sales_complete": {
+          "default": true,
+          "title": "Sales Complete",
+          "type": "boolean"
+        },
+        "history_known": {
+          "default": true,
+          "title": "History Known",
+          "type": "boolean"
+        },
+        "last_increase_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last Increase At"
+        },
+        "pending_submission": {
+          "default": false,
+          "title": "Pending Submission",
+          "type": "boolean"
+        },
+        "protected": {
+          "default": false,
+          "title": "Protected",
+          "type": "boolean"
+        },
+        "activity_locked": {
+          "default": false,
+          "title": "Activity Locked",
+          "type": "boolean"
+        },
+        "sellable": {
+          "default": true,
+          "title": "Sellable",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "key",
+        "main_sku",
+        "currency",
+        "retail_price",
+        "current_margin",
+        "fee_scope",
+        "observed_at",
+        "sales_start",
+        "sales_end"
+      ],
+      "title": "OnlineState",
+      "type": "object"
+    },
+    "SiteContract": {
+      "description": "站点合同定义上传字段、价格档位与舍入规则，由数据提供方明确确认。",
+      "properties": {
+        "site": {
+          "enum": [
+            "MY",
+            "PH",
+            "SG",
+            "TH",
+            "VN"
+          ],
+          "title": "Site",
+          "type": "string"
+        },
+        "verified": {
+          "default": false,
+          "title": "Verified",
+          "type": "boolean"
+        },
+        "price_step": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "title": "Price Step"
+        },
+        "rounding": {
+          "enum": [
+            "ROUND_HALF_UP",
+            "ROUND_DOWN",
+            "ROUND_UP"
+          ],
+          "title": "Rounding",
+          "type": "string"
+        },
+        "upload_column": {
+          "title": "Upload Column",
+          "type": "string"
+        },
+        "version": {
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "site",
+        "price_step",
+        "rounding",
+        "upload_column",
+        "version"
+      ],
+      "title": "SiteContract",
+      "type": "object"
+    },
+    "SourceLine": {
+      "description": "四份 ERP 候选导出之一。亏损额的符号、数量粒度和原始币种在归一化前保留。",
+      "properties": {
+        "row_id": {
+          "default": "",
+          "title": "Row Id",
+          "type": "string"
+        },
+        "order_id": {
+          "title": "Order Id",
+          "type": "string"
+        },
+        "source": {
+          "enum": [
+            "loss_allocatable",
+            "loss_pending",
+            "blocked_allocatable",
+            "blocked_pending"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "key": {
+          "$ref": "#/$defs/VariantKey"
+        },
+        "main_sku": {
+          "title": "Main Sku",
+          "type": "string"
+        },
+        "quantity": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "title": "Quantity"
+        },
+        "loss_amount": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "title": "Loss Amount"
+        },
+        "currency": {
+          "title": "Currency",
+          "type": "string"
+        },
+        "basis": {
+          "enum": [
+            "unit",
+            "line",
+            "order"
+          ],
+          "title": "Basis",
+          "type": "string"
+        },
+        "allocation_reliable": {
+          "default": true,
+          "title": "Allocation Reliable",
+          "type": "boolean"
+        },
+        "fee_scope": {
+          "default": "normal",
+          "title": "Fee Scope",
+          "type": "string"
+        },
+        "abnormal": {
+          "default": false,
+          "title": "Abnormal",
+          "type": "boolean"
+        },
+        "source_ref": {
+          "default": "",
+          "title": "Source Ref",
+          "type": "string"
+        }
+      },
+      "required": [
+        "order_id",
+        "source",
+        "key",
+        "main_sku",
+        "quantity",
+        "loss_amount",
+        "currency",
+        "basis"
+      ],
+      "title": "SourceLine",
+      "type": "object"
+    },
+    "VariantKey": {
+      "description": "商品 ID 与 SKU 按原始文本保留，避免数值化丢失前导零。",
+      "properties": {
+        "platform": {
+          "title": "Platform",
+          "type": "string"
+        },
+        "shop_id": {
+          "title": "Shop Id",
+          "type": "string"
+        },
+        "site": {
+          "enum": [
+            "MY",
+            "PH",
+            "SG",
+            "TH",
+            "VN"
+          ],
+          "title": "Site",
+          "type": "string"
+        },
+        "product_id": {
+          "title": "Product Id",
+          "type": "string"
+        },
+        "item_id": {
+          "title": "Item Id",
+          "type": "string"
+        },
+        "sku": {
+          "title": "Sku",
+          "type": "string"
+        },
+        "warehouse": {
+          "title": "Warehouse",
+          "type": "string"
+        }
+      },
+      "required": [
+        "platform",
+        "shop_id",
+        "site",
+        "product_id",
+        "item_id",
+        "sku",
+        "warehouse"
+      ],
+      "title": "VariantKey",
+      "type": "object"
+    }
+  },
+  "description": "单批规范化来源。业务日期和汇率日期均按北京时间，汇率为每 CNY 兑换的币种单位。",
+  "properties": {
+    "as_of": {
+      "format": "date-time",
+      "title": "As Of",
+      "type": "string"
+    },
+    "business_date": {
+      "format": "date",
+      "title": "Business Date",
+      "type": "string"
+    },
+    "fx_date": {
+      "format": "date",
+      "title": "Fx Date",
+      "type": "string"
+    },
+    "fx_rates": {
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": "number"
+          },
+          {
+            "type": "string"
+          }
+        ]
+      },
+      "title": "Fx Rates",
+      "type": "object"
+    },
+    "lines": {
+      "items": {
+        "$ref": "#/$defs/SourceLine"
+      },
+      "title": "Lines",
+      "type": "array"
+    },
+    "online": {
+      "items": {
+        "$ref": "#/$defs/OnlineState"
+      },
+      "title": "Online",
+      "type": "array"
+    },
+    "contracts": {
+      "additionalProperties": {
+        "$ref": "#/$defs/SiteContract"
+      },
+      "title": "Contracts",
+      "type": "object"
+    },
+    "complete_sources": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Complete Sources",
+      "type": "array"
+    },
+    "source_versions": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Source Versions",
+      "type": "object"
+    }
+  },
+  "required": [
+    "as_of",
+    "business_date",
+    "fx_date",
+    "fx_rates",
+    "lines",
+    "online",
+    "contracts",
+    "complete_sources"
+  ],
+  "title": "Snapshot",
+  "type": "object"
+}

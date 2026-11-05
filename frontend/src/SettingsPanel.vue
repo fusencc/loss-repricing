@@ -55,7 +55,7 @@ async function save() {
           <el-switch v-model="form.paused" aria-labelledby="paused-label" />
         </div>
         <div class="setting-line">
-          <div><strong id="autonomous-label">开启自动运行</strong><p>限配置中的试点店铺和启用站点，真实提交还需要服务端授权和接口合同。</p></div>
+          <div><strong id="autonomous-label">开启自动运行</strong><p>自动运行仅覆盖试点店铺和已启用的站点。真实提交需要完成数据接入，并开启真实提交开关。</p></div>
           <el-switch v-model="form.autonomous_enabled" aria-labelledby="autonomous-label" />
         </div>
         <div class="setting-line">
@@ -95,7 +95,7 @@ async function save() {
         <div><dt>已核验站点</dt><dd>{{ contracts.verified_sites.join('、') || '暂无' }}</dd></div>
       </dl>
       <div v-if="contracts.missing.length" class="contract-gaps">
-        <h3>待补齐的合同</h3>
+        <h3>待补齐的接入信息</h3>
         <ul class="missing-list"><li v-for="entry in contracts.missing" :key="entry">{{ entry }}</li></ul>
       </div>
       <details class="evidence"><summary>展开来源版本</summary><pre>{{ display(contracts.source_versions) }}</pre></details>

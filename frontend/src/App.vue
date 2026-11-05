@@ -66,7 +66,7 @@ const mode = computed(() => overview.value?.mode || healthMode.value)
 const modeCopy = computed(() => ({
   demo: '使用演示样本运行完整流程。',
   file: '读取文件快照并对账。',
-  live: '数据源待接入。真实提交仍受服务端开关、试点范围和接口合同约束。',
+  live: '数据源待接入。真实提交需要完成数据接入，并启用对应的试点范围。',
 }[mode.value] ?? '正在读取当前运行环境。'))
 const statusCards = [
   { label: '本轮不调', color: 'slate', hint: '按当前规则无需调价' },
@@ -447,8 +447,8 @@ onUnmounted(() => {
               <header class="panel-heading"><h2>执行就绪状态</h2><el-button type="primary" link @click="navigate('settings')">查看配置 <el-icon><ArrowRight /></el-icon></el-button></header>
               <dl v-if="overview" class="readiness-list">
                 <div><dt>真实提交开关</dt><dd>{{ overview.readiness.live_enabled ? '已开启' : '未开启' }}</dd></div>
-                <div><dt>接口合同</dt><dd>{{ overview.readiness.contract_ready ? '已齐备' : '待核验' }}</dd></div>
-                <div><dt>Worker 最近心跳</dt><dd>{{ timeLabel(overview.worker.heartbeat) }}</dd></div>
+                <div><dt>数据接口就绪</dt><dd>{{ overview.readiness.contract_ready ? '已就绪' : '待补齐' }}</dd></div>
+                <div><dt>后台任务最近运行</dt><dd>{{ timeLabel(overview.worker.heartbeat) }}</dd></div>
               </dl>
               <p v-if="overview?.worker.last_error" class="service-error"><el-icon><WarningFilled /></el-icon>{{ overview.worker.last_error }}</p>
               <ul v-if="overview?.readiness.missing.length" class="missing-list">

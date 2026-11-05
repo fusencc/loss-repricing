@@ -110,9 +110,12 @@ export function modeLabel(mode: string) {
 
 export function stateLabel(state: string) {
   return {
-    pending: '排队中', queued: '排队中', running: '运行中', completed: '已完成',
+    pending: '排队中', queued: '排队中', running: '运行中', pending_verification: '待核验', completed: '已完成',
     succeeded: '已完成', success: '已完成', failed: '失败', error: '失败',
     cancelled: '已取消', done: '已完成',
+    proposed: '等待提交', blocked: '等待处理', excluded: '本轮不调',
+    submitting: '正在提交', accepted: '已受理，待核验', unknown: '结果未知，继续核验',
+    verified: '已核验', mismatch: '实际售价超差',
   }[state.toLowerCase()] ?? state
 }
 
