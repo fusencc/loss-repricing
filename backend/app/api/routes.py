@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, func
 from app.models import Batch, Item, Execution, Job, Protection, Audit, WorkerLease
 from app.db import transaction
-from app.services.store import settings_value, update_settings, enqueue, utcnow, stamp, BEIJING
+from app.services.store import settings_value, update_settings, enqueue, utcnow, stamp, BEIJING, current_items
 from app.api.auth import COOKIE, require_admin, make_session, password_matches
 
 router = APIRouter(prefix="/api")
@@ -51,6 +51,8 @@ def batch_view(batch):
 
 def item_view(session, item):
     value = columns(item)
+    from app.domain.types import VariantKey
+    value["target_id"] = VariantKey.model_validate(item.key).target_identity()
     execution = session.scalar(select(Execution).where(Execution.item_id == item.id))
     value["execution"] = columns(execution) if execution else None
     value["evidence"] = execution.evidence if execution else {}
@@ -97,7 +99,7 @@ def overview(request: Request):
     state = request.app.state
     with state.factory() as session:
         counts = {name: 0 for name in ["本轮不调", "待处理", "待核验", "已核验"]}
-        counts.update(dict(session.execute(select(Item.status, func.count()).group_by(Item.status)).all()))
+        counts.update(Counter(item.status for item in current_items(session)))
         latest = session.scalar(select(Batch).order_by(Batch.created_at.desc()).limit(1))
         worker = session.get(WorkerLease, "worker")
         today = utcnow().astimezone(BEIJING)
@@ -142,12 +144,14 @@ def batch_detail(batch_id: str, request: Request):
 @secured.get("/items")
 def items(request: Request, status: str | None = None, batch_id: str | None = None):
     with request.app.state.factory() as session:
-        query = select(Item).order_by(Item.updated_at.desc())
-        if status:
-            query = query.where(Item.status == status)
         if batch_id:
-            query = query.where(Item.batch_id == batch_id)
-        return [item_view(session, row) for row in session.scalars(query.limit(1000))]
+            query = select(Item).where(Item.batch_id == batch_id).order_by(Item.updated_at.desc(), Item.id.desc())
+            if status:
+                query = query.where(Item.status == status)
+            rows = session.scalars(query).all()
+        else:
+            rows = [row for row in current_items(session) if not status or row.status == status]
+        return [item_view(session, row) for row in rows[:1000]]
 
 
 @secured.get("/items/{item_id}")

@@ -59,7 +59,8 @@ class Worker:
         state, error, batch_id, retry = "done", None, None, 0
         try:
             if job.kind == "run":
-                batch_id = self.service.run_batch(job.id)
+                batch_id = (self.service.run_batch(job.id, item_id=job.payload["item_id"])
+                            if job.payload.get("item_id") else self.service.run_batch(job.id))
             elif job.kind == "reconcile":
                 self.service.reconcile()
             else:

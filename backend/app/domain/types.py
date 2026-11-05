@@ -26,8 +26,13 @@ class VariantKey(BaseModel):
     warehouse: StrictStr
 
     def identity(self) -> str:
-        """同一平台、店铺和站点的在线子 SKU 共用执行锁，仓配变化不产生新锁。"""
+        """来源与在线 SKU 严格匹配身份；保留 SKU，不能用执行锁身份合并亏损样本。"""
         fields = (self.platform, self.shop_id, self.site, self.product_id, self.item_id, self.sku)
+        return sha256(json.dumps(fields, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+    def target_identity(self) -> str:
+        """实际上传对象的稳定身份。来源 SKU 改名、仓配变化不允许绕过未知锁或72小时保护。"""
+        fields = (self.platform, self.shop_id, self.site, self.product_id, self.item_id)
         return sha256(json.dumps(fields, ensure_ascii=False).encode("utf-8")).hexdigest()
 
     def grouping(self) -> str:

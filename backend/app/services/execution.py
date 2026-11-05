@@ -15,7 +15,7 @@ from app.models import Batch, Item, Execution, VariantGuard, Protection
 from app.domain.types import Decision, VariantKey
 from app.domain.engine import evaluate, allowed_error
 from app.adapters.base import SubmitResult
-from app.services.store import utcnow, stamp, parse_stamp, BEIJING, settings_value, update_settings
+from app.services.store import utcnow, stamp, parse_stamp, BEIJING, settings_value, update_settings, enqueue
 
 
 class PricingService:
@@ -28,7 +28,7 @@ class PricingService:
         with self.factory() as session:
             protections = session.scalars(select(Protection).where(Protection.active.is_(True))).all()
             for online in result.online:
-                guard = session.get(VariantGuard, online.key.identity())
+                guard = session.get(VariantGuard, online.key.target_identity())
                 if guard:
                     online.pending_submission = online.pending_submission or bool(guard.execution_id)
                     effective = parse_stamp(guard.last_effective_at)
@@ -80,12 +80,23 @@ class PricingService:
                     item.status, item.phase, item.reason = "本轮不调", "excluded", "重新取数后已不在当前亏损候选中"
                     item.updated_at = stamp()
 
-    def run_batch(self, run_key):
+    def run_batch(self, run_key, item_id=None):
+        target_id = None
+        if item_id:
+            with self.factory() as session:
+                selected = session.get(Item, item_id)
+                if selected is None:
+                    raise ValueError("待重评记录不存在")
+                target_id = VariantKey.model_validate(selected.key).target_identity()
+            # 点选旧记录也核验该稳定目标的全部未知执行，绝不再次上传未知请求。
+            self.reconcile(target_id=target_id)
         business_date = utcnow().astimezone(BEIJING).date()
         # 日界后生成新批次，旧批次里已经送达的意图仍由reconcile独立跟进。
         actual_key = f"{run_key}:{business_date.isoformat()}"
         snapshot = self._enrich(self.adapter.collect(business_date))
         decisions = evaluate(snapshot, utcnow())
+        if target_id:
+            decisions = [d for d in decisions if d.key.target_identity() == target_id]
         with transaction(self.factory) as session:
             batch = session.scalar(select(Batch).where(Batch.run_key == actual_key))
             if not batch:
@@ -98,13 +109,21 @@ class PricingService:
                 batch.status = "running"
             batch_id = batch.id
         self._save_decisions(batch_id, decisions)
+        if utcnow().astimezone(BEIJING).date() != business_date:
+            self._rollover(batch_id, item_id)
+            self._summarize(batch_id)
+            return batch_id
 
         # 对整批做一次紧邻提交的刷新；不会为每个SKU重跑四份ERP全量导出。
         # 若执行耗时超过5分钟，再刷新，保证关键在线信息足够新。
         fresh_at, fresh_decisions = None, {}
         with self.factory() as session:
             item_ids = session.scalars(select(Item.id).where(Item.batch_id == batch_id, Item.phase == "proposed")).all()
+        selected_item_id = item_id
         for item_id in item_ids:
+            if utcnow().astimezone(BEIJING).date() != business_date:
+                self._rollover(batch_id, selected_item_id)
+                break
             with self.factory() as session:
                 item = session.get(Item, item_id)
                 original = Decision.model_validate(item.decision)
@@ -114,6 +133,9 @@ class PricingService:
                 continue
             if fresh_at is None or (utcnow() - fresh_at).total_seconds() >= 300:
                 refreshed = self._enrich(self.adapter.collect(business_date))
+                if utcnow().astimezone(BEIJING).date() != business_date:
+                    self._rollover(batch_id, selected_item_id)
+                    break
                 fresh_decisions = {d.key.identity(): d for d in evaluate(refreshed, utcnow())}
                 fresh_at = utcnow()
                 with transaction(self.factory) as session:
@@ -134,11 +156,27 @@ class PricingService:
                 if online is None or (utcnow() - online.observed_at).total_seconds() > 300:
                     self._hold(item_id, "当前在线价格快照超过5分钟，等待新的有效价数据")
                     continue
-            self._submit(item_id, decision)
+            if self._submit(item_id, decision, business_date) is False:
+                self._rollover(batch_id, selected_item_id)
+                break
             # 已完成当前单条后立即核验，发生价格超差能及时阻止本站点后续上传。
             self.reconcile(item_id=item_id)
+        else:
+            # 最后一个候选可能在计算/挂起阶段跨日，没有下一轮循环替它触发重新取数。
+            if utcnow().astimezone(BEIJING).date() != business_date:
+                self._rollover(batch_id, selected_item_id)
         self._summarize(batch_id)
         return batch_id
+
+    def _rollover(self, batch_id, selected_item_id):
+        """跨北京时间日界后丢弃缓存；持久排队新日期评估，保留单目标授权范围。"""
+        today = utcnow().astimezone(BEIJING).date().isoformat()
+        enqueue(self.factory, "run", {"item_id": selected_item_id} if selected_item_id else {},
+                f"rollover:{batch_id}:{today}")
+        with transaction(self.factory) as session:
+            for item in session.scalars(select(Item).where(Item.batch_id == batch_id, Item.phase == "proposed")):
+                item.status, item.phase = "待处理", "blocked"
+                item.reason, item.updated_at = "已跨北京时间业务日，已排队重新取数计算", stamp()
 
     def _hold(self, item_id, reason, status="待处理"):
         with transaction(self.factory) as session:
@@ -146,7 +184,7 @@ class PricingService:
             item.status, item.phase, item.reason, item.updated_at = status, "blocked", reason, stamp()
 
     def _claim(self, item_id, decision):
-        identity = decision.key.identity()
+        identity = decision.key.target_identity()
         # 先确保锁行存在；并发创建的冲突只需重新读取，不影响已有执行。
         try:
             with transaction(self.factory) as session:
@@ -174,7 +212,9 @@ class PricingService:
             item.reason = "执行意图已持久保存，等待逐行结果与实际价格"
         return execution_id
 
-    def _submit(self, item_id, decision):
+    def _submit(self, item_id, decision, business_date=None):
+        if business_date and utcnow().astimezone(BEIJING).date() != business_date:
+            return False
         allowed, reason = self._allowed(decision.key)
         if not allowed:
             self._hold(item_id, reason)
@@ -182,6 +222,17 @@ class PricingService:
         execution_id = self._claim(item_id, decision)
         if not execution_id:
             return
+        # 持久化可能恰好跨日；在外部调用前再次核验。此时尚未调用外部，可明确终结本地意图。
+        if business_date and utcnow().astimezone(BEIJING).date() != business_date:
+            with transaction(self.factory) as session:
+                execution = session.get(Execution, execution_id)
+                execution.state, execution.updated_at = "failed", stamp()
+                execution.response = {"status": "not_submitted", "message": "跨日，未调用上传接口"}
+                guard = session.get(VariantGuard, execution.variant_id)
+                if guard.execution_id == execution_id:
+                    guard.execution_id = None
+            self._hold(item_id, "已跨北京时间业务日，等待重新取数计算")
+            return False
         # 事务必须在调用外部系统前提交；网络结果未知时不可撤销本地意图后重试。
         try:
             result = self.adapter.submit(execution_id, decision)
@@ -202,12 +253,14 @@ class PricingService:
                 item.status = "待核验"
             item.updated_at = stamp()
 
-    def reconcile(self, item_id=None):
+    def reconcile(self, item_id=None, target_id=None):
         # 核验不受暂停开关限制；否则暂停后已送达的请求将永久失去跟踪。
         with self.factory() as session:
             query = select(Execution).where(Execution.state.in_(["submitting", "accepted", "unknown", "mismatch"]))
             if item_id:
                 query = query.where(Execution.item_id == item_id)
+            if target_id:
+                query = query.where(Execution.variant_id == target_id)
             pending = session.scalars(query).all()
         batches = set()
         for execution in pending:
@@ -221,14 +274,14 @@ class PricingService:
                 if current.state not in {"submitting", "accepted", "unknown", "mismatch"}:
                     continue
                 item = session.get(Item, current.item_id)
-                guard = session.get(VariantGuard, current.variant_id)
+                # 迁移前同一目标可能已有多个未知执行；锁行串行化全部历史执行的释放。
+                guard = session.scalar(select(VariantGuard).where(
+                    VariantGuard.variant_id == current.variant_id).with_for_update())
                 batches.add(item.batch_id)
                 if result.status == "rejected":
                     current.state, item.phase, item.status = "failed", "failed", "待处理"
                     current.evidence = {"row_status": "rejected", "message": result.message}
                     item.reason = result.message or "逐行处理已确认失败，需重新评估"
-                    if guard.execution_id == current.id:
-                        guard.execution_id = None
                 elif (result.status == "accepted" and result.actual_price is not None
                       and result.actual_price.is_finite() and result.actual_price > 0
                       and result.price_basis == "actual_including_vat" and result.observed_at is not None
@@ -247,12 +300,18 @@ class PricingService:
                         current.evidence["effective_at"] = stamp(effective)
                         current.state, item.phase, item.status = "verified", "verified", "已核验"
                         item.reason = "模拟价格已核验" if self.adapter.mode == "demo" else "当前实际有效售价已逐条核验"
-                        if guard.execution_id == current.id:
-                            guard.execution_id, guard.last_effective_at = None, stamp(effective)
+                        # 较旧请求晚核验不得倒退最近生效时间。
+                        guard.last_effective_at = max(filter(None, [guard.last_effective_at, stamp(effective)]))
                     else:
                         current.state, item.phase, item.status = "mismatch", "mismatch", "待核验"
                         item.reason = "实际售价与目标超出误差范围，已暂停本站点新提交"
                 current.updated_at = item.updated_at = stamp()
+                session.flush()
+                # 只有所有历史未知/超差执行都终结后才释放；代表锁指针不会遗忘其他请求。
+                guard.execution_id = session.scalar(select(Execution.id).where(
+                    Execution.variant_id == current.variant_id,
+                    Execution.state.in_(["submitting", "accepted", "unknown", "mismatch"])
+                ).order_by(Execution.created_at, Execution.id).limit(1))
             if current.state == "mismatch":
                 config = settings_value(self.factory)
                 paused_sites = sorted(set(config["paused_sites"]) | {decision.key.site})

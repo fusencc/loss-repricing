@@ -44,12 +44,20 @@ def evaluate(snapshot: Snapshot, now: datetime) -> list[Decision]:
     for state in snapshot.online:
         online_groups[state.key.identity()].append(state)
 
+    # 执行目标与来源匹配分开：同一在线商品若同时对应多个来源SKU，全部挂起。
+    # 不能移除SKU后直接取最小亏损，否则不同来源映射的样本会被混算。
+    aliases = defaultdict(set)
+    for row in [*snapshot.lines, *snapshot.online]:
+        aliases[row.key.target_identity()].add(row.key.identity())
     results = []
     for identity, rows in candidate_groups.items():
         states = online_groups.get(identity, [])
         # 在固定十进制精度下统一换算；单行极端数值不能中断同批其他子 SKU。
         with localcontext(PRICE_CONTEXT):
-            results.append(_decide(snapshot, now, window, snapshot_problem, rows, states))
+            problem = snapshot_problem
+            if len(aliases[rows[0].key.target_identity()]) > 1:
+                problem = ("ambiguous_target_alias", "同一在线商品存在多个来源SKU映射，需先确认唯一映射")
+            results.append(_decide(snapshot, now, window, problem, rows, states))
     return results
 
 

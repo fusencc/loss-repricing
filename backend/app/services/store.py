@@ -64,3 +64,23 @@ def claim_job(factory, owner, now):
         result = session.execute(update(Job).where(Job.id == job_id, eligible).values(
             state="running", owner=owner, lease_until=now + 120))
         return session.get(Job, job_id) if result.rowcount == 1 else None
+
+
+def current_items(session):
+    """全局运营视图：按批次创建时间及记录ID选当前目标，另保留全部未终结执行。
+
+    旧记录的核验更新时间不能使其覆盖较新的评估；先选当前集合再按状态筛选。
+    批次详情直接读取原记录，因此历史判定和追溯证据不丢失。
+    """
+    from app.models import Item, Batch, Execution
+    from app.domain.types import VariantKey
+    pending = set(session.scalars(select(Execution.item_id).where(
+        Execution.state.in_(["submitting", "accepted", "unknown", "mismatch"]))))
+    rows = session.scalars(select(Item).join(Batch).order_by(Batch.created_at.desc(), Item.id.desc()))
+    seen, result = set(), []
+    for item in rows:
+        target = VariantKey.model_validate(item.key).target_identity()
+        if target not in seen or item.id in pending:
+            result.append(item)
+        seen.add(target)
+    return result
