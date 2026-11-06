@@ -28,5 +28,5 @@
 - 凭据、原始业务数据、带权限 URL 不入 Git。禁止复制预算项目凭据或修改其目录、服务。
 
 ## 验证与交付
-- Python 测试：`.venv/Scripts/python -m pytest`；前端构建：`npm run build`。生产 Python 3.12，兼容本地 Python 3.13。
+- Python 测试：WSL2 使用 `.venv/bin/python -m pytest`，Windows 旧副本使用 `.venv/Scripts/python -m pytest`；前端构建：`npm run build`。主要开发环境为 WSL2/Python 3.12，生产 Python 3.12，兼容本地 Python 3.13。
 - 修改后执行与变更相关的测试或构建；需要全量验证时先前端构建、再后端测试，避免构建清理产物与测试初始化冲突。交付时说明修改内容、验证结果和未验证事项，明确区分本地验证与真实环境验证。

@@ -34,6 +34,13 @@ def test_four_groups_detail_whitelist_and_partial_failure():
     assert line['itempriceinclvat'] == '1734972991025547169'
     assert 'buyerName' not in str(result) and 'private' not in str(result)
     assert result['details'][0]['loss_allocation_confirmed'] is False
+    report = result['validation']
+    assert report['summary']['list_reads_succeeded'] == 3
+    assert report['summary']['list_reads_failed'] == 1
+    assert report['summary']['detail_reads_succeeded'] == 1
+    failed = next(g for g in report['groups'] if not g['read_succeeded'])
+    assert failed['error_kind'] == 'access_denied' and failed['http_status'] == 403
+    assert report['permission_scope_verified'] is False
 
 
 def test_business_error_preserves_only_numeric_code():
@@ -45,6 +52,8 @@ def test_business_error_preserves_only_numeric_code():
         result = capture_erp_sample(Settings(_env_file=None, erp_username='user', erp_password='password'), client=client)
     assert all('500002' in g['error'] for g in result['groups'])
     assert 'private-account-data' not in str(result)
+    assert all(g['error_kind'] == 'business_failure' and g['business_code'] == 500002
+               and g['http_status'] is None for g in result['validation']['groups'])
 
 
 def test_missing_credentials_and_invalid_limit_never_contact_network():

@@ -62,6 +62,8 @@
 - `tests/test_live_adapters.py`：模拟 HTTP 的请求映射、分页、合同关闭、模板、回执及查价语义。通过只表示客户端行为正确，不表示公司接口可用。
 - `tests/test_execution.py`、`tests/test_review_regressions.py`：执行意图、未知不重传、保护历史、逐目标范围、日界与当前状态。
 - `tests/test_worker.py`、`tests/test_api.py`：任务/租约、接口权限及配置边界。
+- `tests/test_erp_validation.py`、`tests/test_erp_capture_diagnostics.py`：合成ERP抽样诊断、总数未知/矛盾、明确HTTP拒绝与普通失败区分、管理员访问和无执行副作用；不验证真实账号可见范围。
+- `deploy/smoke-source-ui.py`：临时demo数据库和合成报告的浏览器验收，验证主动触发、部分拒绝、下载、失败清除旧结果和窄屏，不访问公司接口。
 - `deploy/smoke-ui.py`：本地 demo 浏览器冒烟；会创建模拟任务，不访问真实改价系统。
 
 涉及金额的预期值应手算或用独立算法产生，并覆盖临界值两侧。涉及提交的测试须使用临时数据库及模拟适配器，断言调用次数、锁状态、证据和其他独立目标是否继续，不只断言 HTTP 200。

@@ -1,6 +1,6 @@
 # 亏损补亏工作台
 
-**当前阶段：可本地运行的初版，用于规则核对和模拟流程；尚未完成真实数据接入、真实提价验收或生产部署。** 项目目录为 `D:\projects\loss-repricing`。
+**当前阶段：可本地运行的初版，用于规则核对和模拟流程；尚未完成真实数据接入、真实提价验收或生产部署。** 当前主要开发副本位于 WSL2 的 `/home/developer/projects/loss-repricing`；Windows 原目录 `D:\projects\loss-repricing` 是独立的迁移前副本，不会自动同步。其他机器可将项目克隆到自己的目录，以下命令需在各自的项目根目录执行。
 
 程序针对亏损订单对应的具体在线子 SKU（可独立定价的商品变体），计算补亏价格、检查保护条件、记录执行过程并核验结果。现阶段可用合成数据演示，也可读规范化 JSON 文件对账；页面可运行、测试通过或模拟“已核验”，均不代表公司数据正确或平台价格已生效。
 
@@ -11,6 +11,7 @@
 - **文件对账可用**：读取 `Snapshot` 规范快照执行规则，适配器拒绝上传。结构见 [JSON Schema](docs/snapshot.schema.json)，合成样本见 [样本说明](tests/fixtures/README.md)。
 - **真实接入仅有边界代码**：HTTP 适配器支持经确认合同的同步列表/分页、字段映射、单商品 Excel 提交和实际价查询；尚无可直接使用的公司完整取数合同，异步导出任务链未实现。
 - **真实环境未验证**：四份 ERP 候选、在线唯一映射、销量与历史、当日汇率、公司费用模型、上传税后/仓配列、折扣保持、行级结果与当前有效价。实际试点尚未指定。
+- **只读取数诊断入口**：管理员在「运行配置 → ERP 数据获取验证」主动读取真实四组第一页样本，查看读取失败、覆盖范围和待确认项并下载诊断报告；不代表全量或账号权限验收，不计算或提交价格。详见[ERP只读采集说明](docs/erp-source-capture.md)。
 
 `demo` 使用合成数据和本机回执；`file` 仅算价对账；`live` 是待接入的真实接口模式。默认真实提交关闭、试点名单为空；示例合同 [live-contract.example.json](deploy/live-contract.example.json) 为未确认模板，不能只改 `verified` 就认定验收完成。
 
@@ -26,24 +27,20 @@
 
 ## 3. 本地启动与停止
 
-在 PowerShell 执行：
+主要开发环境为 WSL2。在 WSL 终端进入自己的项目根目录，执行：
 
-```powershell
-Set-Location -LiteralPath 'D:\projects\loss-repricing'
-.\deploy\start-local.ps1
+```bash
+cd /home/developer/projects/loss-repricing  # 按实际克隆路径调整
+bash deploy/start-wsl.sh
 ```
 
-打开 [本地工作台](http://127.0.0.1:18765)。账号为 `admin`，密码在根目录 `.env` 的 `LR_ADMIN_PASSWORD` 中本机查看，不复制到文档、截图或聊天记录。首次启动脚本生成本项目独立密码及会话密钥。
+打开 [本地工作台](http://127.0.0.1:18765)。按 `Ctrl+C` 停止 API 和 worker。该入口只允许 demo 模式且真实提交关闭。安装依赖、配置和测试步骤见 [WSL2 开发指南](docs/wsl-development.md)。
 
-登录后点击“运行演示批次”，查看批次、商品计算过程、保护条件和核验证据。该按钮只启用虚拟试点并创建模拟任务，**不会访问公司系统或真实调价**。
+Windows 旧副本可在 PowerShell 中进入其项目根目录，再执行 `.\deploy\start-local.ps1`；停止时执行 `.\deploy\stop-local.ps1`。Windows 和 WSL 的虚拟环境、配置与数据库各自独立，不会通过 Git 自动同步。
 
-停止服务：
+账号为 `admin`，密码在各自项目根目录 `.env` 的 `LR_ADMIN_PASSWORD` 中本机查看，不复制到文档、截图或聊天记录。登录后点击“运行演示批次”，查看批次、商品计算过程、保护条件和核验证据。该按钮只启用虚拟试点并创建模拟任务，**不会访问公司系统或真实调价**。
 
-```powershell
-.\deploy\stop-local.ps1
-```
-
-关闭网页不会停止后台 worker（任务进程）。脚本只管理本项目记录且身份匹配的进程树，不按端口结束未知程序。强制停止后立即重启，可能等待旧任务租约最长 120 秒到期；不要删锁或重复上传催跑。启动可加 `-NoBrowser`。依赖更新、日志、备份、恢复和配置见[运行手册](docs/runbook.md)。
+Windows 启停脚本的进程管理、日志和恢复说明见[运行手册](docs/runbook.md)。
 
 ## 4. 如何理解结果
 
@@ -73,18 +70,16 @@ Set-Location -LiteralPath 'D:\projects\loss-repricing'
 
 ## 6. 验证
 
-先构建前端，再运行后端测试，避免构建清理产物与测试初始化冲突：
+在 WSL 的项目根目录执行，先构建前端，再运行后端测试，避免构建清理产物与测试初始化冲突：
 
-```powershell
-Set-Location -LiteralPath 'D:\projects\loss-repricing\frontend'
-npm.cmd run build
-Set-Location -LiteralPath 'D:\projects\loss-repricing'
-.\.venv\Scripts\python.exe -m pytest
+```bash
+cd frontend
+npm run build
+cd ..
+.venv/bin/python -m pytest
 ```
 
-运行中的 demo 服务还可执行 `.\.venv\Scripts\python.exe deploy\smoke-ui.py` 检查登录、批次、详情、配置及窄屏。该脚本会创建模拟任务，所需开发依赖和浏览器安装见运行手册。
-
-销售协作独立浏览器验收：`.\.venv\Scripts\python.exe deploy\smoke-sales-ui.py`，仅创建临时演示数据库和合成账号，退出即停测试服务，不使用运行中的业务数据库。
+Windows 旧副本分别使用 `npm.cmd run build` 和 `.\.venv\Scripts\python.exe -m pytest`；两种环境需要各自安装依赖。浏览器检查脚本及其依赖说明见[运行手册](docs/runbook.md)。
 
 具体命令结果、环境及未验证事项见[本地验证记录](docs/verification-2026-11-05.md)及[销售协作验证记录](docs/verification-sales-coordination-2026-11-05.md)。模拟 HTTP 测试不代表真实接口联调；容器配置存在不代表生产验收。当前未完成 Python 3.12/MySQL/容器及真实试点端到端验证。
 

@@ -13,6 +13,7 @@ import ItemTable from './ItemTable.vue'
 import ItemDrawer from './ItemDrawer.vue'
 import SettingsPanel from './SettingsPanel.vue'
 import ErpRatesPanel from './ErpRatesPanel.vue'
+import ErpSourcePanel from './ErpSourcePanel.vue'
 import ProtectionPanel from './ProtectionPanel.vue'
 import CoordinationPanel from './CoordinationPanel.vue'
 import ScopesPanel from './ScopesPanel.vue'
@@ -523,6 +524,7 @@ onUnmounted(() => {
         <NotificationsPanel v-else-if="page === 'notifications'" :admin="isAdmin" @select="openItem" />
         <CoordinationPanel v-else-if="page === 'coordination' && isAdmin" />
         <div v-else-if="page === 'settings' && isAdmin" v-loading="loading" class="page-content">
+          <ErpSourcePanel />
           <ErpRatesPanel />
           <SettingsPanel v-if="settings && contracts" :settings="settings" :contracts="contracts" :live-enabled="overview?.readiness.live_enabled ?? false" :save="saveSettings" />
         </div>

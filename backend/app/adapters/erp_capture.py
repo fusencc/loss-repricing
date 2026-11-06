@@ -12,6 +12,25 @@ import httpx
 
 from app.adapters.base import SourceUnavailable
 from app.adapters.http import TIMEOUT, _private_request
+from app.adapters.erp_validation import build_sample_validation
+
+
+class ErpBusinessFailure(SourceUnavailable):
+    """仅保留数字业务码；未有合同的业务码不推断为无权限。"""
+
+    def __init__(self, code):
+        super().__init__(f'ERP接口业务失败（code={code}），需核实服务或权限')
+        self.code = code
+
+
+def _error_evidence(error):
+    status = error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None
+    kind = ('authentication_rejected' if status == 401 else
+            'access_denied' if status == 403 else
+            'business_failure' if isinstance(error, ErpBusinessFailure) else
+            'read_failed')
+    return {'error': _failure(error), 'error_kind': kind, 'http_status': status,
+            'business_code': error.code if isinstance(error, ErpBusinessFailure) else None}
 
 WEB_BASE = 'http://103.198.125.2:8077'
 LOSS_FIELDS = ('orderid', 'platform', 'shopid', 'shopname', 'bloc', 'department',
@@ -63,7 +82,7 @@ def capture_erp_sample(settings, *, limit=5, client=None):
             expected = 200 if login else 0
             if isinstance(payload, dict) and type(payload.get('code')) is int and payload['code'] != expected:
                 # 仅保留数字业务码；不转发可能含业务信息的msg或完整响应。
-                raise SourceUnavailable(f"ERP接口业务失败（code={payload['code']}），需核实服务或权限")
+                raise ErpBusinessFailure(payload['code'])
             if (not isinstance(payload, dict) or type(payload.get('code')) is not int
                     or payload['code'] != expected or (login and payload.get('success') is not True)):
                 raise SourceUnavailable('ERP接口未返回业务成功，请核实服务与权限')
@@ -93,10 +112,13 @@ def capture_erp_sample(settings, *, limit=5, client=None):
                     if not isinstance(rows, list) or len(rows) > limit:
                         raise SourceUnavailable('ERP分页记录格式或数量无效')
                     group['rows'] = [_project(r, LOSS_FIELDS if kind == 'loss' else ORDER_FIELDS) for r in rows]
-                    group['total'] = data.get('total')
+                    # total只接受非负整数；其余结构不原样回显，报告标为未知。
+                    # 列表仍保留供核对，不因可选计数字段异常阻断独立明细读取。
+                    total = data.get('total')
+                    group['total'] = total if type(total) is int and total >= 0 else None
                     for row in group['rows']:
                         order = row.get('orderid')
-                        if not isinstance(order, str) or not order:
+                        if not isinstance(order, str) or not order.strip():
                             details.append({'orderid': None, 'rows': [],
                                             'error': '订单标识缺失或类型无效，未读取明细',
                                             'loss_allocation_confirmed': False})
@@ -114,16 +136,18 @@ def capture_erp_sample(settings, *, limit=5, client=None):
                                 raise SourceUnavailable('ERP订单明细结构无效')
                             detail['rows'] = [_project(r, DETAIL_FIELDS) for r in lines]
                         except (SourceUnavailable, httpx.HTTPError, ValueError, TypeError) as error:
-                            detail['error'] = _failure(error)
+                            detail.update(_error_evidence(error))
                 except (SourceUnavailable, httpx.HTTPError, ValueError, TypeError) as error:
-                    group['error'] = _failure(error)
-        return {'source_version': 'erp-web-sample-20261105-v1',
+                    group.update(_error_evidence(error))
+        result = {'source_version': 'erp-web-sample-20261105-v1',
                 'queried_at': datetime.now(timezone.utc).isoformat(), 'pricing_ready': False,
                 'complete': False, 'sample_only': True, 'groups': groups, 'details': details,
                 'pending_confirmations': ['grossprofit与difference的业务亏损口径及金额币种',
                     '多SKU亏损分摊', '业务更新时间', '在线子SKU映射及同店同站主SKU七完整日销量',
                     'itempriceinclvat实测为标识样式，禁止当作含税价格',
                     '当前商品成本不能覆盖历史订单成本']}
+        result['validation'] = build_sample_validation(result)
+        return result
     except (httpx.HTTPError, ValueError, TypeError):
         raise SourceUnavailable('ERP只读采集连接或响应无效') from None
     finally:

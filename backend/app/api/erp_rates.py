@@ -17,6 +17,12 @@ def sample(request: Request, limit: int = Query(default=5, ge=1, le=10)):
         raise HTTPException(503, str(error)) from None
 
 
+@router.get('/validation')
+def validation(request: Request, limit: int = Query(default=2, ge=1, le=10)):
+    """只返回诊断报告，不下发原始订单明细；必须由管理员主动请求。"""
+    return sample(request, limit)['validation']
+
+
 @router.get('/rates')
 def rates(request: Request):
     try:
