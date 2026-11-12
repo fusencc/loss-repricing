@@ -1,4 +1,11 @@
-"""可插入经审计数据合同的 HTTP 边界。公司字段由合同明示，默认关闭真实请求。"""
+"""可插入经审计数据合同的 HTTP 边界。公司字段由合同明示，默认关闭真实请求。
+
+这是live定价任务的通用合同适配器，不是管理员ERP默认批量下载入口。
+collect读取四候选、在线状态和当日汇率并构造Snapshot；来源请求及字段须由合同提供。
+本适配器仍拒绝export异步合同；独立的ERP批量下载在erp_bulk_capture.py，
+不代表这里已接通四组来源、在线价格/七日销量/保护历史或完整可执行定价合同。
+"""
+from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import json
@@ -12,8 +19,10 @@ from app.adapters.excel import VAT_UPLOAD_COLUMNS, XLSX_MIME, price_upload_workb
 from app.adapters.normalization import (
     FX_FIELDS, LINE_CONSTANTS, LINE_FIELDS, LOOKUP_FIELDS, LOOKUP_OPTIONAL, ONLINE_CONSTANTS,
     ONLINE_FIELDS, SAFE_LABEL, fx_rates, identity_text, mapped, money, online_state, read_path, source_line,
-    source_stamp, source_time, valid_path, variant_key,
+    source_record_issue, source_stamp, source_time, valid_path, variant_key,
 )
+from app.adapters.sales_auth import SalesAuth
+from app.adapters.transport_privacy import private_request
 from app.config import Settings
 from app.domain.engine import REQUIRED_SOURCES, SITE_CURRENCIES
 from app.domain.types import Decision, SiteContract, Snapshot, VariantKey
@@ -32,11 +41,6 @@ CREDENTIAL_FIELDS = {"authorization", "cookie", "token", "accesstoken", "refresh
 PLACEHOLDER = re.compile(r"{([a-z_][a-z0-9_]*)}")
 ROW_REFERENCE = re.compile(r"第\s*([0-9]+)\s*行")
 ROW_NOT_FOUND = re.compile(r"(?:上传完成\s*[,，]\s*)?第\s*([0-9]+)\s*行数据不存在在线列表[;；。]?")
-
-
-# 兼容既有适配器导入；所有真实请求复用同一个日志脱敏上下文。
-from app.adapters.transport_privacy import private_request as _private_request
-from app.adapters.sales_auth import SalesAuth
 
 
 def _utcnow():
@@ -219,7 +223,7 @@ class HttpAdapter:
 
     def __init__(self, settings: Settings, client: httpx.Client | None = None):
         self._enabled = settings.live_submit_enabled
-        self._tokens = {"erp": settings.erp_token, "vendor": settings.vendor_token}
+        self._erp_token = settings.erp_token
         self._erp_credentials = None
         # 凭据从独立环境变量或本机.env读取，不写入数据合同、业务快照或日志。
         # 登录合同依据衡哲开放文档 /474419940e0，已于2026-11-05实测正式环境。
@@ -259,20 +263,20 @@ class HttpAdapter:
 
     def _load_contract(self, config):
         services = config.get("services")
-        for service, token in self._tokens.items():
+        for service in ("erp", "vendor"):
             try:
                 origin = _origin(services[service])
-                password_login = (
-                    service == "erp" and self._erp_credentials is not None
-                    and self._erp_credentials["base_url"] == origin + "/open"
-                ) or (service == "vendor" and self._vendor_auth.configured
-                      and self._vendor_auth.origin == origin)
-                if not token and not password_login:
-                    raise ValueError("缺少服务凭据")
-                self._services[service] = origin
             except (KeyError, TypeError, ValueError, httpx.InvalidURL):
-                # 各请求只使用所属服务的独立环境令牌。异常不回显配置内容。
                 continue
+            if service == "erp":
+                configured = bool(self._erp_token) or (
+                    self._erp_credentials is not None
+                    and self._erp_credentials["base_url"] == origin + "/open"
+                )
+            else:
+                configured = self._vendor_auth.configured and self._vendor_auth.origin == origin
+            if configured:
+                self._services[service] = origin
 
         collections = config.get("collections")
         for name in COLLECTIONS:
@@ -338,36 +342,37 @@ class HttpAdapter:
         if service not in self._services:
             raise SourceUnavailable("来源服务或凭据尚未配置")
         try:
-            context = _private_request.set(True)
+            context = private_request.set(True)
             try:
-                if (service == "vendor" and self._vendor_auth.configured
-                        and self._vendor_auth.origin == self._services[service]):
-                    # 仅获取/更新认证，不在401或未知业务结果后重发请求，提交仍只发一次。
-                    self._tokens[service] = self._vendor_auth.get_token()
-                if service == "erp" and not self._tokens[service]:
-                    # 使用本轮登录所得令牌；不复用Apifox面板或其他系统的令牌。
-                    login = self._client.post(
-                        self._erp_credentials["base_url"] + "/system/innerOpen/login",
-                        json={key: self._erp_credentials[key] for key in ("username", "password")},
-                        timeout=TIMEOUT, follow_redirects=False,
-                    )
-                    login.raise_for_status()
-                    payload = login.json()
-                    if payload.get("success") is not True or payload.get("code") != 200:
-                        raise SourceUnavailable("ERP开放接口登录未成功")
-                    token = payload["data"].get("accessToken") or payload["data"].get("token")
-                    if not isinstance(token, str) or not token.strip():
-                        raise SourceUnavailable("ERP开放接口登录未返回有效令牌")
-                    self._tokens[service] = re.sub(r"^Bearer\s+", "", token, flags=re.IGNORECASE).strip()
+                if service == "vendor":
+                    # 请求前取得有效令牌，业务失败时保持单次提交。
+                    token = self._vendor_auth.get_token()
+                else:
+                    if not self._erp_token:
+                        # 使用本轮登录所得令牌；不复用Apifox面板或其他系统的令牌。
+                        login = self._client.post(
+                            self._erp_credentials["base_url"] + "/system/innerOpen/login",
+                            json={key: self._erp_credentials[key] for key in ("username", "password")},
+                            timeout=TIMEOUT, follow_redirects=False,
+                        )
+                        login.raise_for_status()
+                        payload = login.json()
+                        if payload.get("success") is not True or payload.get("code") != 200:
+                            raise SourceUnavailable("ERP开放接口登录未成功")
+                        token = payload["data"].get("accessToken") or payload["data"].get("token")
+                        if not isinstance(token, str) or not token.strip():
+                            raise SourceUnavailable("ERP开放接口登录未返回有效令牌")
+                        self._erp_token = re.sub(r"^Bearer\s+", "", token, flags=re.IGNORECASE).strip()
+                    token = self._erp_token
                 response = self._client.request(
                     method, self._services[service] + path,
-                    headers={"Authorization": f"Bearer {self._tokens[service]}", **(headers or {})},
+                    headers={"Authorization": f"Bearer {token}", **(headers or {})},
                     timeout=TIMEOUT, follow_redirects=False, **kwargs,
                 )
                 response.raise_for_status()
                 return response.json(parse_float=Decimal)
             finally:
-                _private_request.reset(context)
+                private_request.reset(context)
         except (httpx.HTTPError, httpx.InvalidURL, UnicodeError, *BAD_DATA):
             # 不携带响应、请求 URL、令牌或上游异常链。提交请求的异常由上层归为未知。
             raise SourceUnavailable("来源接口暂不可用或返回格式无效") from None
@@ -415,6 +420,32 @@ class HttpAdapter:
                 raise SourceUnavailable("列表记录格式或分页完整性检查失败") from None
         raise SourceUnavailable("来源分页达到合同页数上限，仍有未获取记录")
 
+    def _normalize_records(self, name, spec, records):
+        online = name == "online"
+        paginated = spec.get("pagination") is not None
+        normalized, issues, seen = [], [], set()
+        for number, record in enumerate(records, start=1):
+            try:
+                row = online_state(record, spec, self._fee_versions) if online else source_line(record, spec, name)
+                normalized.append(row)
+            except BAD_DATA:
+                try:
+                    row = source_record_issue(record, spec, name, number)
+                except BAD_DATA:
+                    # 候选行须能同时定位到订单明细和在线目标，在线行还须能定位共享销量的主 SKU。
+                    raise SourceUnavailable(f"来源 {name} 第 {number} 条记录的商品或订单明细身份无法核实") from None
+                issues.append(row)
+            if paginated:
+                # 在线分页的记录键包含仓配。缺该字段无法证明不同页是不同在线记录。
+                if online and row.key.warehouse is None:
+                    raise SourceUnavailable(f"来源 {name} 的分页记录缺少可核实仓配")
+                # 字段坏行也不能用来填满重复页的计数。
+                identity = row.key.grouping() if online else (row.key.platform, row.key.shop_id, row.row_id)
+                if identity in seen:
+                    raise SourceUnavailable(f"来源 {name} 的分页记录重复")
+                seen.add(identity)
+        return normalized, issues
+
     def collect(self, business_date: date) -> Snapshot:
         if self._collection_missing:
             raise SourceUnavailable("；".join(self._collection_missing))
@@ -423,23 +454,30 @@ class HttpAdapter:
             "sales_start": (business_date - timedelta(days=7)).isoformat(),
             "sales_end": (business_date - timedelta(days=1)).isoformat(),
         }
-        lines, online, stamps = [], [], []
+        lines, online, issues, stamps = [], [], [], []
         for name in (*SOURCES, "online"):
             spec = self._collections[name]
             stamp, records = self._list_source(spec, variables, business_date)
-            try:
-                if name == "online":
-                    normalized = [online_state(row, spec, self._fee_versions) for row in records]
-                    online.extend(normalized)
-                    identities = [state.key.grouping() for state in normalized]
-                else:
-                    normalized = [source_line(row, spec, name) for row in records]
-                    lines.extend(normalized)
-                    identities = [(line.key.grouping(), line.row_id) for line in normalized]
-                if spec.get("pagination") and len(set(identities)) != len(identities):
-                    raise ValueError("分页重复")
-            except BAD_DATA:
-                raise SourceUnavailable(f"来源 {name} 的商品身份、字段类型或分页记录无效") from None
+            normalized, row_issues = self._normalize_records(name, spec, records)
+            if name == "online":
+                # 同一上传对象存在无法解释的在线记录时，不可让另一份在线记录建立接管/修正基线。
+                held_targets = {}
+                for issue in row_issues:
+                    held_targets.setdefault(issue.key.target_identity(), issue)
+                held_main_skus = defaultdict(set)
+                for state in normalized:
+                    target = state.key.target_identity()
+                    if target in held_targets:
+                        held_main_skus[target].add(state.main_sku)
+                    else:
+                        online.append(state)
+                # 同一目标的记录若主 SKU 不同，所有销量范围均需核对。附加范围在该目标首条异常中记一次。
+                for target, main_skus in held_main_skus.items():
+                    issue = held_targets[target]
+                    issue.related_main_skus = sorted(main_skus - {issue.main_sku})
+            else:
+                lines.extend(normalized)
+            issues.extend(row_issues)
             stamps.append(stamp)
 
         spec = self._collections["fx"]
@@ -453,7 +491,7 @@ class HttpAdapter:
         return Snapshot(
             as_of=min(stamps), business_date=business_date, fx_date=fx_date, fx_rates=rates,
             lines=lines, online=online, contracts=self._sites, complete_sources=list(SOURCES),
-            source_versions=self._versions,
+            source_versions=self._versions, source_issues=issues,
         )
 
     def submit(self, execution_id: str, decision: Decision) -> SubmitResult:
@@ -521,10 +559,13 @@ class HttpAdapter:
             fields = mapped(payload, spec["field_map"])
             if variant_key(fields["key"]) != key:
                 raise ValueError("复合商品身份不匹配")
+            # 若查价合同返回本次执行或任务标识，已知标识冲突时不能用该回执终结执行。
+            echoes = [(fields[name], variables[name]) for name in ("execution_id", "task_id")
+                      if fields.get(name) is not None and variables[name] is not None]
+            if any(_task_label(received) != expected for received, expected in echoes):
+                raise ValueError("回执标识与本次执行冲突")
             if "rejected_status" in spec and fields["row_status"] == spec["rejected_status"]:
-                echoes = [(fields[name], variables[name]) for name in ("execution_id", "task_id")
-                          if fields.get(name) is not None and variables[name] is not None]
-                if echoes and all(_task_label(received) == expected for received, expected in echoes):
+                if echoes:
                     return LookupResult("rejected", message="已收到与本次执行绑定的拒绝回执")
                 raise ValueError("拒绝回执无法绑定")
             if fields["price_basis"] != PRICE_BASIS:

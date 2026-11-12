@@ -15,7 +15,7 @@ def make_session(username,secret,user_id=None,version=None):
     payload=base64.urlsafe_b64encode(json.dumps(value).encode()).decode()
     return payload+'.'+hmac.new(secret.encode(),payload.encode(),hashlib.sha256).hexdigest()
 
-def require_user(request:Request):
+def read_principal(request: Request, session):
     config=request.app.state.config
     try:
         payload,signature=request.cookies.get(COOKIE,'').rsplit('.',1)
@@ -24,11 +24,15 @@ def require_user(request:Request):
         if value['exp']<=time.time(): raise ValueError()
         if value['u']==config.admin_username and value.get('id','admin')=='admin':
             return Principal('admin',config.admin_username,'管理员','admin',True)
-        with request.app.state.factory() as session:
-            row=session.get(UserAccount,value.get('id'))
-            if not row or not row.active or row.username!=value['u'] or row.session_version!=value.get('v'): raise ValueError()
-            return principal(row)
+        row=session.get(UserAccount,value.get('id'))
+        if not row or not row.active or row.username!=value['u'] or row.session_version!=value.get('v'): raise ValueError()
+        return principal(row)
     except (ValueError,KeyError,TypeError): raise HTTPException(401,'请先登录') from None
+
+def require_user(request: Request):
+    with request.app.state.factory() as session:
+        return read_principal(request, session)
+
 
 def require_admin(request:Request):
     actor=require_user(request)

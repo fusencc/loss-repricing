@@ -4,7 +4,7 @@ import httpx
 import pytest
 from app.config import Settings
 from app.adapters.base import SourceUnavailable
-from app.adapters.sales_auth import SalesAuth
+from app.adapters.sales_auth import ORIGIN, SalesAuth
 
 
 def settings(**kwargs):
@@ -85,21 +85,29 @@ def test_expired_token_login_failure_does_not_return_old_token():
         assert auth.summary()['authenticated'] is False
 
 
-def test_static_service_on_other_origin_does_not_receive_new_login_token(tmp_path):
+@pytest.mark.parametrize('base_url', [ORIGIN, 'https://sales.example.test'])
+def test_vendor_requires_account_credentials_on_the_confirmed_origin(tmp_path, monkeypatch, base_url):
     import json
     from app.adapters.http import HttpAdapter
-    path=tmp_path/'contract.json'
-    path.write_text(json.dumps({'verified':True,'services':{'vendor':{'base_url':'https://sales.example.test'}}}),encoding='utf-8')
-    requests=[]
-    def handler(request):
-        requests.append(request)
-        assert request.url.host=='sales.example.test'
-        assert request.headers['Authorization']=='Bearer static-token'
-        return httpx.Response(200,json={})
-    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        adapter=HttpAdapter(settings(live_contract_path=path,vendor_token='static-token'),client=client)
-        adapter._request('GET','vendor','/read')
-    assert len(requests)==1
+
+    path = tmp_path / 'contract.json'
+    path.write_text(json.dumps({'verified': True, 'services': {'vendor': {
+        'base_url': base_url, 'allow_http_for_internal': True,
+    }}}), encoding='utf-8')
+    if base_url == ORIGIN:
+        # A former static-only deployment must fail closed before a business request.
+        monkeypatch.setenv('LR_VENDOR_TOKEN', 'retired-static-token')
+        config = Settings(_env_file=None, live_contract_path=path, vendor_username='', vendor_password='')
+    else:
+        config = settings(live_contract_path=path)
+
+    def unexpected_request(request):
+        pytest.fail('未确认销售来源不得发送认证或业务请求')
+
+    with httpx.Client(transport=httpx.MockTransport(unexpected_request)) as client:
+        adapter = HttpAdapter(config, client=client)
+        with pytest.raises(SourceUnavailable):
+            adapter._request('GET', 'vendor', '/read')
 
 
 def test_adapter_reauthenticates_before_request_but_never_retries_business_post(tmp_path):

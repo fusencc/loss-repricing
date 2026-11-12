@@ -15,6 +15,7 @@ from app.models import Batch, Item, Execution, VariantGuard, Job
 from app.services.execution import PricingService
 from app.services.store import enqueue, update_settings, utcnow, BEIJING
 from app.worker import Worker
+from app.observability import valid_id
 from test_execution import context, enable
 from test_api import client, login
 
@@ -96,7 +97,8 @@ def test_reevaluate_worker_submits_only_selected_target_and_unknown_only_queries
     assert source.lookups > previous_lookups
 
 
-def test_midnight_stops_cached_submissions_and_queues_fresh_day(context, monkeypatch):
+@pytest.mark.parametrize("scheduled", [False, True])
+def test_midnight_stops_cached_submissions_and_queues_fresh_day(context, monkeypatch, scheduled):
     factory, cfg, source = context
     today = utcnow().astimezone(BEIJING).date()
     clock = [datetime.combine(today, datetime.min.time(), BEIJING).replace(hour=23, minute=59, second=59).astimezone(timezone.utc)]
@@ -121,13 +123,24 @@ def test_midnight_stops_cached_submissions_and_queues_fresh_day(context, monkeyp
     monkeypatch.setattr(source, 'submit', submit)
     enable(factory)
     service = PricingService(factory, source, cfg)
-    first = service.run_batch('midnight')
+    worker = Worker(factory, service)
+    if scheduled:
+        from app.services.store import enqueue
+
+        job_id = enqueue(factory, "run", {"date": today.isoformat()}, f"daily:{today.isoformat()}")
+        worker.tick(clock[0].timestamp())
+        with factory() as session:
+            first = session.get(Job, job_id).batch_id
+    else:
+        first = service.run_batch('midnight')
     assert len(calls) == 1
     with factory() as session:
         queued = session.scalars(select(Job).where(Job.state == 'queued')).all()
         assert len(queued) == 1
+        if scheduled:
+            assert queued[0].dedupe_key == f'daily:{today + timedelta(days=1)}'
         assert session.get(Batch, first).business_date == today.isoformat()
-    Worker(factory, service).tick(clock[0].timestamp())
+    worker.tick(clock[0].timestamp())
     assert len(calls) == 4
     assert all(decision_day == submit_day for decision_day, submit_day in calls)
     assert today + timedelta(days=1) in collected
@@ -295,7 +308,10 @@ def test_rollover_during_refresh_preserves_selected_target(context, monkeypatch,
     with factory() as session:
         job = session.scalar(select(Job).where(Job.state == 'queued'))
         assert job is not None
-        assert job.payload == {'item_id': selected_id}
+        # 允许新增技术关联元数据，但业务负载仍只能指向原选中记录，不扩大执行范围。
+        assert {key: value for key, value in job.payload.items() if key != '_log_context'} == {'item_id': selected_id}
+        assert set(job.payload['_log_context']) == {'operation_id'}
+        assert valid_id(job.payload['_log_context']['operation_id'])
     Worker(factory, service).tick(clock[0].timestamp())
     assert calls == ['DEMO-I000']
 

@@ -154,6 +154,8 @@ button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px soli
 .table-panel .el-table { --el-table-header-bg-color: #f5f8f8; --el-table-row-hover-bg-color: #f1f8f7; }
 .table-panel .el-table .cell { padding-left: 15px; padding-right: 15px; }
 .table-panel > .el-alert { margin: 0 16px 12px; width: auto; }
+.reconciliation-origin { margin: 0 19px 15px; line-height: 1.65; overflow-wrap: anywhere; }
+.reconciliation-origin a { color: var(--el-color-primary); text-decoration: underline; }
 .inline-filter, .toolbar-actions { display: flex; align-items: center; gap: 9px; font-size: 13px; color: #5e737b; }
 .inline-filter .el-select { width: 124px; }
 .toolbar-actions .el-select { width: 105px; }

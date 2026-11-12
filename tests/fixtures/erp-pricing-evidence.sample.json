@@ -1,0 +1,235 @@
+{
+  "schema_version": "erp-pricing-evidence-v1",
+  "capture_id": "erp-capture-20261109T063500000000Z-00000000000000000000000000000001",
+  "synthetic": true,
+  "evaluated_at": "2026-11-09T15:00:00+08:00",
+  "source_versions": {
+    "details": "sample-detail-v1",
+    "mapping": "sample-online-mapping-v1",
+    "online": "sample-online-state-v1"
+  },
+  "orders": [
+    {
+      "order_id": "000001",
+      "details_complete": true,
+      "lines": [
+        {
+          "detail_id": "01",
+          "detail_ref": "sample-erp-detail/000001/01",
+          "mapping": {
+            "key": {
+              "platform": "TikTok",
+              "shop_id": "SAMPLE-MY-01",
+              "site": "MY",
+              "product_id": "PARENT-A",
+              "item_id": "0001001",
+              "sku": "SAMPLE-A",
+              "warehouse": "sample-local"
+            },
+            "main_sku": "SAMPLE-MAIN-1",
+            "ref": "sample-online-export/0001001",
+            "erp_shop": "样例店铺"
+          },
+          "loss": {
+            "quantity": "2",
+            "amount": "-2.40",
+            "currency": "CNY",
+            "basis": "order",
+            "allocation_reliable": true,
+            "fee_scope": "normal",
+            "abnormal": false,
+            "ref": "sample-loss/000001"
+          }
+        }
+      ]
+    },
+    {
+      "order_id": "000002",
+      "details_complete": true,
+      "lines": [
+        {
+          "detail_id": "01",
+          "detail_ref": "sample-erp-detail/000002/01",
+          "mapping": {
+            "key": {
+              "platform": "TikTok",
+              "shop_id": "SAMPLE-MY-01",
+              "site": "MY",
+              "product_id": "PARENT-A",
+              "item_id": "0001001",
+              "sku": "SAMPLE-A",
+              "warehouse": "sample-local"
+            },
+            "main_sku": "SAMPLE-MAIN-1",
+            "ref": "sample-online-export/0001001",
+            "erp_shop": "样例店铺"
+          },
+          "loss": {
+            "quantity": "1",
+            "amount": "-1.50",
+            "currency": "CNY",
+            "basis": "line",
+            "allocation_reliable": false,
+            "fee_scope": "normal",
+            "abnormal": false,
+            "ref": "sample-loss/000002/01"
+          }
+        },
+        {
+          "detail_id": "02",
+          "detail_ref": "sample-erp-detail/000002/02",
+          "mapping": {
+            "key": {
+              "platform": "TikTok",
+              "shop_id": "SAMPLE-MY-01",
+              "site": "MY",
+              "product_id": "PARENT-B",
+              "item_id": "0001002",
+              "sku": "SAMPLE-B",
+              "warehouse": "sample-local"
+            },
+            "main_sku": "SAMPLE-MAIN-2",
+            "ref": "sample-online-export/0001002",
+            "erp_shop": "样例店铺"
+          },
+          "loss": {
+            "quantity": "1",
+            "amount": "-3.00",
+            "currency": "MYR",
+            "basis": "line",
+            "allocation_reliable": false,
+            "fee_scope": "normal",
+            "abnormal": false,
+            "ref": "sample-loss/000002/02"
+          }
+        }
+      ]
+    },
+    {
+      "order_id": "000003",
+      "details_complete": true,
+      "lines": [
+        {
+          "detail_id": "01",
+          "detail_ref": "sample-erp-detail/000003/01",
+          "mapping": {
+            "key": {
+              "platform": "TikTok",
+              "shop_id": "SAMPLE-MY-01",
+              "site": "MY",
+              "product_id": "PARENT-C",
+              "item_id": "0001003",
+              "sku": "SAMPLE-C",
+              "warehouse": "sample-local"
+            },
+            "main_sku": "SAMPLE-MAIN-3",
+            "ref": "sample-online-export/0001003",
+            "erp_shop": "样例店铺"
+          },
+          "loss": null
+        }
+      ]
+    }
+  ],
+  "online": [
+    {
+      "ref": "sample-online-state/0001001",
+      "state": {
+        "key": {
+          "platform": "TikTok",
+          "shop_id": "SAMPLE-MY-01",
+          "site": "MY",
+          "product_id": "PARENT-A",
+          "item_id": "0001001",
+          "sku": "SAMPLE-A",
+          "warehouse": "sample-local"
+        },
+        "main_sku": "SAMPLE-MAIN-1",
+        "currency": "MYR",
+        "retail_price": "20.00",
+        "marketing_price": "18.00",
+        "current_margin": "-0.03333333",
+        "fee_scope": "normal",
+        "observed_at": "2026-11-09T14:45:00+08:00",
+        "sales_7d": 5,
+        "sales_start": "2026-11-02",
+        "sales_end": "2026-11-08",
+        "sales_complete": true,
+        "history_known": true,
+        "last_increase_at": null,
+        "pending_submission": false,
+        "protected": false,
+        "activity_locked": false,
+        "sellable": true,
+        "fee_model": {
+          "revenue_factor": "0.90",
+          "fixed_cost": "16.80",
+          "version": "sample-fee-v1",
+          "verified": true
+        }
+      }
+    },
+    {
+      "ref": "sample-online-state/0001002",
+      "state": {
+        "key": {
+          "platform": "TikTok",
+          "shop_id": "SAMPLE-MY-01",
+          "site": "MY",
+          "product_id": "PARENT-B",
+          "item_id": "0001002",
+          "sku": "SAMPLE-B",
+          "warehouse": "sample-local"
+        },
+        "main_sku": "SAMPLE-MAIN-2",
+        "currency": "MYR",
+        "retail_price": "30.00",
+        "marketing_price": null,
+        "current_margin": "-0.03333333",
+        "fee_scope": "normal",
+        "observed_at": "2026-11-09T14:45:00+08:00",
+        "sales_7d": 21,
+        "sales_start": "2026-11-02",
+        "sales_end": "2026-11-08",
+        "sales_complete": true,
+        "history_known": true,
+        "last_increase_at": null,
+        "pending_submission": false,
+        "protected": false,
+        "activity_locked": false,
+        "sellable": true,
+        "fee_model": {
+          "revenue_factor": "0.90",
+          "fixed_cost": "28.00",
+          "version": "sample-fee-v1",
+          "verified": true
+        }
+      }
+    }
+  ],
+  "fx": {
+    "date": "2026-11-09",
+    "rates": {
+      "CNY": "1",
+      "MYR": "0.60"
+    },
+    "version": "sample-fx-v1",
+    "ref": "sample-fx/20261109"
+  },
+  "contracts": [
+    {
+      "ref": "sample-contract/MY",
+      "contract": {
+        "site": "MY",
+        "verified": true,
+        "price_step": "0.01",
+        "rounding": "ROUND_HALF_UP",
+        "upload_column": "含VAT零售价",
+        "version": "sample-site-v1",
+        "warehouses": [
+          "sample-local"
+        ]
+      }
+    }
+  ]
+}

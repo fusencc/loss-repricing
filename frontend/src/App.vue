@@ -6,14 +6,16 @@ import axios from 'axios'
 import * as dd from 'dingtalk-jsapi'
 import {
   api, display, errorMessage, modeLabel, stateLabel, statuses, timeLabel,
-  type Batch, type Contracts, type Identifier, type Item, type ItemStatus,
+  type Batch, type Contracts, type ErpReconciliation, type Identifier, type Item, type ItemStatus,
   type Job, type Overview, type Protection, type Settings,
 } from './api'
 import ItemTable from './ItemTable.vue'
+import BatchSourceIssues from './BatchSourceIssues.vue'
 import ItemDrawer from './ItemDrawer.vue'
 import SettingsPanel from './SettingsPanel.vue'
 import ErpRatesPanel from './ErpRatesPanel.vue'
 import ErpSourcePanel from './ErpSourcePanel.vue'
+import ErpPricingPreview from './ErpPricingPreview.vue'
 import ProtectionPanel from './ProtectionPanel.vue'
 import CoordinationPanel from './CoordinationPanel.vue'
 import ScopesPanel from './ScopesPanel.vue'
@@ -30,11 +32,23 @@ const pages = [
   { id: 'protections', label: '保护名单', icon: Lock, description: '按店铺、站点和主 SKU 管理人工保护。' },
 ] as const
 type Page = typeof pages[number]['id']
+function noticeIdFromHash() {
+  const match = /^#notifications\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(window.location.hash)
+  return match?.[1].toLowerCase() ?? null
+}
+function erpReportFromHash() {
+  const match = /^#settings\/erp-preview\/([^/]+)\/([^/]+)$/.exec(window.location.hash)
+  return match ? { capture_id: match[1], preview_id: match[2] } : null
+}
 function route(): Page {
+  if (noticeIdFromHash()) return 'notifications'
+  if (erpReportFromHash()) return 'settings'
   const hash = window.location.hash.slice(1)
   return pages.find(entry => entry.id === hash)?.id ?? 'overview'
 }
 
+const noticeId = ref(noticeIdFromHash())
+const reopenReport = ref(erpReportFromHash())
 const page = ref<Page>(route())
 const currentPage = computed(() => pages.find(entry => entry.id === page.value)!)
 const username = ref('')
@@ -78,6 +92,7 @@ const actionLabel = ref('')
 const actionError = ref('')
 const jobMessage = ref('')
 const jobProblem = ref(false)
+const jobBatchId = ref<Identifier | null>(null)
 let pageRequest = 0
 let detailRequest = 0
 let jobChecking = false
@@ -116,6 +131,7 @@ function endSession() {
   contracts.value = null
   protections.value = []
   activeJob.value = null
+  jobBatchId.value = null
   jobMessage.value = ''
   actionError.value = ''
   pollError.value = ''
@@ -177,6 +193,10 @@ function showStatus(status: ItemStatus) {
   navigate('exceptions')
 }
 function onRoute() {
+  const id = noticeIdFromHash()
+  if (id !== noticeId.value) closeItem()
+  noticeId.value = id
+  reopenReport.value = erpReportFromHash()
   const target = route()
   page.value = principal.value && !visiblePages.value.some(p => p.id === target) ? 'overview' : target
 }
@@ -246,7 +266,9 @@ function closeBatch() {
 }
 async function openLatest() {
   const id = overview.value?.latest_batch?.id
-  if (id == null) return
+  if (id != null) await showBatch(id)
+}
+async function showBatch(id: Identifier) {
   navigate('batches')
   page.value = 'batches'
   await nextTick()
@@ -280,6 +302,7 @@ async function runJob(path: string, label: string, body?: object) {
   actionBusy.value = true
   actionLabel.value = label
   actionError.value = ''
+  jobBatchId.value = null
   jobMessage.value = ''
   try {
     const { data } = await api.post<{ job_id: Identifier }>(path, body)
@@ -301,6 +324,7 @@ async function checkJob() {
     activeJob.value = data
     if (jobDone.has(data.state.toLowerCase())) {
       jobProblem.value = ['failed', 'error', 'cancelled'].includes(data.state.toLowerCase())
+      jobBatchId.value = data.kind === 'erp_reconciliation' && !jobProblem.value ? data.batch_id : null
       jobMessage.value = `${actionLabel.value}${stateLabel(data.state)}${data.batch_id == null ? '' : ` · 批次 #${data.batch_id}`}${data.error ? ` · ${data.error}` : ''}`
       activeJob.value = null
       if (page.value === 'batches' && activeBatch.value) await openBatch(activeBatch.value.id)
@@ -312,6 +336,16 @@ async function checkJob() {
   } finally {
     jobChecking = false
   }
+}
+function reconcileErpPreview(captureId: string, previewId: string) {
+  void runJob(
+    '/sources/erp/captures/' + encodeURIComponent(captureId) +
+    '/pricing-previews/' + encodeURIComponent(previewId) + '/reconciliation',
+    '生成文件对账批次',
+  )
+}
+function erpReportLink(source: ErpReconciliation) {
+  return '#settings/erp-preview/' + encodeURIComponent(source.capture_id) + '/' + encodeURIComponent(source.preview_id)
 }
 function reevaluate(id: Identifier, note: string) {
   void runJob(`/items/${encodeURIComponent(id)}/reevaluate`, '重新评估', { note: note.trim() || undefined })
@@ -425,7 +459,9 @@ onUnmounted(() => {
           <el-alert v-if="pollError" :title="pollError" type="warning" show-icon :closable="false" />
           <el-alert v-if="actionError" :title="actionError" type="error" show-icon @close="actionError = ''" />
           <el-alert v-if="activeJob" :title="`${actionLabel} · ${stateLabel(activeJob.state)} · 任务 #${activeJob.id}`" type="info" show-icon :closable="false" />
-          <el-alert v-else-if="jobMessage" :title="jobMessage" :type="jobProblem ? 'error' : 'success'" show-icon @close="jobMessage = ''" />
+          <el-alert v-else-if="jobMessage" :title="jobMessage" :type="jobProblem ? 'error' : 'success'" show-icon @close="jobMessage = ''">
+            <el-button v-if="jobBatchId != null" link type="primary" @click="showBatch(jobBatchId)">查看对账批次</el-button>
+          </el-alert>
         </div>
 
         <div v-if="page === 'overview'" v-loading="loading" class="page-content">
@@ -491,7 +527,16 @@ onUnmounted(() => {
             <div class="table-toolbar">
               <div><el-button type="primary" link @click="closeBatch">返回批次列表</el-button><h2>批次 #{{ activeBatch.id }}</h2><p class="muted">{{ activeBatch.business_date }} · {{ modeLabel(activeBatch.mode) }} · {{ stateLabel(activeBatch.status) }}</p></div>
             </div>
+            <div v-if="activeBatch.erp_reconciliation" class="reconciliation-origin">
+              {{ activeBatch.erp_reconciliation.synthetic ? '合成样例 · 文件对账' : 'ERP 文件对账' }}<br />
+              采集编号 <code>{{ activeBatch.erp_reconciliation.capture_id }}</code><br />
+              报告编号 <code>{{ activeBatch.erp_reconciliation.preview_id }}</code><br />
+              回放时点 {{ timeLabel(activeBatch.erp_reconciliation.evaluated_at) }}（北京时间）<br />
+              <a :href="erpReportLink(activeBatch.erp_reconciliation)">打开原算价报告</a>
+            </div>
             <el-alert v-if="activeBatch.error" :title="activeBatch.error" type="error" show-icon :closable="false" />
+            <BatchSourceIssues v-if="isAdmin && activeBatch.source_issue_count" :key="activeBatch.id"
+              :batch-id="activeBatch.id" :total="activeBatch.source_issue_count" />
             <ItemTable :items="activeBatch.items" empty-text="该批次没有商品记录" @select="openItem" />
           </section>
           <section v-else class="panel table-panel">
@@ -499,7 +544,7 @@ onUnmounted(() => {
             <el-table :data="batches" row-key="id" empty-text="暂无运行批次">
               <el-table-column prop="id" label="批次 ID" min-width="110" />
               <el-table-column prop="business_date" label="业务日期" min-width="115" />
-              <el-table-column label="运行环境" min-width="115"><template #default="{ row }"><span class="mode-pill" :class="`mode-${row.mode}`">{{ modeLabel(row.mode) }}</span></template></el-table-column>
+              <el-table-column label="运行环境" min-width="115"><template #default="{ row }"><span class="mode-pill" :class="`mode-${row.mode}`">{{ row.erp_reconciliation?.synthetic ? '合成样例对账' : modeLabel(row.mode) }}</span></template></el-table-column>
               <el-table-column label="状态" min-width="115"><template #default="{ row }">{{ stateLabel(row.status) }}</template></el-table-column>
               <el-table-column label="创建时间" min-width="176"><template #default="{ row }">{{ timeLabel(row.created_at) }}</template></el-table-column>
               <el-table-column label="异常说明" min-width="170" show-overflow-tooltip><template #default="{ row }">{{ display(row.error) }}</template></el-table-column>
@@ -521,10 +566,13 @@ onUnmounted(() => {
           <ItemTable :items="items" :loading="loading" @select="openItem" />
         </section>
 
-        <NotificationsPanel v-else-if="page === 'notifications'" :admin="isAdmin" @select="openItem" />
+        <NotificationsPanel v-else-if="page === 'notifications'" :admin="isAdmin" :notice-id="noticeId" @select="openItem" />
         <CoordinationPanel v-else-if="page === 'coordination' && isAdmin" />
         <div v-else-if="page === 'settings' && isAdmin" v-loading="loading" class="page-content">
           <ErpSourcePanel />
+          <ErpPricingPreview :key="reopenReport ? reopenReport.capture_id + '/' + reopenReport.preview_id : ''"
+            :file-mode="mode === 'file'" :job-busy="actionBusy || !!activeJob" :open-report="reopenReport"
+            @reconcile="reconcileErpPreview" @open-batch="showBatch" />
           <ErpRatesPanel />
           <SettingsPanel v-if="settings && contracts" :settings="settings" :contracts="contracts" :live-enabled="overview?.readiness.live_enabled ?? false" :save="saveSettings" />
         </div>

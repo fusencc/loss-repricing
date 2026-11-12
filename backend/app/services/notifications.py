@@ -1,14 +1,18 @@
 """Persistent notices. Unknown sends never become retryable; only explicit failure can retry."""
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 from uuid import uuid4
 import time
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
-from app.models import Item, WorkerLease
+from app.models import Batch, Item, WorkerLease
 from app.models.notifications import Notice
 from app.adapters.dingtalk import DingTalkClient
 from app.services.store import stamp, utcnow
+
+
+NOTICE_ITEM_STATES = ('待处理', '待核验', '已核验', '本轮不调')
 
 
 def _coord():
@@ -17,22 +21,22 @@ def _coord():
     return UserAccount, resolve_ownership
 
 
-def _active(session, user_id):
+def _active(session, user_id, *, role=None):
     if user_id == 'admin':
-        return True
+        return role is None
     UserAccount,_ = _coord()
     user=session.get(UserAccount,user_id)
-    return bool(user and user.active)
+    return bool(user and user.active and (role is None or user.role == role))
 
 
 def notice_visible(session, actor, notice):
     if actor.role == 'admin':
         return True
-    if notice.recipient_id != actor.id:
+    if notice.recipient_id != actor.id or not notice.item_ids:
         return False
     from app.services.coordination import can_access
-    items=[session.get(Item,item_id) for item_id in notice.item_ids]
-    return bool(items) and all(item and can_access(session,actor,item.key) for item in items)
+    keys = session.scalars(select(Item.key).where(Item.id.in_(notice.item_ids))).all()
+    return len(keys) == len(notice.item_ids) and all(can_access(session, actor, key) for key in keys)
 
 
 def _items(session,notice):
@@ -40,7 +44,8 @@ def _items(session,notice):
 
 
 def _recipient_items(session, notice):
-    if not _active(session,notice.recipient_id):
+    role = 'manager' if notice.parent_id else None
+    if not _active(session, notice.recipient_id, role=role):
         return []
     _,resolve=_coord()
     current=[]
@@ -49,9 +54,11 @@ def _recipient_items(session, notice):
             continue
         ownership=resolve(session,item.key)
         if notice.parent_id:
-            if item.status not in {'待处理','待核验'}:
+            # 主管降权或负责人停用时，网页权限与外部卡片的范围同步收紧。
+            if (item.status not in {'待处理','待核验'} or not ownership
+                    or not _active(session, ownership.owner_id)):
                 continue
-            expected=ownership.supervisor_id if ownership else None
+            expected=ownership.supervisor_id
         else:
             expected=ownership.owner_id if ownership and _active(session,ownership.owner_id) else 'admin'
         if expected == notice.recipient_id:
@@ -67,35 +74,77 @@ def _summary(items, escalation=False):
             'unassigned':False}
 
 
-def enqueue_batch_notices(factory,batch_id):
-    _,resolve=_coord()
-    added=0
+def notice_batch_mode(session, notice):
+    return session.scalar(select(Batch.mode).where(Batch.id == notice.batch_id))
+
+
+def _card_text(summary, batch_mode):
+    # 钉钉卡片只带授权检查后的状态汇总，商品与价格在网页重新鉴权后展示。
+    label = {'demo': '演示批次（已核验项为模拟结果）', 'file': '文件对账', 'live': '实时数据批次'}
+    counts = summary['statuses']
+    breakdown = ' · '.join(f'{status} {counts.get(status, 0)}' for status in NOTICE_ITEM_STATES)
+    return (f"{label.get(batch_mode, '批次来源待核实')} · 本批共{summary['total']}条\n\n"
+            f"{breakdown}\n\n打开本条通知核对商品、处理原因和价格。")
+
+
+def enqueue_batch_notices(factory, batch_id, *, existing_only=False):
     with factory.begin() as session:
-        groups=defaultdict(list)
-        for item in session.scalars(select(Item).where(Item.batch_id==batch_id)):
-            ownership=resolve(session,item.key)
-            recipient=ownership.owner_id if ownership and _active(session,ownership.owner_id) else 'admin'
-            groups[recipient].append(item)
-        for recipient,items in groups.items():
-            key=f'batch:{batch_id}:{recipient}'
-            summary=_summary(items)
-            summary['unassigned']=any(resolve(session,i.key) is None for i in items)
-            existing=session.scalar(select(Notice).where(Notice.dedupe_key==key).with_for_update())
-            if existing:
-                # Refresh web business state only. Delivery, receipt time, ack and evidence are immutable here.
-                existing.item_ids=[i.id for i in items]
-                existing.summary=summary
-                continue
-            now=stamp(utcnow())
-            try:
-                with session.begin_nested():
-                    session.add(Notice(id=str(uuid4()),dedupe_key=key,recipient_id=recipient,
-                        batch_id=batch_id,item_ids=[i.id for i in items],summary=summary,
-                        delivery_state='pending',created_at=now,updated_at=now))
-                    session.flush()
-                added+=1
-            except IntegrityError:
-                pass  # Unique outbox key arbitrates concurrent enqueue attempts.
+        return write_batch_notices(session, batch_id, existing_only=existing_only)
+
+
+def write_batch_notices(session, batch_id, *, existing_only=False):
+    from app.models.coordination import Ownership
+    from app.services.coordination import ownership_scopes
+
+    # 通知汇总只用身份与状态，避免每次回查重复载入整批价格计算证据。
+    items = session.execute(
+        select(Item.id, Item.key, Item.status).where(Item.batch_id == batch_id)
+    )
+    items_with_scopes = [(item, ownership_scopes(item.key)) for item in items]
+    scopes = sorted({scope for _, pair in items_with_scopes for scope in pair})
+    owners = {}
+    # 按当前批次的目标与店铺范围分段读取，避免每个商品重复查询归属。
+    for start in range(0, len(scopes), 500):
+        chunk = scopes[start:start + 500]
+        owners.update((row.scope_key, row.owner_id) for row in session.scalars(
+            select(Ownership).where(Ownership.scope_key.in_(chunk))
+        ))
+    active = {owner_id for owner_id in set(owners.values()) if _active(session, owner_id)}
+    groups = defaultdict(list)
+    unassigned = set()
+    for item, (target_scope, shop_scope) in items_with_scopes:
+        owner_id = owners.get(target_scope, owners.get(shop_scope))
+        recipient = owner_id if owner_id in active else "admin"
+        groups[recipient].append(item)
+        if owner_id is None:
+            unassigned.add(recipient)
+
+    added = 0
+    for recipient, items in groups.items():
+        key = f"batch:{batch_id}:{recipient}"
+        summary = _summary(items)
+        summary["unassigned"] = recipient in unassigned
+        existing=session.scalar(select(Notice).where(Notice.dedupe_key==key).with_for_update())
+        if existing:
+            # Refresh web business state only. Delivery, receipt time, ack and evidence are immutable here.
+            existing.item_ids=[i.id for i in items]
+            existing.summary=summary
+            continue
+        if existing_only:
+            # 批次取数失败期间只同步原通知页，不新增投递。
+            continue
+        now=stamp(utcnow())
+        try:
+            with session.begin_nested():
+                session.add(Notice(id=str(uuid4()),dedupe_key=key,recipient_id=recipient,
+                    batch_id=batch_id,item_ids=[i.id for i in items],summary=summary,
+                    delivery_state='pending',created_at=now,updated_at=now))
+                session.flush()
+            added+=1
+        except IntegrityError:
+            # 只吸收确实被另一事务插入的通知。其他约束错误须回滚本次批次汇总。
+            if session.scalar(select(Notice.id).where(Notice.dedupe_key == key).with_for_update()) is None:
+                raise
     return added
 
 
@@ -115,7 +164,8 @@ def _escalate(factory):
                 ownership=resolve(session,item.key)
                 # Never guess supervisor or reuse an ownership snapshot after transfer.
                 if (ownership and ownership.owner_id==notice.recipient_id and ownership.supervisor_id
-                        and _active(session,ownership.supervisor_id)):
+                        and _active(session, ownership.owner_id)
+                        and _active(session, ownership.supervisor_id, role='manager')):
                     groups[ownership.supervisor_id].append(item)
             if not groups:
                 continue
@@ -241,9 +291,10 @@ def _dispatch_notices(factory,config,owner):
                     notice.delivery_evidence=list(notice.delivery_evidence or []) + [{
                         'operation':'send_intent','summary':dict(summary),'item_ids':list(notice.item_ids),
                         'at':stamp(utcnow())}]
-                    text=f"本批共{summary.get('total',0)}条，其中异常{summary.get('exceptions',0)}条。请登录网页查看并确认。"
-                    base=getattr(config,'public_base_url','').rstrip('/')
-                    send=(userid,summary.get('title','亏损提价通知'),text,base+'/#notifications')
+                    text = _card_text(summary, notice_batch_mode(session, notice))
+                    base = getattr(config, 'public_base_url', '').partition('#')[0].rstrip('/')
+                    url = f"{base}/#notifications/{quote(notice.id, safe='')}"
+                    send = (userid, summary['title'], text, url)
                     query=None
             # `sending` committed before crossing the external side-effect boundary.
             result=client.send_notice(*send) if send else client.query_notice(*query)

@@ -8,18 +8,29 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from app.api.auth import require_admin,require_user,COOKIE,make_session
-from app.models import Item,Job,Audit
+from app.models import Batch,Item,Job,Audit
 from app.models.coordination import UserAccount,Ownership,TargetControl,Correction
 from app.services.coordination import *
 from app.db import transaction
-from app.services.store import utcnow, BEIJING
+from app.services.store import utcnow, BEIJING, is_erp_reconciliation
 router=APIRouter(prefix='/api')
 
 def cols(row): return {c.name:getattr(row,c.name) for c in row.__table__.columns}
 def user_view(row): return {k:v for k,v in cols(row).items() if k not in {'password_hash','session_version'}}
-def check_item(session,item_id,actor):
+def can_view_item(session, actor, item):
+    return actor.role == "admin" or (
+        not is_erp_reconciliation(session.get(Batch, item.batch_id)) and can_access(session, actor, item.key)
+    )
+
+
+def check_item(session,item_id,actor, *, mode=None):
     item=session.get(Item,item_id)
-    if not item or not can_access(session,actor,item.key): raise HTTPException(404,'记录不存在')
+    if not item or not can_view_item(session,actor,item): raise HTTPException(404,'记录不存在')
+    batch = session.get(Batch, item.batch_id)
+    if is_erp_reconciliation(batch):
+        raise HTTPException(409, "文件对账批次仅供查阅")
+    if mode is not None and batch.mode != mode:
+        raise HTTPException(409, "修正来源批次模式不一致")
     return item
 
 def item_collaboration(session,item,actor):
@@ -180,7 +191,7 @@ def propose(item_id:str,body:CorrectionBody,request:Request,actor=Depends(requir
     except Exception:raise HTTPException(422,'售价必须为有限正十进制数') from None
     if not price.is_finite() or price<=0:raise HTTPException(422,'售价必须为有限正十进制数')
     with request.app.state.factory() as pre:
-        source=check_item(pre,item_id,actor)
+        source=check_item(pre,item_id,actor,mode=request.app.state.adapter.mode)
         source_key=VariantKey.model_validate(source.key)
     today=utcnow().astimezone(BEIJING).date()
     try:
@@ -193,7 +204,7 @@ def propose(item_id:str,body:CorrectionBody,request:Request,actor=Depends(requir
     except Exception:raise HTTPException(409,'无法取得当日唯一且新鲜的在线价格依据') from None
     try:
         with transaction(request.app.state.factory) as s:
-            item=check_item(s,item_id,actor)
+            item=check_item(s,item_id,actor,mode=request.app.state.adapter.mode)
             control=change_control(s,item,actor,body.version,body.reason)
             row=Correction(id=str(uuid4()),target_id=control.target_id,item_id=item.id,desired_actual=str(price),reason=body.reason,requested_by=actor.id,state='proposed',control_version=control.version,baseline=baseline,created_at=stamp(),updated_at=stamp(),result={})
             s.add(row);s.flush()
@@ -204,7 +215,7 @@ def approve(correction_id:str,body:Approve,request:Request,actor=Depends(require
     with transaction(request.app.state.factory) as s:
         row=s.get(Correction,correction_id)
         if not row:raise HTTPException(404,'修正不存在')
-        item=check_item(s,row.item_id,actor)
+        item=check_item(s,row.item_id,actor,mode=request.app.state.adapter.mode)
         if not (actor.role in {'admin','manager'} or actor.id==row.requested_by and actor.can_correct):raise HTTPException(403,'无修正批准权限')
         control=get_control(s,item.key)
         if not control or control.version!=body.version or row.control_version!=body.version:raise HTTPException(409,'修正依据版本已失效')

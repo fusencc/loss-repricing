@@ -12,10 +12,10 @@ from app.models import Batch, Item, Execution
 from app.models.coordination import Correction, UserAccount
 from app.services.coordination import Principal, principal, can_access, lock_authorization
 from app.services.price_control import price_baseline, same_price, lock_control
-from app.services.store import utcnow, stamp, BEIJING
-from app.domain.engine import allowed_error, SITE_CURRENCIES, sales_window
+from app.services.store import utcnow, stamp, BEIJING, is_erp_reconciliation
+from app.domain.engine import allowed_error, conflicting_sales_scopes, SITE_CURRENCIES, sales_window
 from app.domain.money import MoneyRatio
-from app.domain.types import Decision, VariantKey
+from app.domain.types import Decision, OnlineSourceIssue, VariantKey
 
 def correction_gate(session, decision, control, locked=None):
     correction = session.get(Correction, decision.trace.get("correction_id"))
@@ -46,6 +46,18 @@ def manual_decision(snapshot, online, desired, reason, correction_id, now):
     if (online.observed_at > now or online.observed_at.astimezone(BEIJING).date() != today
             or (now-online.observed_at).total_seconds() > 300):
         raise ValueError("当前价格依据过期，请重新取数")
+    if online.last_changed_at is not None and online.last_changed_at > online.observed_at:
+        raise ValueError("价格变更时间晚于该价格的观察时间")
+    target = key.target_identity()
+    scope = key.sales_scope(online.main_sku)
+    if any(
+        isinstance(issue, OnlineSourceIssue)
+        and (issue.key.target_identity() == target or scope in issue.sales_scopes())
+        for issue in snapshot.source_issues
+    ):
+        raise ValueError("目标或共享主 SKU 的在线数据异常，需核对后重新取数")
+    if scope in conflicting_sales_scopes(snapshot.online, now):
+        raise ValueError("共享主 SKU 的在线归属或七日销量存在冲突，需核对后重新取数")
     if not online.history_known or online.pending_submission:
         raise ValueError("调价历史不完整或仍有未知提交")
     if (online.protected or not online.sales_complete or online.sales_7d is None
@@ -94,16 +106,30 @@ def run_correction(service, correction_id):
         existing_id = correction.execution_id
         if existing_id:
             execution = session.get(Execution, existing_id)
-            old_item_id = execution.item_id if execution else None
-        else:
-            old_item_id = None
+            if execution is None:
+                raise ValueError("修正关联的执行记录不存在")
+            old_item = session.get(Item, execution.item_id)
+            execution_batch = session.get(Batch, old_item.batch_id)
+            if (execution_batch.mode != service.adapter.mode
+                    or execution_batch.run_key != "correction:" + correction_id):
+                raise ValueError("修正关联的执行批次不匹配")
+            old_item_id = old_item.id
+            execution_batch_id = execution_batch.id
         if not existing_id and correction.state != "queued":
             return None
         original = session.get(Item, correction.item_id)
+        source_batch = session.get(Batch, original.batch_id)
+        # 已排队方案也必须遵循原始批次隔离，切换适配器不能沿用旧环境的人工授权。
+        if source_batch.mode != service.adapter.mode:
+            raise ValueError("修正来源批次模式不一致")
+        if is_erp_reconciliation(source_batch):
+            raise ValueError("文件对账批次仅供查阅")
         key = VariantKey.model_validate(original.key)
     if existing_id:
+        # 恢复任务复用原执行及批次，worker 仍可把任务链接指向执行详情。
         service.reconcile(item_id=old_item_id)
-        return None
+        _finish_correction(service, correction_id, old_item_id, execution_batch_id)
+        return execution_batch_id
     today = utcnow().astimezone(BEIJING).date()
     snapshot = service._enrich(service.adapter.collect(today))
     # 提案存的是用户看到的原价；重新取数只能复核，不能替换依据后继续执行旧授权。
@@ -150,11 +176,20 @@ def run_correction(service, correction_id):
             row=session.get(Correction,correction_id)
             row.state,row.result,row.updated_at="stale",{"message":"已跨日，请重新取数提交修正"},stamp()
     service.reconcile(item_id=item_id)
-    with transaction(factory) as session:
-        current=session.get(Correction,correction_id)
-        execution=session.get(Execution,current.execution_id) if current.execution_id else None
-        if not execution or execution.state=="failed":
-            item=session.get(Item,item_id)
-            current.state,current.updated_at,current.result="failed",stamp(),{"message":item.reason}
-    service._summarize(batch_id)
+    _finish_correction(service, correction_id, item_id, batch_id)
     return batch_id
+
+
+def _finish_correction(service, correction_id, item_id, batch_id):
+    with transaction(service.factory) as session:
+        correction = session.get(Correction, correction_id, with_for_update=True)
+        execution = session.get(Execution, correction.execution_id) if correction.execution_id else None
+        # 明确拒绝已在提交阶段落库，恢复时从执行记录补齐方案结果。
+        failed = correction.state in {"queued", "executing"} and (execution is None or execution.state == "failed")
+        if failed:
+            item = session.get(Item, item_id)
+            correction.state = "failed"
+            correction.updated_at = stamp()
+            correction.result = {"message": item.reason}
+        if failed or session.get(Batch, batch_id).status == "running":
+            service._write_batch_summary(session, batch_id)

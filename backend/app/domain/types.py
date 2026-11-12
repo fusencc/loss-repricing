@@ -1,3 +1,4 @@
+from collections.abc import Iterator
 from datetime import date
 from decimal import Decimal
 from hashlib import sha256
@@ -16,8 +17,8 @@ DecisionStatus = Literal["本轮不调", "待处理", "待核验", "已核验"]
 FiniteDecimal = Annotated[Decimal, Field(allow_inf_nan=False)]
 
 
-class VariantKey(BaseModel):
-    """商品 ID 与 SKU 按原始文本保留，避免数值化丢失前导零。"""
+class VariantReference(BaseModel):
+    """已定位的来源变体。字段异常记录可以保留仓配缺失的原状。"""
 
     platform: StrictStr
     shop_id: StrictStr
@@ -25,7 +26,7 @@ class VariantKey(BaseModel):
     product_id: StrictStr
     item_id: StrictStr
     sku: StrictStr
-    warehouse: StrictStr
+    warehouse: StrictStr | None
 
     def identity(self) -> str:
         """来源与在线 SKU 严格匹配身份；保留 SKU，不能用执行锁身份合并亏损样本。"""
@@ -37,10 +38,19 @@ class VariantKey(BaseModel):
         fields = (self.platform, self.shop_id, self.site, self.product_id, self.item_id)
         return sha256(json.dumps(fields, ensure_ascii=False).encode("utf-8")).hexdigest()
 
+    def sales_scope(self, main_sku: str) -> tuple[str, str, Site, str]:
+        return self.platform, self.shop_id, self.site, main_sku
+
     def grouping(self) -> str:
         """算价分组包含仓配口径，单个在线子 SKU 出现多个仓配时交由核对。"""
         fields = (self.identity(), self.warehouse)
         return sha256(json.dumps(fields, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+class VariantKey(VariantReference):
+    """商品 ID 与 SKU 按原始文本保留，避免数值化丢失前导零。"""
+
+    warehouse: StrictStr
 
 
 class SourceLine(BaseModel):
@@ -63,10 +73,13 @@ class SourceLine(BaseModel):
 
 
 class FeeModel(BaseModel):
-    """经确认的一次毛利模型，系数无量纲，固定项和输出均为站点币。"""
+    """一次毛利系数无量纲，固定成本按明确比值换成站点币，输出仍为站点币。"""
 
     revenue_factor: FiniteDecimal
     fixed_cost: FiniteDecimal
+    # 原币固定成本 / (原币/站点币)。已用站点币计成本时单位比值为1。
+    # 不预先截断循环小数成本；公司CNY报价必须由同一费用来源明确提供。
+    fixed_cost_divisor: Annotated[Decimal, Field(gt=0, allow_inf_nan=False)] = Decimal(1)
     version: StrictStr
     verified: bool = False
 
@@ -76,7 +89,7 @@ class FeeModel(BaseModel):
 
     def profit_exact(self, price: MoneyRatio) -> MoneyRatio:
         """G(P)=P×a-b；循环小数价格延迟除法，零毛利不能由近似尾差变成负值。"""
-        return price * MoneyRatio(self.revenue_factor) - MoneyRatio(self.fixed_cost)
+        return price * MoneyRatio(self.revenue_factor) - MoneyRatio(self.fixed_cost, self.fixed_cost_divisor)
 
 
 class OnlineState(BaseModel):
@@ -122,18 +135,48 @@ class SiteContract(BaseModel):
     warehouses: list[StrictStr] = Field(default_factory=list)
 
 
+class CandidateSourceIssue(BaseModel):
+    """可定位的候选明细字段异常。保留行身份用于去重和整单亏损归属检查。"""
+
+    source: Source
+    record_number: Annotated[StrictInt, Field(gt=0)]
+    key: VariantReference
+    order_id: StrictStr
+    row_id: StrictStr
+
+
+class OnlineSourceIssue(BaseModel):
+    """可定位的在线记录字段异常。主 SKU 是七天销量保护的共享范围。"""
+
+    source: Literal["online"]
+    record_number: Annotated[StrictInt, Field(gt=0)]
+    key: VariantReference
+    main_sku: StrictStr
+    related_main_skus: list[StrictStr] = Field(default_factory=list)
+
+    def sales_scopes(self) -> Iterator[tuple[str, str, Site, str]]:
+        for main_sku in (self.main_sku, *self.related_main_skus):
+            yield self.key.sales_scope(main_sku)
+
+
+SourceIssue = Annotated[CandidateSourceIssue | OnlineSourceIssue, Field(discriminator="source")]
+
+
 class Snapshot(BaseModel):
-    """单批规范化来源。业务日期和汇率日期均按北京时间，汇率为每 CNY 兑换的币种单位。"""
+    """单批规范来源；日期按北京时间，汇率必须携带明确单位后参与精确比值计算。"""
 
     as_of: AwareDatetime
     business_date: date
     fx_date: date
     fx_rates: dict[str, FiniteDecimal]
+    # 文件规范单位为原币/CNY；ERP当前配置为CNY/原币，保留原值避免循环倒数回读。
+    fx_rate_unit: Literal['currency_per_cny', 'cny_per_currency'] = 'currency_per_cny'
     lines: list[SourceLine]
     online: list[OnlineState]
     contracts: dict[str, SiteContract]
     complete_sources: list[str]
     source_versions: dict[str, str] = Field(default_factory=dict)
+    source_issues: list[SourceIssue] = Field(default_factory=list)
 
 
 class Decision(BaseModel):

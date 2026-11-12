@@ -15,6 +15,13 @@ export interface Settings {
   schedule_enabled: boolean
 }
 
+export interface ErpReconciliation {
+  capture_id: string
+  preview_id: string
+  evaluated_at: string
+  synthetic: boolean
+}
+
 export interface Batch {
   id: Identifier
   business_date: string
@@ -23,6 +30,8 @@ export interface Batch {
   created_at: string
   summary: Record<string, unknown>
   error: string | null
+  erp_reconciliation?: ErpReconciliation
+  source_issue_count?: number
 }
 
 export interface Item {
@@ -56,6 +65,7 @@ export interface Item {
     trace: unknown
   } | null
   execution: Record<string, unknown> | null
+  read_only?: boolean
   control?: { mode: string; version: number; reason: string; handback_pending: boolean }
   ownership?: Ownership | null
   capabilities?: Record<string, boolean>
@@ -93,6 +103,7 @@ export interface Protection {
 
 export interface Job {
   id: Identifier
+  kind?: string
   state: string
   error: string | null
   batch_id: Identifier | null
@@ -140,7 +151,17 @@ export function timeLabel(value: string | null | undefined) {
   }).format(date)
 }
 
-export function errorMessage(error: unknown) {
+export function errorMessage(error: unknown): string {
+  const message = baseErrorMessage(error)
+  if (!axios.isAxiosError(error) || !error.response) return message
+  const candidate: unknown = error.response.headers?.['x-error-id']
+    ?? error.response.data?.error_id ?? error.response.headers?.['x-request-id']
+  // 仅显示服务端生成的技术编号，不把异常正文或任意响应头拼接进提示。
+  const identifier = typeof candidate === 'string' && /^[a-f0-9]{32}$/.test(candidate) ? candidate : null
+  return identifier ? `${message}（排查编号：${identifier}）` : message
+}
+
+function baseErrorMessage(error: unknown): string {
   if (!axios.isAxiosError(error)) return error instanceof Error ? error.message : '操作失败，请重试。'
   if (!error.response) return '连接服务失败，请稍后重试。'
   const detail: unknown = error.response.data?.detail

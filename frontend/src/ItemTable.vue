@@ -2,8 +2,16 @@
 import type { Item } from './api'
 import { statusType, timeLabel } from './api'
 
-defineProps<{ items: Item[]; loading?: boolean; emptyText?: string }>()
+defineProps<{ items: Item[]; loading?: boolean; emptyText?: string; showPrices?: boolean }>()
 defineEmits<{ select: [item: Item] }>()
+function priceLabel(value: unknown, item: Item) {
+  if (typeof value !== 'string') return '—'
+  const currency = (item.decision?.trace as { station_currency?: string } | undefined)?.station_currency
+  return currency ? value + ' ' + currency : value
+}
+function observedPrice(item: Item) {
+  return (item.evidence as { actual_price?: string } | undefined)?.actual_price
+}
 </script>
 
 <template>
@@ -22,6 +30,12 @@ defineEmits<{ select: [item: Item] }>()
     </el-table-column>
     <el-table-column label="状态" width="100">
       <template #default="{ row }"><el-tag :type="statusType(row.status)" effect="light">{{ row.status }}</el-tag></template>
+    </el-table-column>
+    <el-table-column v-if="showPrices" label="计算目标实际价" min-width="128">
+      <template #default="{ row }">{{ priceLabel(row.decision?.target_actual, row) }}</template>
+    </el-table-column>
+    <el-table-column v-if="showPrices" label="回读实际价" min-width="128">
+      <template #default="{ row }">{{ priceLabel(observedPrice(row), row) }}</template>
     </el-table-column>
     <el-table-column prop="reason" label="处理原因" min-width="200" show-overflow-tooltip />
     <el-table-column label="更新时间" min-width="166">

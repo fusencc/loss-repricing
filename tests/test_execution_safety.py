@@ -4,16 +4,16 @@ from decimal import Decimal, localcontext
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 
-from app.adapters.base import LookupResult, SubmitResult
+from app.adapters.base import LookupResult, SourceUnavailable, SubmitResult
 from app.config import Settings
 from app.db import Base, create_database
 from app.domain.engine import evaluate
 from app.domain.types import Decision, Snapshot
-from app.models import Batch, Execution, Item, Protection, VariantGuard
+from app.models import Batch, Execution, Item, Job, Protection, VariantGuard
 from app.services.execution import PricingService
-from app.services.store import BEIJING, parse_stamp, stamp, update_settings
+from app.services.store import BEIJING, parse_stamp, settings_value, stamp, update_settings
 
 
 class SyntheticAdapter:
@@ -166,6 +166,73 @@ def test_unknown_keeps_every_lock_and_never_retransmits(safety_context):
             assert guard.last_effective_at is None
 
 
+@pytest.mark.parametrize("wrong_target", [False, True])
+def test_invalid_saved_execution_does_not_stop_other_lookups(safety_context, wrong_target):
+    factory, cfg, adapter, clock = safety_context
+    service = PricingService(factory, adapter, cfg)
+    service.run_batch("invalid-saved-execution")
+    invalid, valid, _ = executions(factory)
+    with factory.begin() as session:
+        session.get(Execution, invalid.id).request = valid.request if wrong_target else {}
+    clock[0] += timedelta(minutes=1)
+    adapter.results[valid.id] = LookupResult("accepted", Decimal("11"), clock[0])
+
+    adapter.results[invalid.id] = adapter.results[valid.id]
+    adapter.lookups.clear()
+    service.reconcile()
+    assert invalid.id not in adapter.lookups
+    with factory() as session:
+        assert session.get(Execution, invalid.id).state == "unknown"
+        assert session.get(VariantGuard, invalid.variant_id).execution_id == invalid.id
+        assert session.get(Execution, valid.id).state == "verified"
+        assert session.get(VariantGuard, valid.variant_id).execution_id is None
+
+
+@pytest.mark.parametrize("bad_target", [None, {"numerator": "11", "denominator": "0"}])
+def test_invalid_saved_price_does_not_stop_other_verifications(safety_context, bad_target):
+    factory, cfg, adapter, clock = safety_context
+    service = PricingService(factory, adapter, cfg)
+    service.run_batch("invalid-saved-price")
+    invalid, valid, _ = executions(factory)
+    request = dict(invalid.request)
+    trace = dict(request["trace"])
+    if bad_target is None:
+        request["target_actual"] = None
+        trace.pop("exact_target_actual")
+    else:
+        trace["exact_target_actual"] = bad_target
+    with factory.begin() as session:
+        session.get(Execution, invalid.id).request = {**request, "trace": trace}
+    clock[0] += timedelta(minutes=1)
+    for execution in (invalid, valid):
+        adapter.results[execution.id] = LookupResult("accepted", Decimal("11"), clock[0])
+
+    service.reconcile()
+    with factory() as session:
+        assert session.get(Execution, invalid.id).state == "unknown"
+        assert session.get(VariantGuard, invalid.variant_id).execution_id == invalid.id
+        assert session.get(Execution, valid.id).state == "verified"
+
+
+def test_unknown_lookup_does_not_refresh_unchanged_item_or_batch(safety_context, monkeypatch):
+    factory, cfg, adapter, clock = safety_context
+    service = PricingService(factory, adapter, cfg)
+    service.run_batch("unchanged-lookup")
+    original = executions(factory)[0]
+    with factory() as session:
+        item_timestamp = session.get(Item, original.item_id).updated_at
+    summaries = []
+    monkeypatch.setattr(service, "_summarize", lambda batch_id: summaries.append(batch_id))
+    clock[0] += timedelta(minutes=1)
+
+    service.reconcile(item_id=original.item_id)
+    with factory() as session:
+        assert session.get(Item, original.item_id).updated_at == item_timestamp
+        assert session.get(Execution, original.id).updated_at == original.updated_at
+        assert session.get(VariantGuard, original.variant_id).execution_id == original.id
+    assert not summaries
+
+
 def test_mismatch_is_not_first_successful_confirmation(safety_context):
     factory, cfg, adapter, clock = safety_context
     service = PricingService(factory, adapter, cfg)
@@ -180,13 +247,310 @@ def test_mismatch_is_not_first_successful_confirmation(safety_context):
         assert "confirmed_at" not in session.get(Execution, original.id).evidence
         assert session.get(VariantGuard, original.variant_id).execution_id == original.id
     clock[0] += timedelta(days=4)
-    adapter.results[original.id] = LookupResult("accepted", Decimal("11"), observed_at)
+    adapter.results[original.id] = LookupResult("accepted", Decimal("11"), observed_at + timedelta(seconds=1))
     service.reconcile(item_id=original.item_id)
     with factory() as session:
         result = session.get(Execution, original.id)
         assert result.state == "verified"
         assert result.evidence["confirmed_at"] == stamp(clock[0])
         assert result.evidence["effective_at"] == stamp(clock[0])
+
+
+@pytest.mark.parametrize("offset", [-1, 0])
+def test_old_or_same_price_observation_cannot_clear_mismatch(safety_context, offset):
+    factory, cfg, adapter, clock = safety_context
+    service = PricingService(factory, adapter, cfg)
+    service.run_batch("lookup-observation-order")
+    original = executions(factory)[0]
+    clock[0] += timedelta(minutes=1)
+    latest = clock[0]
+    adapter.results[original.id] = LookupResult("accepted", Decimal("12"), latest)
+    service.reconcile(item_id=original.item_id)
+    clock[0] += timedelta(minutes=1)
+    adapter.results[original.id] = LookupResult("accepted", Decimal("11"), latest + timedelta(seconds=offset))
+    service.reconcile(item_id=original.item_id)
+    with factory() as session:
+        current = session.get(Execution, original.id)
+        assert current.state == "mismatch"
+        assert current.evidence["actual_price"] == "12"
+        assert current.evidence["observed_at"] == stamp(latest)
+        assert session.get(VariantGuard, original.variant_id).execution_id == original.id
+
+
+def test_mismatch_and_site_pause_become_visible_in_the_same_commit(safety_context):
+    factory, cfg, adapter, clock = safety_context
+    service = PricingService(factory, adapter, cfg)
+    update_settings(factory, {"paused_sites": ["PH"]})
+    service.run_batch("atomic-site-pause")
+    original = executions(factory)[0]
+    clock[0] += timedelta(minutes=1)
+    adapter.results[original.id] = LookupResult("accepted", Decimal("12"), clock[0])
+
+    committed_pauses = []
+
+    def observe_commit(_):
+        # 独立读会话模拟同一时刻的操作页或另一轮提交，检查已提交状态。
+        with factory() as session:
+            if session.get(Execution, original.id).state == "mismatch":
+                committed_pauses.append(settings_value(factory)["paused_sites"])
+
+    event.listen(factory.class_, "after_commit", observe_commit)
+    try:
+        service.reconcile(item_id=original.item_id)
+    finally:
+        event.remove(factory.class_, "after_commit", observe_commit)
+
+    assert committed_pauses
+    assert all(sites == ["MY", "PH"] for sites in committed_pauses)
+
+
+@pytest.mark.parametrize(("changes", "reason"), [
+    ({"paused": True}, "暂停新提交"),
+    ({"paused_sites": ["MY"]}, "暂停新提交"),
+    ({"pilot_shops": []}, "试点名单"),
+    ({"site_enabled": []}, "试点名单"),
+    ({"autonomous_enabled": False}, "自动运行尚未启用"),
+])
+def test_runtime_authorization_revoked_after_claim_prevents_upload(safety_context, changes, reason):
+    factory, cfg, adapter, _ = safety_context
+
+    class RevokeAfterClaim(PricingService):
+        def _claim(self, item_id, decision):
+            execution_id = super()._claim(item_id, decision)
+            if execution_id:
+                update_settings(factory, changes)
+            return execution_id
+
+    batch_id = RevokeAfterClaim(factory, adapter, cfg).run_batch("revoke-after-claim")
+    assert adapter.submissions == []
+    with factory() as session:
+        execution = session.scalar(select(Execution))
+        assert execution.state == "failed"
+        assert execution.response["status"] == "not_submitted"
+        assert session.get(VariantGuard, execution.variant_id).execution_id is None
+        items = session.scalars(select(Item).where(Item.batch_id == batch_id)).all()
+        assert len(items) == 3
+        assert all(item.status == "待处理" and reason in item.reason for item in items)
+
+
+def test_midnight_while_reading_final_authorization_stops_old_day_upload(safety_context, monkeypatch):
+    from app.services import execution as execution_service
+
+    factory, cfg, adapter, clock = safety_context
+    clock[0] = clock[0].replace(hour=15, minute=59, second=59)
+    read_settings = execution_service.settings_for_submit
+
+    def read_after_midnight(session):
+        cfg = read_settings(session)
+        clock[0] += timedelta(seconds=2)
+        return cfg
+
+    monkeypatch.setattr(execution_service, "settings_for_submit", read_after_midnight)
+    batch_id = PricingService(factory, adapter, cfg).run_batch("midnight-at-final-gate")
+    assert adapter.submissions == []
+    with factory() as session:
+        execution = session.scalar(select(Execution))
+        assert execution.state == "failed"
+        assert execution.response["status"] == "not_submitted"
+        assert session.get(VariantGuard, execution.variant_id).execution_id is None
+        assert session.get(Item, execution.item_id).status == "待处理"
+        jobs = session.scalars(select(Job).where(Job.state == "queued")).all()
+        assert [job.dedupe_key for job in jobs] == [f"rollover:{batch_id}:2026-11-06"]
+
+
+def test_live_price_can_expire_while_waiting_for_final_authorization(safety_context, monkeypatch):
+    from app.services import execution as execution_service
+
+    factory, cfg, adapter, clock = safety_context
+    cfg.live_submit_enabled = True
+    adapter.mode = "live"
+    adapter.readiness = lambda: {"contract_ready": True, "verified_sites": ["MY"]}
+    read_settings = execution_service.settings_for_submit
+    first = True
+
+    def delayed_settings(session):
+        nonlocal first
+        if first:
+            clock[0] += timedelta(seconds=301)
+            first = False
+        return read_settings(session)
+
+    monkeypatch.setattr(execution_service, "settings_for_submit", delayed_settings)
+    service = PricingService(factory, adapter, cfg)
+    batch_id = service.run_batch("expired-at-final-gate")
+    assert [decision.key.item_id for _, decision in adapter.submissions] == ["I1", "I2"]
+    with factory() as session:
+        item = session.scalar(select(Item).where(Item.key["item_id"].as_string() == "I0"))
+        execution = session.scalar(select(Execution).where(Execution.item_id == item.id))
+        assert execution.response["status"] == "not_submitted"
+        assert "超过5分钟" in item.reason
+        assert session.get(VariantGuard, execution.variant_id).execution_id is None
+        item_id = item.id
+        saved_reason = item.reason
+        saved_decision = dict(item.decision)
+
+    assert service.run_batch("expired-at-final-gate") == batch_id
+    with factory() as session:
+        item = session.get(Item, item_id)
+        assert (item.phase, item.reason, item.decision) == ("blocked", saved_reason, saved_decision)
+    assert [decision.key.item_id for _, decision in adapter.submissions] == ["I1", "I2"]
+
+    service.run_batch("fresh-reevaluation", item_id=item_id)
+    assert [decision.key.item_id for _, decision in adapter.submissions] == ["I1", "I2", "I0"]
+
+
+def test_live_first_incomplete_snapshot_requeues_daily_job(safety_context, monkeypatch):
+    from app.services.store import enqueue
+    from app.worker import Worker
+
+    factory, cfg, adapter, clock = safety_context
+    adapter.mode = "live"
+    collect = adapter.collect
+
+    def incomplete_first_read(day):
+        snapshot = collect(day)
+        if len(adapter.collections) == 1:
+            snapshot.lines = []
+            snapshot.complete_sources = []
+        return snapshot
+
+    monkeypatch.setattr(adapter, "collect", incomplete_first_read)
+    update_settings(factory, {"autonomous_enabled": False})
+    worker = Worker(factory, PricingService(factory, adapter, cfg))
+    job_id = enqueue(factory, "run", {}, "daily:2026-11-05")
+    worker.tick(clock[0].timestamp())
+    with factory() as session:
+        job = session.get(Job, job_id)
+        assert job.state == "queued" and job.batch_id is None
+        assert session.scalar(select(Batch)) is None
+    clock[0] += timedelta(minutes=6)
+    worker.tick(clock[0].timestamp())
+    with factory() as session:
+        job = session.get(Job, job_id)
+        assert job.state == "done" and job.batch_id
+        assert len(session.scalars(select(Item).where(Item.batch_id == job.batch_id)).all()) == 3
+    assert not adapter.submissions
+
+
+def test_incomplete_retry_preserves_saved_candidates(safety_context, monkeypatch):
+    factory, cfg, adapter, _ = safety_context
+    collect = adapter.collect
+
+    def interrupted(day):
+        snapshot = collect(day)
+        if len(adapter.collections) == 2:
+            raise SourceUnavailable("refresh failed")
+        if len(adapter.collections) == 3:
+            snapshot.lines = []
+            snapshot.complete_sources = []
+        return snapshot
+
+    monkeypatch.setattr(adapter, "collect", interrupted)
+    service = PricingService(factory, adapter, cfg)
+    with pytest.raises(SourceUnavailable):
+        service.run_batch("incomplete-retry")
+    with pytest.raises(SourceUnavailable):
+        service.run_batch("incomplete-retry")
+    assert not adapter.submissions
+    with factory() as session:
+        assert session.scalar(select(Batch)).status == "failed"
+        assert all(item.status == "待处理" for item in session.scalars(select(Item)))
+    service.run_batch("incomplete-retry")
+    assert len(adapter.submissions) == 3
+
+
+def test_incomplete_empty_refresh_does_not_report_candidate_disappearance(safety_context, monkeypatch):
+    factory, cfg, adapter, _ = safety_context
+    collect = adapter.collect
+
+    def incomplete_refresh(day):
+        snapshot = collect(day)
+        if len(adapter.collections) == 2:
+            snapshot.lines = []
+            snapshot.complete_sources = []
+        return snapshot
+
+    monkeypatch.setattr(adapter, "collect", incomplete_refresh)
+    service = PricingService(factory, adapter, cfg)
+    with pytest.raises(SourceUnavailable):
+        service.run_batch("incomplete-refresh")
+    assert not adapter.submissions
+    with factory() as session:
+        batch = session.scalar(select(Batch))
+        assert batch.status == "failed" and "候选来源" in batch.error
+        assert all(item.phase == "blocked" and "候选来源" in item.reason
+                   for item in session.scalars(select(Item)))
+
+
+
+def test_refresh_retains_invalid_candidate_without_submitting_it(safety_context, monkeypatch):
+    from app.domain.types import CandidateSourceIssue
+
+    factory, cfg, adapter, _ = safety_context
+    collect = adapter.collect
+
+    def refresh_with_bad_row(day):
+        snapshot = collect(day)
+        if len(adapter.collections) == 2:
+            row = snapshot.lines.pop(0)
+            snapshot.source_issues.append(CandidateSourceIssue(
+                source=row.source, record_number=1, key=row.key, order_id=row.order_id, row_id=row.row_id,
+            ))
+        return snapshot
+
+    monkeypatch.setattr(adapter, "collect", refresh_with_bad_row)
+    PricingService(factory, adapter, cfg).run_batch("isolated-refresh")
+
+    assert {decision.key.item_id for _, decision in adapter.submissions} == {"I1", "I2"}
+    with factory() as session:
+        item = next(item for item in session.scalars(select(Item)) if item.key["item_id"] == "I0")
+        assert item.phase == "blocked" and item.decision["reason_code"] == "source_record_invalid"
+        assert item.decision["trace"]["source_issues"][0]["row_id"] == "R0"
+
+
+def test_failed_refresh_records_waiting_items_and_retries_without_resending(safety_context, monkeypatch):
+    factory, cfg, adapter, clock = safety_context
+    collect = adapter.collect
+    calls = 0
+
+    def interrupted_refresh(day):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise SourceUnavailable("internal source error")
+        return collect(day)
+
+    def expire_refresh(_):
+        clock[0] += timedelta(minutes=6)
+
+    monkeypatch.setattr(adapter, "collect", interrupted_refresh)
+    adapter.on_submit = expire_refresh
+    service = PricingService(factory, adapter, cfg)
+    with pytest.raises(SourceUnavailable):
+        service.run_batch("refresh-retry")
+    original = executions(factory)[0]
+    with factory() as session:
+        batch = session.scalar(select(Batch))
+        assert batch.status == "failed"
+        assert batch.summary == {"待核验": 1, "待处理": 2}
+        batch_id = batch.id
+        initial_snapshot = dict(batch.snapshot)
+        unsent = session.scalars(select(Item).where(Item.id != original.item_id)).all()
+        assert all(item.phase == "blocked" and "刷新失败" in item.reason for item in unsent)
+    service.reconcile()
+    with factory() as session:
+        assert session.get(Batch, batch_id).status == "failed"
+    assert service.run_batch("refresh-retry") == batch_id
+    assert len(adapter.submissions) == 3
+    assert sum(decision.key.target_identity() == original.variant_id
+               for _, decision in adapter.submissions) == 1
+    with factory() as session:
+        batch = session.get(Batch, batch_id)
+        assert batch.status == "pending_verification"
+        assert batch.error is None
+        assert batch.snapshot == initial_snapshot
+        assert any(parse_stamp(row.request["trace"]["as_of"]) > parse_stamp(initial_snapshot["as_of"])
+                   for row in session.scalars(select(Execution).where(Execution.id != original.id)))
 
 
 def test_protection_added_inside_cached_batch_blocks_only_matching_target(safety_context):

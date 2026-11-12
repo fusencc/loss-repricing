@@ -74,15 +74,24 @@ def test_unknown_after_external_acceptance_recovers_without_resubmit(context):
 def test_price_mismatch_pauses_site_and_keeps_guard(context):
     factory, cfg, adapter = context
     class BadPrice(DemoAdapter):
-        def lookup(self, *args):
-            result = super().lookup(*args)
-            return replace(result, actual_price=result.actual_price + Decimal("50")) if result.actual_price is not None else result
+        def lookup(self, execution_id, task_id, key):
+            result = super().lookup(execution_id, task_id, key)
+            if key.site == "MY" and result.actual_price is not None:
+                return replace(result, actual_price=result.actual_price + Decimal("50"))
+            return result
+
     enable(factory)
     PricingService(factory, BadPrice(cfg.runtime_dir), cfg).run_batch("bad-price")
-    assert "MY" in settings_value(factory)["paused_sites"]
+    assert settings_value(factory)["paused_sites"] == ["MY"]
     with factory() as session:
-        assert session.query(VariantGuard).filter(VariantGuard.execution_id.is_not(None)).count() > 0
-        assert session.query(Item).filter(Item.status == "已核验").count() == 0
+        items = session.scalars(select(Item)).all()
+        assert any(item.key["site"] != "MY" and item.status == "已核验" for item in items)
+        mismatched = [item for item in items if item.phase == "mismatch"]
+        assert mismatched
+        for item in mismatched:
+            assert item.key["site"] == "MY" and item.status == "待核验"
+            execution = session.scalar(select(Execution).where(Execution.item_id == item.id))
+            assert session.get(VariantGuard, execution.variant_id).execution_id == execution.id
 
 
 def test_paused_submissions_still_reconcile_existing_results(context):

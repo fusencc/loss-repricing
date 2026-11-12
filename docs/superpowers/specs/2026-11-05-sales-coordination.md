@@ -8,7 +8,7 @@
 真实价格接口继续关闭。钉钉使用企业内部应用定向工作通知；本轮只模拟投递，提供可配置、可测试的真实适配实现，不向真实人员试发。不创建钉钉应用或复制其他项目凭据。
 
 ## 方案
-已比较机器人为主、多维表格＋通知、权限网页＋通知，用户选择最后一种。网页为权威处理入口；通知只提供摘要和链接，表格不成为第二套可直接执行的价格数据。
+已比较机器人为主、多维表格＋通知、权限网页＋通知，用户选择最后一种。网页为权威处理入口；钉钉卡片列出四类处理状态的数量，链接打开这条通知。受权限保护的网页展示当前关联商品、处理原因、计算目标价和回读实际价。
 
 ## 业务规则
 1. 用户分admin/manager/sales；管理员保留原独立账号。销售员只见自己归属，主管只见明确指定给自己的归属；后端每次校验，不依赖前端隐藏。
@@ -36,7 +36,7 @@ API合同（全部/api）：
 - GET items/{id} 增加 control、ownership、capabilities；原overview/batches/items/jobs/protections均按登录人过滤，原settings/contracts/run/reconcile只管理员。
 - POST items/{id}/control {action:takeover|pause|handback,reason,version}，409表示陈旧版本；handback清待协调、仍保持执行锁。
 - GET/POST items/{id}/corrections，POST corrections/{id}/approve {version}；创建即原子人工接管；批准只排队，worker再校验当前权限和范围。
-- GET notifications；POST notifications/{id}/ack；POST notifications/{id}/retry（仅明确失败）；GET notification-status（管理员）；POST notifications/dispatch（管理员，演示投递调试）。
+- GET notifications；GET notifications/{id} 分页读取当前关联商品和状态；POST notifications/{id}/ack；POST notifications/{id}/retry（仅明确失败）；GET notification-status（管理员）；POST notifications/dispatch（管理员，演示投递调试）。
 
 ## 实施与验收
 使用现有FastAPI/SQLAlchemy/MySQL迁移/Vue。新模型独立模块，核心算法不引入UI权限。本地密码用salt+scrypt。钉钉应用秘密仅环境变量，免登码不入日志。

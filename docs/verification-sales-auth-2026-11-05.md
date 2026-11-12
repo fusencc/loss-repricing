@@ -9,7 +9,7 @@
 
 ## 本地代码验证
 
-- 自动获取/复用/到期前重新登录已接入HttpAdapter；仅同一已确认服务源可使用生成的Token。静态Token兼容模式保留；业务POST失败不重传。
+- 自动获取/复用/到期前重新登录已接入HttpAdapter；仅同一已确认服务源可使用生成的Token。业务POST失败不重传。
 - 认证生命周期、短有效期、并发复用、失败不缓存、日志脱敏、来源隔离和POST不重发等11个认证测试通过；认证/HTTP适配/汇率相关59项通过。
 - 前端 `npm.cmd run build` 成功；随后项目根目录 `.venv/Scripts/python -m pytest -q -p no:cacheprovider --basetemp runtime/<本次独立目录>`：272 passed，1条Starlette/anyio既有弃用警告，117.66秒。
 - `git diff --check`无空白错误；扫描Git跟踪及未忽略的文本文件未发现本次业务密码；git check-ignore确认.env被忽略。

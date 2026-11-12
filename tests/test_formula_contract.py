@@ -104,6 +104,31 @@ def test_external_decimal_context_cannot_change_pricing_result():
     assert actual == expected
 
 
+@pytest.mark.parametrize('rounding', ['ROUND_DOWN', 'ROUND_UP', 'ROUND_HALF_UP'])
+def test_raw_company_fx_preserves_exact_tick_and_zero_profit(rounding):
+    # 来源是3 CNY/MYR。3 CNY亏损精确补1 MYR；显示倒数1/3不能回读作算价输入。
+    snapshot = sample(loss='-3', currency='CNY', current='10', retail='10',
+                      rounding=rounding, factor='1', cost='11')
+    snapshot = Snapshot.model_validate({**snapshot.model_dump(),
+        'fx_rates':{'CNY':'1','MYR':'3'}, 'fx_rate_unit':'cny_per_currency'})
+    result = evaluate(snapshot, NOW)[0]
+    assert result.ready
+    assert result.target_actual == Decimal('11')
+    assert result.upload_price == Decimal('11.00')
+    assert result.predicted_profit == Decimal('0')
+    assert result.trace['fx_rate_unit'] == 'cny_per_currency'
+
+
+def test_raw_company_fx_converts_between_two_foreign_currencies():
+    snapshot = sample(loss='-1.5', currency='USD', current='10', retail='10', factor='1', cost='11')
+    snapshot = Snapshot.model_validate({**snapshot.model_dump(),
+        'fx_rates':{'CNY':'1','MYR':'3','USD':'6'}, 'fx_rate_unit':'cny_per_currency'})
+    result = evaluate(snapshot, NOW)[0]
+    assert result.ready
+    assert result.station_loss == Decimal('3')
+    assert result.upload_price == Decimal('13.00')
+
+
 @pytest.mark.parametrize(("cost", "ready"), [("9.9", True), ("9.900000000000000000000000000001", False)])
 def test_profit_zero_boundary_does_not_use_display_rounding(cost, ready):
     result = evaluate(sample(loss="-1", currency="MYR", cost=cost), NOW)[0]
@@ -164,6 +189,7 @@ def test_missing_confirmation_does_not_default_to_approval(section, field, reaso
         extra["key"]["item_id"], extra["key"]["sku"] = "0002", "B"
         if name == "lines":
             extra["row_id"] = "r2"
+            extra["order_id"] = "0002"  # 两个独立订单，各自只有一条可归属明细。
         payload[name].append(extra)
     del payload[section][0][field]
     results = evaluate(Snapshot.model_validate(payload), NOW)
@@ -182,6 +208,9 @@ def test_published_snapshot_schema_matches_confirmation_defaults():
         assert schema["$defs"][model]["properties"][field]["default"] is False
         assert schema["$defs"][model]["properties"][field] == current["$defs"][model]["properties"][field]
     assert schema["$defs"]["SiteContract"] == current["$defs"]["SiteContract"]
+    assert schema["properties"]["source_issues"] == current["properties"]["source_issues"]
+    for model in ("CandidateSourceIssue", "OnlineSourceIssue"):
+        assert schema["$defs"][model] == current["$defs"][model]
 
 
 @pytest.mark.parametrize("warehouses", [[], ["overseas"]])

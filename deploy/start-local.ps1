@@ -35,7 +35,7 @@ if (Get-NetTCPConnection -LocalPort 18765 -State Listen -ErrorAction SilentlyCon
 & $pythonExe -m alembic -c backend/alembic.ini upgrade head
 if ($LASTEXITCODE -ne 0) { throw '数据库迁移失败' }
 $env:PYTHONPATH = Join-Path $projectDir 'backend'
-$apiProcess = Start-Process -FilePath $pythonExe -ArgumentList '-m uvicorn app.main:create_app --factory --host 127.0.0.1 --port 18765' -WorkingDirectory $projectDir -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $projectDir 'runtime\api.stdout.log') -RedirectStandardError (Join-Path $projectDir 'runtime\api.stderr.log')
+$apiProcess = Start-Process -FilePath $pythonExe -ArgumentList '-m uvicorn app.main:create_app --factory --host 127.0.0.1 --port 18765 --no-access-log' -WorkingDirectory $projectDir -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $projectDir 'runtime\api.stdout.log') -RedirectStandardError (Join-Path $projectDir 'runtime\api.stderr.log')
 $workerProcess = Start-Process -FilePath $pythonExe -ArgumentList '-m app.worker' -WorkingDirectory $projectDir -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $projectDir 'runtime\worker.stdout.log') -RedirectStandardError (Join-Path $projectDir 'runtime\worker.stderr.log')
 @(@{id=$apiProcess.Id; marker='uvicorn app.main:create_app'}, @{id=$workerProcess.Id; marker='-m app.worker'}) | ConvertTo-Json | Set-Content -LiteralPath $pidFile -Encoding utf8
 $ready = $false

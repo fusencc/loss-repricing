@@ -3,16 +3,17 @@ from datetime import datetime
 import time
 from typing import Literal
 from uuid import uuid4
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, func
 from app.models import Batch, Item, Execution, Job, Protection, Audit, WorkerLease
 from app.db import transaction
 from app.services.store import settings_value, update_settings, enqueue, utcnow, stamp, BEIJING, current_items
+from app.services.store import ERP_RECONCILIATION_PREFIX, is_erp_reconciliation
 from app.api.auth import COOKIE, require_admin, require_user, make_session, password_matches
-from app.services.coordination import can_access, verify_password, principal
+from app.services.coordination import can_access, ensure_demo_ownership, verify_password, principal
 from app.models.coordination import UserAccount
-from app.api.coordination import item_collaboration
+from app.api.coordination import can_view_item, item_collaboration
 from dataclasses import asdict
 
 router = APIRouter(prefix="/api")
@@ -50,17 +51,35 @@ def columns(row):
 
 
 def batch_view(batch):
-    return {k: v for k, v in columns(batch).items() if k not in {"snapshot", "run_key"}}
+    value = {k: v for k, v in columns(batch).items() if k not in {"snapshot", "run_key"}}
+    if is_erp_reconciliation(batch):
+        value["erp_reconciliation"] = batch.snapshot["erp_reconciliation"]
+    return value
 
 
 def item_view(session, item, actor=None):
     value = columns(item)
-    from app.domain.types import VariantKey
+    from app.domain.types import VariantKey, VariantReference
     value["target_id"] = VariantKey.model_validate(item.key).target_identity()
+    decision = value["decision"] or {}
+    trace = decision.get("trace") or {}
+    if actor and actor.role != "admin" and (issues := trace.get("source_issues")):
+        scoped_issues = []
+        for issue in issues:
+            issue_key = issue.get("key")
+            if issue_key and VariantReference.model_validate(issue_key).target_identity() == value["target_id"]:
+                scoped_issues.append(issue)
+            else:
+                # 同主 SKU 或同明细的关联记录可能归其他销售，只展示来源和序号。
+                scoped_issues.append({field: issue[field] for field in ("source", "record_number", "relation") if field in issue})
+        value["decision"] = {**decision, "trace": {**trace, "source_issues": scoped_issues}}
     execution = session.scalar(select(Execution).where(Execution.item_id == item.id))
     value["execution"] = columns(execution) if execution else None
     value["evidence"] = execution.evidence if execution else {}
-    if actor: value.update(item_collaboration(session,item,actor))
+    if is_erp_reconciliation(session.get(Batch, item.batch_id)):
+        value["read_only"] = True
+    elif actor:
+        value.update(item_collaboration(session,item,actor))
     return value
 
 
@@ -71,14 +90,19 @@ def consistent_main_sku(item):
     return next(iter(values)) if len(values)==1 else None
 
 
-def visible_batch(session,batch_id,actor):
-    return actor.role=="admin" or any(can_access(session,actor,i.key) for i in session.scalars(select(Item).where(Item.batch_id==batch_id)))
+def visible_batch(session,batch,actor):
+    return actor.role == "admin" or (
+        not is_erp_reconciliation(batch)
+        and any(can_access(session,actor,i.key) for i in session.scalars(select(Item).where(Item.batch_id==batch.id)))
+    )
 
 def scoped_batch(session,batch,actor):
     value=batch_view(batch)
     if actor.role!="admin":
         rows=[i for i in session.scalars(select(Item).where(Item.batch_id==batch.id)) if can_access(session,actor,i.key)]
         value['summary']=dict(Counter(i.status for i in rows));value['error']=None
+    elif source_issues := batch.snapshot.get("source_issues"):
+        value["source_issue_count"] = len(source_issues)
     return value
 
 def job_visible(session,job,actor):
@@ -89,7 +113,7 @@ def job_visible(session,job,actor):
         c=session.get(Correction,job.payload.get('correction_id'))
         item_id=c.item_id if c else None
     item=session.get(Item,item_id) if item_id else None
-    return bool(item and can_access(session,actor,item.key))
+    return bool(item and can_view_item(session,actor,item))
 
 
 @router.get("/health")
@@ -142,7 +166,11 @@ def overview(request: Request, actor=Depends(require_user)):
     with state.factory() as session:
         counts = {name: 0 for name in ["本轮不调", "待处理", "待核验", "已核验"]}
         visible=[i for i in current_items(session) if can_access(session,actor,i.key)]
-        visible_batch_ids={b.id for b in session.scalars(select(Batch))} if actor.role=="admin" else {i.batch_id for i in session.scalars(select(Item)) if can_access(session,actor,i.key)}
+        if actor.role == "admin":
+            visible_batch_ids = set(session.scalars(select(Batch.id).where(
+                ~Batch.run_key.startswith(ERP_RECONCILIATION_PREFIX))))
+        else:
+            visible_batch_ids = {i.batch_id for i in session.scalars(select(Item)) if can_view_item(session, actor, i)}
         counts.update(Counter(item.status for item in visible))
         latest = session.scalar(select(Batch).where(Batch.id.in_(visible_batch_ids)).order_by(Batch.created_at.desc()).limit(1)) if visible_batch_ids else None
         worker = session.get(WorkerLease, "worker")
@@ -157,7 +185,7 @@ def overview(request: Request, actor=Depends(require_user)):
 @secured.get("/batches")
 def batches(request: Request, actor=Depends(require_user)):
     with request.app.state.factory() as session:
-        return [scoped_batch(session,b,actor) for b in session.scalars(select(Batch).order_by(Batch.created_at.desc())) if visible_batch(session,b.id,actor)][:200]
+        return [scoped_batch(session,b,actor) for b in session.scalars(select(Batch).order_by(Batch.created_at.desc())) if visible_batch(session,b,actor)][:200]
 
 
 @secured.post("/batches/run", dependencies=[Depends(require_admin)])
@@ -169,20 +197,38 @@ def run(request: Request):
 def demo(request: Request):
     if request.app.state.config.adapter_mode != "demo":
         raise HTTPException(409, "只有演示环境可运行演示批次")
-    # 显式演示按钮仅启用虚拟店铺；不会修改任何真实环境或真实店铺设置。
-    update_settings(request.app.state.factory, {"autonomous_enabled": True,
-        "pilot_shops": [f"DEMO-{site}" for site in ["MY", "PH", "SG", "TH", "VN"]],
-        "site_enabled": ["MY", "PH", "SG", "TH", "VN"]})
-    return {"job_id": enqueue(request.app.state.factory, "run", {})}
+    state = request.app.state
+    sites = ["MY", "PH", "SG", "TH", "VN"]
+    pilot_shops = [f"DEMO-{site}" for site in sites]
+    if state.config.coordination_required:
+        snapshot = state.adapter.collect(utcnow().astimezone(BEIJING).date())
+        # 显式演示入口仅为样例店铺补齐缺失归属，保留已有归属与人工控制。
+        ensure_demo_ownership(state.factory, [
+            row.key for row in snapshot.online
+            if row.key.site in sites and row.key.shop_id == f"DEMO-{row.key.site}"
+        ])
+    update_settings(state.factory, {"autonomous_enabled": True, "pilot_shops": pilot_shops, "site_enabled": sites})
+    return {"job_id": enqueue(state.factory, "run", {})}
 
 
 @secured.get("/batches/{batch_id}")
 def batch_detail(batch_id: str, request: Request, actor=Depends(require_user)):
     with request.app.state.factory() as session:
         batch = session.get(Batch, batch_id)
-        if not batch or not visible_batch(session,batch_id,actor):
+        if not batch or not visible_batch(session,batch,actor):
             raise HTTPException(404, "批次不存在")
         return {**scoped_batch(session,batch,actor), "items": [item_view(session,i,actor) for i in session.scalars(select(Item).where(Item.batch_id==batch_id)) if can_access(session,actor,i.key)]}
+
+
+@secured.get("/batches/{batch_id}/source-issues", dependencies=[Depends(require_admin)])
+def batch_source_issues(batch_id: str, request: Request,
+                        offset: int = Query(0, ge=0), limit: int = Query(25, ge=1, le=100)):
+    with request.app.state.factory() as session:
+        batch = session.get(Batch, batch_id)
+        if batch is None:
+            raise HTTPException(404, "批次不存在")
+        issues = batch.snapshot.get("source_issues", [])
+        return {"total": len(issues), "items": issues[offset:offset + limit]}
 
 
 @secured.get("/items")
@@ -195,14 +241,14 @@ def items(request: Request, status: str | None = None, batch_id: str | None = No
             rows = session.scalars(query).all()
         else:
             rows = [row for row in current_items(session) if not status or row.status == status]
-        return [item_view(session,row,actor) for row in rows if can_access(session,actor,row.key)][:1000]
+        return [item_view(session,row,actor) for row in rows if can_view_item(session,actor,row)][:1000]
 
 
 @secured.get("/items/{item_id}")
 def item_detail(item_id: str, request: Request, actor=Depends(require_user)):
     with request.app.state.factory() as session:
         item = session.get(Item, item_id)
-        if not item or not can_access(session,actor,item.key):
+        if not item or not can_view_item(session,actor,item):
             raise HTTPException(404, "记录不存在")
         return item_view(session,item,actor)
 
@@ -210,8 +256,11 @@ def item_detail(item_id: str, request: Request, actor=Depends(require_user)):
 @secured.post("/items/{item_id}/reevaluate", dependencies=[Depends(require_admin)])
 def reevaluate(item_id: str, request: Request, body: Reevaluate = Reevaluate()):
     with transaction(request.app.state.factory) as session:
-        if not session.get(Item, item_id):
+        item = session.get(Item, item_id)
+        if not item:
             raise HTTPException(404, "记录不存在")
+        if is_erp_reconciliation(session.get(Batch, item.batch_id)):
+            raise HTTPException(409, "文件对账批次仅供查阅，请从来源生成新报告")
         session.add(Audit(id=str(uuid4()), action="item.reevaluate", actor=request.app.state.config.admin_username,
             detail={"item_id": item_id, "note": body.note}, created_at=stamp()))
     return {"job_id": enqueue(request.app.state.factory, "run", {"item_id": item_id})}
@@ -250,7 +299,7 @@ def patch_settings(body: Changes, request: Request):
 @secured.get("/protections")
 def get_protections(request: Request, actor=Depends(require_user)):
     with request.app.state.factory() as session:
-        return [columns(p) for p in session.scalars(select(Protection).where(Protection.active.is_(True)).order_by(Protection.created_at.desc())) if actor.role=="admin" or any(i.key.get("shop_id")==p.shop_id and i.key.get("site")==p.site and consistent_main_sku(i)==p.main_sku and can_access(session,actor,i.key) for i in session.scalars(select(Item)))]
+        return [columns(p) for p in session.scalars(select(Protection).where(Protection.active.is_(True)).order_by(Protection.created_at.desc())) if actor.role=="admin" or any(i.key.get("shop_id")==p.shop_id and i.key.get("site")==p.site and consistent_main_sku(i)==p.main_sku and can_view_item(session,actor,i) for i in session.scalars(select(Item)))]
 
 
 @secured.post("/protections", dependencies=[Depends(require_admin)])

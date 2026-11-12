@@ -100,8 +100,15 @@ def main():
                         assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
                         page.screenshot(path=str(output / 'mobile.png'), full_page=True)
                         fail = True
-                        page.get_by_role('button', name='运行真实只读验证', exact=True).click()
-                        expect(page.get_by_text('合成连接失败，未访问公司系统', exact=True)).to_be_visible()
+                        with page.expect_response(
+                            lambda response: response.url.startswith(base + '/api/sources/erp/validation?')
+                            and response.status == 503
+                        ) as failure:
+                            page.get_by_role('button', name='运行真实只读验证', exact=True).click()
+                        error_id = failure.value.headers['x-error-id']
+                        expect(page.get_by_text(
+                            f'合成连接失败，未访问公司系统（排查编号：{error_id}）', exact=True
+                        )).to_be_visible()
                         expect(page.get_by_role('button', name='下载诊断报告', exact=True)).to_have_count(0)
                         assert calls == [2, 2]
                         assert not errors, errors

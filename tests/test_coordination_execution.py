@@ -115,6 +115,45 @@ def test_manual_price_keeps_profit_and_rounding_checks(world):
     with pytest.raises(ValueError,match="毛利"):
         manual_decision(snapshot,snapshot.online[0],Decimal("10"),"reason","c1",utcnow())
 
+@pytest.mark.parametrize(("identity_changes", "blocked"), [
+    ({"item_id": "SIBLING"}, True),
+    ({"sku": "ALIAS"}, True),
+    ({"shop_id": "OTHER", "item_id": "SIBLING"}, False),
+])
+def test_manual_price_requires_valid_online_sales_scope(world, identity_changes, blocked):
+    from app.domain.types import OnlineSourceIssue
+    from app.services.corrections import manual_decision
+
+    _, _, adapter, key = world
+    now = utcnow()
+    snapshot = adapter.collect(now.astimezone(BEIJING).date())
+    online = snapshot.online[0]
+    snapshot.source_issues.append(OnlineSourceIssue(
+        source="online", record_number=2, key=key.model_copy(update=identity_changes),
+        main_sku=online.main_sku,
+    ))
+    if blocked:
+        with pytest.raises(ValueError, match="在线数据异常"):
+            manual_decision(snapshot, online, Decimal("11"), "reason", "c1", utcnow())
+    else:
+        assert manual_decision(snapshot, online, Decimal("11"), "reason", "c1", utcnow()).ready
+
+
+
+def test_manual_correction_rejects_conflicting_complete_main_sku_sales(world):
+    from app.services.corrections import manual_decision
+
+    _, _, adapter, key = world
+    now = utcnow()
+    snapshot = adapter.collect(now.astimezone(BEIJING).date())
+    online = snapshot.online[0]
+    sibling = key.model_copy(update={"item_id": "SIBLING"})
+    snapshot.online.append(online.model_copy(update={"key": sibling, "sales_7d": 21}))
+
+    with pytest.raises(ValueError, match="销量.*冲突"):
+        manual_decision(snapshot, online, Decimal("11"), "reason", "c1", utcnow())
+
+
 def queued_correction(world):
     from app.models.coordination import Correction
     from app.services.store import stamp
@@ -139,12 +178,68 @@ def test_correction_runs_once_and_remains_manual(world):
     from app.models.coordination import Correction
     service=queued_correction(world)
     factory,cfg,adapter,key=world
-    run_correction(service,"c1")
-    run_correction(service,"c1")
+    batch_id = run_correction(service, "c1")
+    assert batch_id
+    assert run_correction(service, "c1") == batch_id
     assert adapter.calls == 1
     with factory() as s:
         assert s.get(Correction,"c1").state == "verified"
         assert s.get(TargetControl,key.target_identity()).mode == "manual"
+
+def test_rejected_correction_recovers_after_interruption(world, monkeypatch):
+    from app.adapters.base import SubmitResult
+    from app.models import Batch, Notice
+    from app.models.coordination import Correction
+    from app.services.corrections import run_correction
+
+    service = queued_correction(world)
+    factory, _, adapter, _ = world
+    sent = []
+
+    def reject(execution_id, decision):
+        sent.append(execution_id)
+        return SubmitResult("rejected", message="模拟明确拒绝")
+
+    def interrupt(**kwargs):
+        raise RuntimeError("模拟进程中断")
+
+    monkeypatch.setattr(adapter, "submit", reject)
+    with monkeypatch.context() as patch:
+        patch.setattr(service, "reconcile", interrupt)
+        with pytest.raises(RuntimeError, match="模拟进程中断"):
+            run_correction(service, "c1")
+
+    with factory() as session:
+        assert session.get(Correction, "c1").state == "executing"
+        assert session.get(Execution, sent[0]).state == "failed"
+
+    batch_id = run_correction(service, "c1")
+    with factory() as session:
+        correction = session.get(Correction, "c1")
+        assert correction.state == "failed" and correction.result["message"] == "模拟明确拒绝"
+        assert session.get(Batch, batch_id).status == "completed"
+        notice = session.scalars(select(Notice).where(Notice.batch_id == batch_id)).one()
+        assert notice.summary["statuses"] == {"待处理": 1}
+    assert sent == [correction.execution_id]
+
+
+def test_correction_cannot_execute_from_another_batch_mode(world):
+    from app.models import Batch
+    from app.services.corrections import run_correction
+
+    service = queued_correction(world)
+    factory, _, adapter, _ = world
+    with transaction(factory) as session:
+        session.scalars(select(Batch)).one().mode = "live"
+    previous_collections = adapter.collections
+
+    with pytest.raises(ValueError, match="修正来源批次模式不一致"):
+        run_correction(service, "c1")
+    assert adapter.collections == previous_collections
+    assert adapter.calls == 0
+    with factory() as session:
+        assert session.scalars(select(Execution)).first() is None
+
 
 def test_correction_refuses_stale_price(world):
     from app.services.corrections import run_correction

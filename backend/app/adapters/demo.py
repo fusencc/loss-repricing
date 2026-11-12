@@ -29,8 +29,6 @@ class DemoAdapter:
         latest = {}
         for path in self.path.glob("*.json"):
             receipt = json.loads(path.read_text(encoding="utf-8"))
-            if not receipt.get("upload_price"):
-                continue  # 兼容早期只保存回读证据的模拟历史，不反推缺失税价列。
             identity = receipt["variant_id"]
             if identity not in latest or receipt["effective_at"] > latest[identity]["effective_at"]:
                 latest[identity] = receipt

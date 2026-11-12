@@ -50,11 +50,19 @@ def target_id(key):
 def scope_key(platform,shop_id,site,target=None):
     return sha256(json.dumps([platform,shop_id,site,target],ensure_ascii=False).encode()).hexdigest()
 
-def resolve_ownership(session,key):
-    k=VariantKey.model_validate(key)
-    for target in [k.target_identity(),None]:
-        row=session.scalar(select(Ownership).where(Ownership.scope_key==scope_key(k.platform,k.shop_id,k.site,target)))
-        if row: return row
+def ownership_scopes(key):
+    key = VariantKey.model_validate(key)
+    return (
+        scope_key(key.platform, key.shop_id, key.site, key.target_identity()),
+        scope_key(key.platform, key.shop_id, key.site),
+    )
+
+
+def resolve_ownership(session, key):
+    for scope in ownership_scopes(key):
+        row = session.scalar(select(Ownership).where(Ownership.scope_key == scope))
+        if row:
+            return row
     return None
 
 def active_owner(session,user_id,locked=None):

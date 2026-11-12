@@ -12,6 +12,27 @@ def config(**kwargs):
     return Settings(_env_file=None, erp_username='test-user', erp_password='secret-password', **kwargs)
 
 
+def test_current_config_uses_beijing_usage_day_without_inventing_effective_date(monkeypatch):
+    import app.adapters.erp_rates as rates
+    def current(settings, **kwargs):
+        return {'queried_at':'2026-11-10T16:05:00+00:00', 'effective_date':None,
+                'source_version':'erp-rates-readonly-v1', 'rows':[
+                    {'currency':'CNY','source_rate':'1','units_per_cny':'1','error':None},
+                    {'currency':'PHP','source_rate':'0.1','units_per_cny':'10','error':None},
+                    {'currency':'NGN','source_rate':'0.005','units_per_cny':'2E+2','error':None},
+                    {'currency':'VND','source_rate':'1E-7','units_per_cny':'1E+7','error':None},
+                    {'currency':'bad','source_rate':'2','units_per_cny':None,'error':'invalid'},
+                ]}
+    monkeypatch.setattr(rates, 'query_erp_rates', current)
+    fx = rates.query_current_erp_fx(config())
+    assert fx['date'] == '2026-11-11'
+    assert fx['source_effective_date'] is None
+    assert fx['date_policy'] == 'current_config_on_usage_day'
+    assert fx['display_units_per_cny'] == {'CNY':'1','PHP':'10','NGN':'200','VND':'10000000'}
+    assert fx['source_rates'] == {'CNY':'1','PHP':'0.1','NGN':'0.005','VND':'0.0000001'}
+    assert fx['synthetic'] is False
+
+
 def reply(rows):
     return {'success': True, 'code': 200, 'now': 1793861784872, 'hasNext': False, 'data': rows}
 

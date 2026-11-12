@@ -9,17 +9,47 @@ from collections import Counter
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, localcontext
 import re
+from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import httpx
 
 from app.adapters.base import SourceUnavailable
-from app.adapters.http import _private_request, TIMEOUT
+from app.adapters.http import TIMEOUT
+from app.adapters.transport_privacy import private_request
 from app.config import Settings
 from app.domain.money import PRICE_CONTEXT
 
 VERSION = 'erp-rates-readonly-v1'
 PATH = '/system/innerOpen/rate/list'
 ALLOWED_BASES = {'http://103.198.125.2:16777/open', 'http://103.198.125.5:15672/open'}
+
+
+def query_current_erp_fx(settings: Settings, *, client=None):
+    """2026-11-11用户明确选择：当天公司当前配置，以北京时间查询日作为业务使用日。
+
+    effective_date仍为空，不能把业务使用日解释成接口给出的生效日期。
+    原币/人民币结算栏与销售参数的站点汇率单位为CNY/原币；规范输入取倒数，
+    保留原配置及仅供展示的50位Decimal倒数；算价直接消费原配置比值。
+    非标准、重复或无效币种不填零。
+    """
+    observation = query_erp_rates(settings, client=client)
+    queried_at = datetime.fromisoformat(observation['queried_at'])
+    if queried_at.tzinfo is None:
+        raise SourceUnavailable('公司汇率查询时点缺少时区')
+    usable = [row for row in observation['rows'] if row['error'] is None]
+    display_rates = {row['currency']: format(Decimal(row['units_per_cny']), 'f') for row in usable}
+    if display_rates.get('CNY') != '1':
+        raise SourceUnavailable('公司当前汇率缺少有效人民币基准')
+    return {
+        'date': queried_at.astimezone(ZoneInfo('Asia/Shanghai')).date().isoformat(),
+        'display_units_per_cny': display_rates,
+        'source_rates': {row['currency']: format(Decimal(row['source_rate']), 'f') for row in usable},
+        'version': 'erp-current-config-usage-day-v1', 'ref': 'company-erp-fx-' + uuid4().hex,
+        'queried_at': observation['queried_at'], 'source_effective_date': observation['effective_date'],
+        'date_policy': 'current_config_on_usage_day', 'synthetic': False,
+        'source_observation': observation,
+    }
 
 
 def _success(response):
@@ -78,7 +108,7 @@ def query_erp_rates(settings: Settings, *, client=None):
         raise SourceUnavailable('请配置本项目独立的ERP账号密码或令牌')
     owned_client = client is None
     client = client or httpx.Client(timeout=TIMEOUT, follow_redirects=False)
-    context = _private_request.set(True)
+    context = private_request.set(True)
     try:
         if not token:
             login = _success(client.post(base + '/system/innerOpen/login', json={
@@ -110,4 +140,4 @@ def query_erp_rates(settings: Settings, *, client=None):
     finally:
         if owned_client:
             client.close()
-        _private_request.reset(context)
+        private_request.reset(context)

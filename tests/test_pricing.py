@@ -66,6 +66,26 @@ def single(*, line_fields=None, online_fields=None, snapshot_fields=None):
     return evaluate(snapshot(rows, states, **(snapshot_fields or {})), NOW)[0]
 
 
+def test_cny_fixed_cost_preserves_exact_break_even_and_returns_station_currency():
+    from app.domain.money import MoneyRatio
+    model=FeeModel(revenue_factor='1',fixed_cost='4',fixed_cost_divisor='3',version='cost-cny-quote',verified=True)
+    assert model.profit_exact(MoneyRatio(Decimal(4),Decimal(3)))==MoneyRatio(Decimal(0))
+    assert model.profit_exact(MoneyRatio(Decimal('1.34')))==MoneyRatio(Decimal('0.02'),Decimal(3))
+    result=single(line_fields={'loss_amount':'-1','currency':'CNY'},
+        online_fields={'retail_price':'1','current_margin':'-1','fee_model':model},
+        snapshot_fields={'fx_rates':{'CNY':'1','MYR':'3'},'fx_rate_unit':'cny_per_currency',
+                         'contracts':{'MY':contract(rounding='ROUND_UP')}})
+    assert result.ready and result.upload_price==Decimal('1.34')
+    assert Decimal(result.trace['target_profit'])==0
+    assert result.predicted_profit==MoneyRatio(Decimal('0.02'),Decimal(3)).decimal()
+
+
+@pytest.mark.parametrize('divisor',['0','-1','NaN','Infinity'])
+def test_fee_cost_divisor_requires_a_positive_finite_source_quote(divisor):
+    with pytest.raises(ValidationError):
+        FeeModel(revenue_factor='1',fixed_cost='4',fixed_cost_divisor=divisor,version='cost-cny-quote')
+
+
 def test_two_child_skus_have_separate_minimums():
     first = key()
     second = key(sku="B", item_id="0002")
@@ -89,6 +109,32 @@ def test_loss_is_normalized_to_one_sellable_unit(basis, amount):
     assert result.ready
     assert result.unit_loss == Decimal("1")
     assert result.target_actual == Decimal("11")
+
+
+def test_multi_product_order_total_cannot_win_minimum_even_when_marked_reliable():
+    first = key()
+    second = key(product_id="002", item_id="0002")  # 同店、同名子 SKU，两个不同商品。
+    rows = [
+        line(first, order_id="mixed", row_id="01", basis="order", quantity="2", loss_amount="-0.4"),
+        line(second, order_id="mixed", row_id="02", basis="order", quantity="2", loss_amount="-0.4"),
+        line(first, order_id="single", row_id="03", basis="line", loss_amount="-1.2"),
+    ]
+    results = {d.key.item_id: d for d in evaluate(snapshot(rows, [online(first), online(second)]), NOW)}
+    assert results[first.item_id].selected_row_id == "03"
+    assert results[first.item_id].unit_loss == Decimal("1.2")
+    assert results[first.item_id].trace["excluded_source_rows"]["01"] == "unreliable_order_allocation"
+    assert not results[second.item_id].ready
+    assert results[second.item_id].reason_code == "no_valid_loss"
+
+
+def test_same_order_line_from_two_sources_does_not_prevent_single_sku_allocation():
+    variant = key()
+    rows = [
+        line(variant, basis="order", quantity="2", loss_amount="-2"),
+        line(variant, basis="order", quantity="2", loss_amount="-2", source="blocked_allocatable"),
+    ]
+    result = evaluate(snapshot(rows, [online(variant)]), NOW)[0]
+    assert result.ready and result.unit_loss == Decimal("1")
 
 
 def test_untrusted_order_without_valid_loss_is_pending():
@@ -129,11 +175,27 @@ def test_duplicate_from_second_source_keeps_provenance_without_double_counting()
 def test_conflicting_duplicate_row_blocks_only_affected_variant():
     first = key()
     second = key(sku="B", item_id="0002")
-    rows = [line(first), line(first, source="blocked_pending", loss_amount="-2"), line(second)]
+    rows = [line(first), line(first, source="blocked_pending", loss_amount="-2"), line(second, order_id="0002")]
     results = {item.key.sku: item for item in evaluate(snapshot(rows, [online(first), online(second)]), NOW)}
     assert not results["A"].ready
     assert results["A"].status == "待处理"
     assert results["B"].ready
+
+
+def test_one_order_detail_cannot_price_two_online_variants():
+    first = key()
+    second = key(sku="B", item_id="0002")
+    third = key(sku="C", item_id="0003")
+    rows = [
+        line(first), line(second, source="blocked_pending"),
+        line(third, order_id="0002"),
+    ]
+    results = {d.key.sku: d for d in evaluate(
+        snapshot(rows, [online(first), online(second), online(third)]), NOW
+    )}
+    assert all(not results[sku].ready for sku in ("A", "B"))
+    assert all(results[sku].reason_code == "conflicting_detail_mapping" for sku in ("A", "B"))
+    assert results["C"].ready
 
 
 def test_same_sku_and_row_id_in_different_stores_are_independent():

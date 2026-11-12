@@ -48,7 +48,7 @@ def main():
             admin_password=password, session_secret=token_urlsafe(48),
             secure_cookie=False, live_submit_enabled=False, coordination_required=True,
             ding_enabled=False, ding_corp_id='', ding_client_id='', ding_client_secret='',
-            ding_agent_id='', notification_mode='demo', vendor_token='', erp_token='',
+            ding_agent_id='', notification_mode='demo', erp_token='',
         )
         app = create_app(config)
         worker = Worker(app.state.factory, app.state.service)

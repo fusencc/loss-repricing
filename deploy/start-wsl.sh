@@ -28,7 +28,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-python -m uvicorn app.main:create_app --factory --host 127.0.0.1 --port 18765 &
+python -m uvicorn app.main:create_app --factory --host 127.0.0.1 --port 18765 --no-access-log &
 api_pid=$!
 python -m app.worker &
 worker_pid=$!

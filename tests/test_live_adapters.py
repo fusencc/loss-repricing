@@ -11,6 +11,7 @@ from openpyxl import load_workbook
 import pytest
 
 from app.adapters.base import SourceUnavailable
+from app.adapters.sales_auth import LOGIN_PATH, ORIGIN
 from app.config import Settings
 from app.domain.types import Decision, VariantKey
 
@@ -66,7 +67,10 @@ def contract():
     }
     return {
         "verified": True,
-        "services": {"erp": {"base_url": "https://erp.example.test"}, "vendor": {"base_url": "https://sales.example.test"}},
+        "services": {
+            "erp": {"base_url": "https://erp.example.test"},
+            "vendor": {"base_url": ORIGIN, "allow_http_for_internal": True},
+        },
         "collections": {
             **{source: collection | {"path": f"/candidates/{source}", "json": {"day": "{business_date}"}} for source in SOURCES},
             "online": collection | {
@@ -117,10 +121,18 @@ def make_adapter(tmp_path, monkeypatch):
         path = tmp_path / "contract.json"
         path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
         settings = Settings(
-            live_contract_path=path, live_submit_enabled=enabled, vendor_token="test-secret-v",
+            _env_file=None, live_contract_path=path, live_submit_enabled=enabled,
+            vendor_api_url=ORIGIN, vendor_username="sample-sales", vendor_password="sample-password",
             erp_token="test-secret-e",
         )
-        client = httpx.Client(transport=httpx.MockTransport(handler))
+
+        def handle_request(request):
+            if request.url.path == LOGIN_PATH:
+                assert request.url.host == httpx.URL(ORIGIN).host
+                return httpx.Response(200, json={"access_token": "test-secret-v", "expires_in": 300})
+            return handler(request)
+
+        client = httpx.Client(transport=httpx.MockTransport(handle_request))
         return HttpAdapter(settings, client=client)
 
     return make
@@ -139,7 +151,7 @@ def test_open_api_password_login_is_lazy_and_reuses_token(contract, tmp_path):
     contract_path = tmp_path / "contract.json"
     contract_path.write_text(json.dumps(contract), encoding="utf-8")
     settings = Settings(
-        live_contract_path=contract_path, erp_token="", vendor_token="test-secret-v",
+        _env_file=None, live_contract_path=contract_path, erp_token="",
         erp_username="sample-user", erp_password="sample-password",
     )
     calls = []
@@ -169,7 +181,7 @@ def test_open_api_credentials_never_sent_to_another_origin(contract, tmp_path):
     contract_path = tmp_path / "contract.json"
     contract_path.write_text(json.dumps(contract), encoding="utf-8")
     settings = Settings(
-        live_contract_path=contract_path, erp_token="", vendor_token="test-secret-v",
+        _env_file=None, live_contract_path=contract_path, erp_token="",
         erp_username="sample-user", erp_password="sample-password",
     )
     adapter = HttpAdapter(settings, client=httpx.Client(transport=httpx.MockTransport(never_call)))
@@ -207,11 +219,299 @@ def test_collect_maps_four_sources_online_and_fx(contract, make_adapter):
     assert line.source == "loss_allocatable"
     assert line.key == VariantKey(**IDENTITY)
     assert line.loss_amount == Decimal("-0.9999999999999999")
-    assert line.row_id == "0001" and "0001" in line.source_ref
+    assert json.loads(line.row_id) == ["0002", "0001"] and line.row_id in line.source_ref
     assert snapshot.online[0].fee_model.revenue_factor == Decimal("0.91")
     assert snapshot.online[0].fee_model.verified
     assert snapshot.source_versions["fx"] == "rates-v1"
     assert snapshot.source_versions["fee_model.MY"] == "fees-v1"
+
+
+
+def with_source_rows(**sources):
+    def respond(request):
+        response = collection_response(request)
+        source = request.url.path.rsplit("/", 1)[-1]
+        if source not in sources:
+            return response
+        payload = response.json()
+        payload["payload"]["rows"] = sources[source]
+        return httpx.Response(200, json=payload)
+    return respond
+
+
+def test_candidate_field_failure_holds_only_locatable_targets(contract, make_adapter):
+    from app.domain.engine import evaluate
+
+    good_key = {**PRODUCT, "item": "009", "sku": "OK"}
+    bad_only_key = {**PRODUCT, "item": "010", "sku": "SOURCE@#"}
+    handler = with_source_rows(
+        loss_allocatable=[
+            {**ROW, "loss": None},
+            {**ROW, "order": "0008", "product": good_key, "loss": "-3.00"},
+            {**ROW, "order": "0009", "product": bad_only_key, "qty": None},
+        ],
+        online=[ONLINE, {**ONLINE, "product": good_key}],
+    )
+
+    snapshot = make_adapter(contract, handler, enabled=False).collect(DAY)
+    results = {decision.key.item_id: decision for decision in evaluate(snapshot, datetime.fromisoformat(OBSERVED))}
+
+    assert snapshot.complete_sources == SOURCES
+    assert results["003"].reason_code == "source_record_invalid"
+    assert results["003"].unit_loss is None
+    assert results["010"].reason_code == "source_record_invalid"
+    assert results["010"].key.sku == "SOURCE@#"
+    assert results["010"].trace["source_rows"] == []
+    issue = results["010"].trace["source_issues"][0]
+    assert issue["source"] == "loss_allocatable" and issue["record_number"] == 3
+    assert json.loads(issue["row_id"]) == ["0009", ROW["detail"]]
+    assert results["009"].ready and results["009"].upload_price == Decimal("22.00")
+
+
+@pytest.mark.parametrize("missing", ["order", "product"])
+def test_cannot_isolate_a_row_without_its_verified_scope(contract, make_adapter, missing):
+    row = {**ROW, "loss": None}
+    del row[missing]
+    handler = with_source_rows(loss_allocatable=[row])
+
+    with pytest.raises(SourceUnavailable, match="身份"):
+        make_adapter(contract, handler).collect(DAY)
+
+
+def test_invalid_candidate_still_counts_as_a_separate_order_line(contract, make_adapter):
+    from app.domain.engine import evaluate
+
+    # 同单第二行缺金额。第一行误标整单可分摊也不能拿整单金额算价。
+    contract["collections"]["loss_allocatable"] = {
+        **contract["collections"]["loss_allocatable"],
+        "constants": {**contract["collections"]["loss_allocatable"]["constants"], "basis": "order"},
+    }
+    other_key = {**PRODUCT, "item": "008", "sku": "OTHER"}
+    handler = with_source_rows(
+        loss_allocatable=[
+            {**ROW, "loss": "-3.00"},
+            {**ROW, "product": other_key, "detail": "0005", "loss": None},
+        ],
+        loss_pending=[], blocked_allocatable=[], blocked_pending=[],
+    )
+
+    snapshot = make_adapter(contract, handler).collect(DAY)
+    results = {decision.key.item_id: decision for decision in evaluate(snapshot, datetime.fromisoformat(OBSERVED))}
+
+    assert results["003"].reason_code == "no_valid_loss"
+    assert results["003"].trace["excluded_source_rows"] == {
+        snapshot.lines[0].row_id: "unreliable_order_allocation",
+    }
+    assert results["008"].reason_code == "source_record_invalid"
+
+
+@pytest.mark.parametrize("bad_main", ["0003", "CONFLICTING-MAIN"])
+def test_bad_online_state_holds_its_target_and_shared_main_sku(contract, make_adapter, bad_main):
+    from app.domain.engine import evaluate
+
+    same_main_key = {**PRODUCT, "item": "008", "sku": "SIBLING"}
+    unrelated_key = {**PRODUCT, "item": "009", "sku": "OTHER"}
+    no_candidate_key = {**PRODUCT, "item": "010", "sku": "NO-ORDER"}
+    handler = with_source_rows(
+        loss_allocatable=[
+            {**ROW, "loss": "-3.00"},
+            {**ROW, "product": same_main_key, "order": "0006", "loss": "-3.00"},
+            {**ROW, "product": unrelated_key, "order": "0007", "main": "UNRELATED", "loss": "-3.00"},
+        ],
+        loss_pending=[], blocked_allocatable=[], blocked_pending=[],
+        online=[
+            ONLINE,
+            {**ONLINE, "main": bad_main, "r": None},
+            {**ONLINE, "product": same_main_key},
+            {**ONLINE, "product": unrelated_key, "main": "UNRELATED"},
+            {**ONLINE, "product": no_candidate_key, "main": "NO-ORDER", "r": None},
+        ],
+    )
+
+    snapshot = make_adapter(contract, handler).collect(DAY)
+    results = {decision.key.item_id: decision for decision in evaluate(snapshot, datetime.fromisoformat(OBSERVED))}
+
+    assert {state.key.item_id for state in snapshot.online} == {"008", "009"}
+    assert results["003"].reason_code == "source_record_invalid"
+    assert results["008"].reason_code == "source_record_invalid"
+    assert results["008"].trace["source_issues"][0]["source"] == "online"
+    assert results["008"].trace["source_issues"][0]["record_number"] == 2
+    assert results["009"].ready
+    assert "010" not in results
+
+
+
+def test_shared_sales_issue_evidence_is_bounded_per_candidate(contract, make_adapter):
+    from app.domain.engine import evaluate
+
+    candidates = [
+        {**ROW, "product": {**PRODUCT, "item": f"candidate-{n}", "sku": f"SKU-{n}"},
+         "order": f"ORDER-{n}", "loss": "-3.00"}
+        for n in range(10)
+    ]
+    online = [{**ONLINE, "product": row["product"]} for row in candidates]
+    online.extend(
+        {**ONLINE, "product": {**PRODUCT, "item": f"bad-{n}", "sku": f"BAD-{n}"}, "r": None}
+        for n in range(25)
+    )
+    handler = with_source_rows(loss_allocatable=candidates, loss_pending=[], blocked_allocatable=[],
+                               blocked_pending=[], online=online)
+
+    snapshot = make_adapter(contract, handler, enabled=False).collect(DAY)
+    results = evaluate(snapshot, datetime.fromisoformat(OBSERVED))
+
+    assert len(snapshot.source_issues) == 25 and len(results) == 10
+    for result in results:
+        assert result.reason_code == "source_record_invalid" and not result.ready
+        assert len(result.trace["source_issues"]) == 1
+        assert result.trace["source_issues"][0]["record_number"] == 11
+        assert result.trace["source_issues"][0]["relation"] == "shared_main_sku"
+
+
+
+def test_worker_persists_bad_source_and_prices_independent_target(contract, make_adapter, tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from sqlalchemy import func, select
+
+    from app.main import create_app
+    from app.models import Execution
+    from app.services import execution, store
+    from app.worker import Worker
+
+    good_key = {**PRODUCT, "item": "009", "sku": "OK"}
+    respond = with_source_rows(
+        loss_allocatable=[{**ROW, "loss": None}, {**ROW, "product": good_key, "order": "0008", "loss": "-3.00"}],
+        online=[ONLINE, {**ONLINE, "product": good_key}],
+    )
+    requests = []
+
+    def record(request):
+        requests.append(request.url.path)
+        return respond(request)
+
+    adapter = make_adapter(contract, record, enabled=False)
+    now = datetime.fromisoformat(OBSERVED)
+    monkeypatch.setattr(execution, "utcnow", lambda: now)
+    monkeypatch.setattr(store, "utcnow", lambda: now)
+    monkeypatch.setattr("app.main.build_adapter", lambda config: adapter)
+    settings = Settings(
+        _env_file=None, adapter_mode="live", runtime_dir=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'source-issue-test.db'}",
+        admin_password="test-local-password", session_secret="s" * 40,
+        live_submit_enabled=False, coordination_required=False,
+    )
+
+    app = create_app(settings)
+    with TestClient(app) as client:
+        assert client.post("/api/auth/login", json={
+            "username": "admin", "password": "test-local-password",
+        }).is_success
+        queued = client.post("/api/batches/run")
+        assert queued.is_success, queued.text
+        Worker(app.state.factory, app.state.service).tick(now.timestamp())
+        job = client.get("/api/jobs/" + queued.json()["job_id"]).json()
+        assert job["state"] == "done", job
+        batch_path = "/api/batches/" + job["batch_id"]
+        batch = client.get(batch_path).json()
+        assert batch["source_issue_count"] == 1
+        results = {item["key"]["item_id"]: item for item in batch["items"]}
+        assert results["003"]["decision"]["reason_code"] == "source_record_invalid"
+        assert results["009"]["decision"]["ready"] and results["009"]["decision"]["upload_price"] == "22.00"
+        source_issue = client.get(batch_path + "/source-issues").json()["items"][0]
+        assert source_issue["source"] == "loss_allocatable" and source_issue["record_number"] == 1
+        assert source_issue["key"]["item_id"] == "003"
+        with app.state.factory() as session:
+            assert session.scalar(select(func.count()).select_from(Execution)) == 0
+
+    assert requests == [*(f"/candidates/{source}" for source in SOURCES), "/online", "/fx"]
+
+
+
+@pytest.mark.parametrize("shape", ["same_scope_count", "target_membership", "stale_count"])
+def test_well_formed_sales_conflict_cannot_price_affected_main_skus(contract, make_adapter, shape):
+    from app.domain.engine import evaluate
+
+    sibling = {**PRODUCT, "item": "008", "sku": "SIBLING"}
+    independent = {**PRODUCT, "item": "009", "sku": "OTHER"}
+    main = "ALTERNATE" if shape == "target_membership" else ONLINE["main"]
+    sibling_state = {**ONLINE, "product": sibling, "main": main, "qty": 21}
+    online = [ONLINE, sibling_state, {**ONLINE, "product": independent, "main": "UNRELATED"}]
+    if shape == "target_membership":
+        sibling_state["qty"] = 10  # 单靠销量差异无法复现归属冲突。
+        online.append({**ONLINE, "main": "ALTERNATE"})
+    elif shape == "stale_count":
+        sibling_state["seen"] = "2026-11-04T09:00:00+08:00"
+
+    respond = with_source_rows(
+        loss_allocatable=[
+            {**ROW, "loss": "-3.00"},
+            {**ROW, "product": sibling, "main": main, "order": "0006", "loss": "-3.00"},
+            {**ROW, "product": independent, "main": "UNRELATED", "order": "0007", "loss": "-3.00"},
+        ],
+        loss_pending=[], blocked_allocatable=[], blocked_pending=[], online=online,
+    )
+    snapshot = make_adapter(contract, respond).collect(DAY)
+    results = {result.key.item_id: result for result in evaluate(snapshot, datetime.fromisoformat(OBSERVED))}
+
+    assert not snapshot.source_issues  # 字段均合规；问题来自有效记录之间的证据冲突。
+    assert results["009"].ready
+    if shape == "stale_count":
+        assert results["003"].ready and not results["008"].ready
+    else:
+        assert results["003"].reason_code == results["008"].reason_code == "conflicting_main_sku_sales"
+
+
+
+
+def test_missing_online_warehouse_cannot_prove_paginated_group_identity(contract, make_adapter):
+    contract["collections"]["online"] = {
+        **contract["collections"]["online"],
+        "pagination": {
+            "page_key": "page", "limit_key": "limit", "limit": 1, "total_path": "payload.total", "max_pages": 1,
+        },
+    }
+
+    def respond(request):
+        if request.url.path != "/online":
+            return collection_response(request)
+        product = {field: value for field, value in PRODUCT.items() if field != "warehouse"}
+        return httpx.Response(200, json={"payload": {
+            "timestamp": OBSERVED, "date": DAY.isoformat(), "total": 1,
+            "rows": [{**ONLINE, "product": product}],
+        }})
+
+    with pytest.raises(SourceUnavailable, match="分页.*仓配"):
+        make_adapter(contract, respond).collect(DAY)
+
+
+def test_missing_candidate_warehouse_retains_scope_without_guessing(contract, make_adapter):
+    from app.domain.engine import evaluate
+    from app.domain.types import Snapshot
+
+    incomplete_key = {field: value for field, value in PRODUCT.items() if field != "warehouse"}
+    good_key = {**PRODUCT, "item": "009", "sku": "INDEPENDENT"}
+    no_online_key = {**incomplete_key, "item": "010", "sku": "NO-ONLINE"}
+    respond = with_source_rows(
+        loss_allocatable=[
+            {**ROW, "product": incomplete_key, "loss": "-3.00"},
+            {**ROW, "product": good_key, "order": "0008", "loss": "-3.00"},
+            {**ROW, "product": no_online_key, "order": "0009", "loss": "-3.00"},
+        ],
+        loss_pending=[], blocked_allocatable=[], blocked_pending=[],
+        online=[ONLINE, {**ONLINE, "product": good_key}],
+    )
+    snapshot = make_adapter(contract, respond).collect(DAY)
+    snapshot = Snapshot.model_validate_json(snapshot.model_dump_json())
+    results = {decision.key.item_id: decision for decision in evaluate(snapshot, datetime.fromisoformat(OBSERVED))}
+
+    assert snapshot.complete_sources == SOURCES
+    assert len(snapshot.source_issues) == 2
+    assert all(issue.key.warehouse is None for issue in snapshot.source_issues)
+    assert results["003"].reason_code == "source_record_invalid"
+    assert results["003"].trace["source_issues"][0]["key"]["warehouse"] is None
+    assert results["003"].key.warehouse == PRODUCT["warehouse"]  # 单独已确认的在线身份仅用于定位。
+    assert results["009"].ready
+    assert "010" not in results  # 没有完整在线身份，仅在批次来源异常中显示。
 
 
 def test_missing_protection_mapping_blocks_collection_before_http(contract, make_adapter):
@@ -232,6 +532,52 @@ def test_stale_source_cannot_be_relabelled_today(contract, make_adapter):
 
     with pytest.raises(SourceUnavailable, match="日期"):
         make_adapter(contract, stale).collect(DAY)
+
+
+@pytest.mark.parametrize("second_order", ["0009", ROW["order"]])
+def test_paginated_detail_ids_are_scoped_to_orders(contract, make_adapter, second_order):
+    from app.domain.engine import evaluate
+
+    contract["collections"]["loss_allocatable"]["pagination"] = {
+        "page_key": "page", "limit_key": "limit", "limit": 1, "total_path": "payload.total", "max_pages": 2,
+    }
+
+    def handler(request):
+        if not request.url.path.endswith("/loss_allocatable"):
+            return collection_response(request)
+        page = json.loads(request.content)["page"]
+        row = ROW if page == 1 else {**ROW, "order": second_order, "loss": "-0.6"}
+        return httpx.Response(200, json={"payload": {
+            "timestamp": OBSERVED, "date": DAY.isoformat(), "total": 2, "rows": [row],
+        }})
+
+    adapter = make_adapter(contract, handler)
+    if second_order == ROW["order"]:
+        with pytest.raises(SourceUnavailable, match="分页"):
+            adapter.collect(DAY)
+        return
+    snapshot = adapter.collect(DAY)
+    result = evaluate(snapshot, datetime.fromisoformat(OBSERVED))[0]
+    assert result.unit_loss == Decimal("0.2")
+    assert json.loads(result.selected_row_id) == [second_order, ROW["detail"]]
+
+
+def test_paginated_source_cannot_count_one_detail_twice_under_different_products(contract, make_adapter):
+    contract["collections"]["loss_allocatable"]["pagination"] = {
+        "page_key": "page", "limit_key": "limit", "limit": 1, "total_path": "payload.total", "max_pages": 2,
+    }
+
+    def handler(request):
+        if not request.url.path.endswith("/loss_allocatable"):
+            return collection_response(request)
+        page = json.loads(request.content)["page"]
+        row = ROW if page == 1 else {**ROW, "product": {**PRODUCT, "item": "009", "sku": "009"}}
+        return httpx.Response(200, json={"payload": {
+            "timestamp": OBSERVED, "date": DAY.isoformat(), "total": 2, "rows": [row],
+        }})
+
+    with pytest.raises(SourceUnavailable, match="分页"):
+        make_adapter(contract, handler).collect(DAY)
 
 
 def test_pagination_cannot_silently_truncate(contract, make_adapter):
@@ -332,16 +678,20 @@ def test_disabled_submit_does_not_call_http(contract, make_adapter):
     ({"ccy": "CNY"}, "unknown"),
     ({"ccy": None}, "unknown"),
     ({"value": None}, "unknown"),
+    ({"job": "different"}, "unknown"),
+    ({"run": "different"}, "unknown"),
+    ({"state": "denied", "run": "different"}, "unknown"),
     ({"state": "denied", "job": "different"}, "unknown"),
     ({"state": "denied", "value": None}, "rejected"),
 ])
 def test_lookup_requires_actual_price_and_same_identity_or_bound_rejection(contract, make_adapter, change, expected):
+    contract["lookup"]["field_map"]["execution_id"] = "run"
     def handler(request):
         payload = json.loads(request.content)
         assert (payload["run"], payload["job"], payload["sku"], payload["shop"]) == ("exec-one", "job-1", "004", "001")
         return httpx.Response(200, json={
             "product": PRODUCT, "value": "11.075", "ccy": "MYR", "readTime": OBSERVED,
-            "effectiveTime": OBSERVED, "basis": "actual_including_vat", "state": "applied", "job": "job-1",
+            "effectiveTime": OBSERVED, "basis": "actual_including_vat", "state": "applied", "job": "job-1", "run": "exec-one",
         } | change)
 
     result = make_adapter(contract, handler).lookup("exec-one", "job-1", VariantKey(**IDENTITY))

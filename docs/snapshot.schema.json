@@ -1,7 +1,47 @@
 {
   "$defs": {
+    "CandidateSourceIssue": {
+      "description": "可定位的候选明细字段异常。保留行身份用于去重和整单亏损归属检查。",
+      "properties": {
+        "source": {
+          "enum": [
+            "loss_allocatable",
+            "loss_pending",
+            "blocked_allocatable",
+            "blocked_pending"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "record_number": {
+          "exclusiveMinimum": 0,
+          "title": "Record Number",
+          "type": "integer"
+        },
+        "key": {
+          "$ref": "#/$defs/VariantReference"
+        },
+        "order_id": {
+          "title": "Order Id",
+          "type": "string"
+        },
+        "row_id": {
+          "title": "Row Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "record_number",
+        "key",
+        "order_id",
+        "row_id"
+      ],
+      "title": "CandidateSourceIssue",
+      "type": "object"
+    },
     "FeeModel": {
-      "description": "经确认的一次毛利模型，系数无量纲，固定项和输出均为站点币。",
+      "description": "一次毛利系数无量纲，固定成本按明确比值换成站点币，输出仍为站点币。",
       "properties": {
         "revenue_factor": {
           "anyOf": [
@@ -25,6 +65,19 @@
           ],
           "title": "Fixed Cost"
         },
+        "fixed_cost_divisor": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": "1",
+          "title": "Fixed Cost Divisor"
+        },
         "version": {
           "title": "Version",
           "type": "string"
@@ -41,6 +94,43 @@
         "version"
       ],
       "title": "FeeModel",
+      "type": "object"
+    },
+    "OnlineSourceIssue": {
+      "description": "可定位的在线记录字段异常。主 SKU 是七天销量保护的共享范围。",
+      "properties": {
+        "source": {
+          "const": "online",
+          "title": "Source",
+          "type": "string"
+        },
+        "record_number": {
+          "exclusiveMinimum": 0,
+          "title": "Record Number",
+          "type": "integer"
+        },
+        "key": {
+          "$ref": "#/$defs/VariantReference"
+        },
+        "main_sku": {
+          "title": "Main Sku",
+          "type": "string"
+        },
+        "related_main_skus": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Related Main Skus",
+          "type": "array"
+        }
+      },
+      "required": [
+        "source",
+        "record_number",
+        "key",
+        "main_sku"
+      ],
+      "title": "OnlineSourceIssue",
       "type": "object"
     },
     "OnlineState": {
@@ -432,9 +522,67 @@
       ],
       "title": "VariantKey",
       "type": "object"
+    },
+    "VariantReference": {
+      "description": "已定位的来源变体。字段异常记录可以保留仓配缺失的原状。",
+      "properties": {
+        "platform": {
+          "title": "Platform",
+          "type": "string"
+        },
+        "shop_id": {
+          "title": "Shop Id",
+          "type": "string"
+        },
+        "site": {
+          "enum": [
+            "MY",
+            "PH",
+            "SG",
+            "TH",
+            "VN"
+          ],
+          "title": "Site",
+          "type": "string"
+        },
+        "product_id": {
+          "title": "Product Id",
+          "type": "string"
+        },
+        "item_id": {
+          "title": "Item Id",
+          "type": "string"
+        },
+        "sku": {
+          "title": "Sku",
+          "type": "string"
+        },
+        "warehouse": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Warehouse"
+        }
+      },
+      "required": [
+        "platform",
+        "shop_id",
+        "site",
+        "product_id",
+        "item_id",
+        "sku",
+        "warehouse"
+      ],
+      "title": "VariantReference",
+      "type": "object"
     }
   },
-  "description": "单批规范化来源。业务日期和汇率日期均按北京时间，汇率为每 CNY 兑换的币种单位。",
+  "description": "单批规范来源；日期按北京时间，汇率必须携带明确单位后参与精确比值计算。",
   "properties": {
     "as_of": {
       "format": "date-time",
@@ -464,6 +612,15 @@
       },
       "title": "Fx Rates",
       "type": "object"
+    },
+    "fx_rate_unit": {
+      "default": "currency_per_cny",
+      "enum": [
+        "currency_per_cny",
+        "cny_per_currency"
+      ],
+      "title": "Fx Rate Unit",
+      "type": "string"
     },
     "lines": {
       "items": {
@@ -499,6 +656,30 @@
       },
       "title": "Source Versions",
       "type": "object"
+    },
+    "source_issues": {
+      "items": {
+        "discriminator": {
+          "mapping": {
+            "blocked_allocatable": "#/$defs/CandidateSourceIssue",
+            "blocked_pending": "#/$defs/CandidateSourceIssue",
+            "loss_allocatable": "#/$defs/CandidateSourceIssue",
+            "loss_pending": "#/$defs/CandidateSourceIssue",
+            "online": "#/$defs/OnlineSourceIssue"
+          },
+          "propertyName": "source"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/$defs/CandidateSourceIssue"
+          },
+          {
+            "$ref": "#/$defs/OnlineSourceIssue"
+          }
+        ]
+      },
+      "title": "Source Issues",
+      "type": "array"
     }
   },
   "required": [

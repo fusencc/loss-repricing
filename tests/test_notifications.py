@@ -367,3 +367,232 @@ def test_enqueue_refreshes_summary_without_resend_or_ack_change(notices_context,
         assert n.delivery_state==state and n.task_id=='historic-task' and n.request_id=='historic-request'
         assert n.ack_at==ack and n.ack_by=='seller'
         assert n.delivery_evidence[0]['summary']['exceptions']==1
+
+
+def test_failed_batch_refreshes_existing_notice_without_queuing_new_delivery(notices_context):
+    from app.models import Batch, Item, Notice
+    from app.services.execution import PricingService
+    from app.services.notifications import enqueue_batch_notices
+
+    factory, cfg = notices_context
+    cfg.coordination_required = True
+    service = PricingService(factory, None, cfg)
+    service._summarize("b", refresh_error="刷新失败")
+    with factory() as session:
+        assert session.scalar(select(Notice)) is None
+    enqueue_batch_notices(factory, "b")
+    with factory.begin() as session:
+        notice = session.scalar(select(Notice))
+        notice.delivery_state = "accepted"
+        notice.task_id = "original-task"
+        session.get(Item, "i").status = "已核验"
+
+    service._summarize("b")
+    with factory() as session:
+        notice = session.scalars(select(Notice)).one()
+        assert notice.summary["statuses"] == {"已核验": 1}
+        assert notice.delivery_state == "accepted" and notice.task_id == "original-task"
+        assert session.get(Batch, "b").status == "failed"
+
+
+def test_notice_detail_pages_current_results_and_rechecks_recipient(notices_context):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.api.auth import COOKIE, make_session
+    from app.api.notifications import router
+    from app.models import Execution, Item
+    from app.models.coordination import Ownership
+    from app.models.notifications import Notice
+    from app.services.notifications import enqueue_batch_notices
+    from app.services.store import stamp
+
+    factory, cfg = notices_context
+    with factory.begin() as session:
+        for sku, status in (("checked", "待处理"), ("awaiting", "待核验"), ("protected", "本轮不调")):
+            key = dict(session.get(Item, "i").key, item_id=sku, sku=sku)
+            session.add(Item(
+                id=sku, batch_id="b", variant_id=sku, key=key, status=status, phase="proposed",
+                reason="sample reason", decision={"target_actual": "18.72"}, updated_at=stamp(),
+            ))
+    enqueue_batch_notices(factory, "b")
+    with factory.begin() as session:
+        notice = session.scalar(select(Notice))
+        notice_id = notice.id
+        assert notice.summary["statuses"]["待处理"] == 2
+        checked = session.get(Item, "checked")
+        checked.status, checked.phase = "已核验", "verified"
+        session.add(Execution(
+            id="checked-execution", item_id="checked", state="verified", variant_id="checked",
+            request={}, response={}, evidence={"actual_price": "18.72", "mode": "demo"},
+            created_at=stamp(), updated_at=stamp(),
+        ))
+
+    app = FastAPI()
+    app.state.factory, app.state.config = factory, cfg
+    app.include_router(router)
+    path = f"/api/notifications/{notice_id}"
+    with TestClient(app) as client:
+        assert client.get(path).status_code == 401
+        client.cookies.set(COOKIE, make_session("other", cfg.session_secret, user_id="other", version=1))
+        assert client.get(path).status_code == 404
+
+        client.cookies.set(COOKIE, make_session("seller", cfg.session_secret, user_id="seller", version=1))
+        page = client.get(path, params={"limit": 2})
+        assert page.status_code == 200, page.text
+        result = page.json()
+        assert result["batch_mode"] == "demo"
+        assert result["total"] == 4
+        assert result["statuses"] == {"待处理": 1, "待核验": 1, "已核验": 1, "本轮不调": 1}
+        assert result["delivery_state"] == "pending" and result["ack_at"] is None
+        assert [item["id"] for item in result["items"]] == ["i", "awaiting"]
+
+        last_page = client.get(path, params={"limit": 2, "offset": 2}).json()
+        assert [item["id"] for item in last_page["items"]] == ["checked", "protected"]
+        assert last_page["items"][0]["evidence"]["actual_price"] == "18.72"
+        assert last_page["items"][0]["decision"]["target_actual"] == "18.72"
+        assert client.get(path, params={"limit": 101}).status_code == 422
+
+        with factory.begin() as session:
+            assert session.get(Notice, notice_id).ack_at is None
+            session.get(Ownership, "o").owner_id = "other"
+        assert client.get(path).status_code == 404
+
+
+@pytest.mark.parametrize("base, expected_path", [
+    ("https://example.com", "https://example.com"),
+    ("https://example.com/workbench/#overview", "https://example.com/workbench"),
+])
+def test_dingtalk_card_opens_specific_notice_with_scoped_statuses(notices_context, monkeypatch, base, expected_path):
+    from app.adapters.dingtalk import DingTalkClient
+    from app.models import Item
+    from app.models.notifications import Notice
+    from app.services.notifications import dispatch_notices, enqueue_batch_notices
+
+    factory, cfg = notices_context
+    with factory.begin() as session:
+        item = session.get(Item, "i")
+        item.key = dict(item.key, sku="SYNTHETIC-SKU-NOT-IN-CARD")
+        item.reason = "SYNTHETIC-PRIVATE-REASON"
+    enqueue_batch_notices(factory, "b")
+    cfg.notification_mode, cfg.ding_enabled = "live", True
+    cfg.public_base_url = base
+    outbound = []
+
+    def send(self, userid, title, markdown, url):
+        with factory() as session:
+            saved = session.scalar(select(Notice))
+            assert saved.delivery_state == "sending"
+            assert url == f"{expected_path}/#notifications/{saved.id}"
+        outbound.append((userid, markdown))
+        return {"state": "accepted", "task_id": "task"}
+
+    monkeypatch.setattr(DingTalkClient, "send_notice", send)
+    dispatch_notices(factory, cfg)
+    assert len(outbound) == 1
+    userid, markdown = outbound[0]
+    assert userid == "ding-seller"
+    assert "演示批次" in markdown
+    assert "待处理 1 · 待核验 0 · 已核验 0 · 本轮不调 0" in markdown
+    assert "SYNTHETIC-" not in markdown
+
+
+@pytest.mark.parametrize("changed_account, change", [
+    ("manager", {"role": "sales"}),
+    ("seller", {"active": False}),
+])
+def test_escalation_dispatch_rechecks_supervisor_permission(notices_context, monkeypatch, changed_account, change):
+    from app.adapters.dingtalk import DingTalkClient
+    from app.models.coordination import UserAccount
+    from app.models.notifications import Notice
+    from app.services.notifications import dispatch_notices, enqueue_batch_notices
+    from app.services.store import stamp
+
+    factory, cfg = notices_context
+    enqueue_batch_notices(factory, "b")
+    with factory.begin() as session:
+        original = session.scalar(select(Notice))
+        original.ack_at = stamp()
+        original.delivery_state = "demo"
+        for field, value in change.items():
+            setattr(session.get(UserAccount, changed_account), field, value)
+        session.add(Notice(
+            id="escalated", dedupe_key="escalated", batch_id="b", parent_id=original.id,
+            item_ids=["i"], recipient_id="manager", summary=original.summary,
+            delivery_state="pending", created_at=stamp(), updated_at=stamp(),
+        ))
+    cfg.notification_mode, cfg.ding_enabled = "live", True
+    monkeypatch.setattr(DingTalkClient, "send_notice", lambda *args: pytest.fail("revoked scope must not receive a card"))
+    dispatch_notices(factory, cfg)
+    with factory() as session:
+        assert session.get(Notice, "escalated").delivery_state == "cancelled"
+
+
+def test_notice_detail_authenticates_in_the_same_read_session(notices_context):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.api.auth import COOKIE, make_session
+    from app.api.notifications import router
+    from app.models.coordination import UserAccount
+    from app.models.notifications import Notice
+    from app.services.notifications import enqueue_batch_notices
+
+    factory, cfg = notices_context
+    enqueue_batch_notices(factory, "b")
+    with factory.begin() as session:
+        notice = session.scalar(select(Notice))
+        notice.recipient_id = "manager"
+        notice_id = notice.id
+
+    # Simulate revocation in the gap between an identity-only session and an independent data session.
+    # One read session either authorizes the original view or observes the revocation at its start.
+    opened = 0
+    def factory_with_revocation():
+        nonlocal opened
+        opened += 1
+        if opened == 2:
+            with factory.begin() as session:
+                account = session.get(UserAccount, "manager")
+                account.role = "sales"
+                account.session_version += 1
+        return factory()
+
+    app = FastAPI()
+    app.state.factory, app.state.config = factory_with_revocation, cfg
+    app.include_router(router)
+    with TestClient(app) as client:
+        client.cookies.set(COOKIE, make_session("manager", cfg.session_secret, user_id="manager", version=1))
+        path = f"/api/notifications/{notice_id}"
+        assert client.get(path).status_code == 200
+        assert opened == 1
+        assert client.get(path).status_code == 401
+
+
+def test_batch_completion_and_outbox_roll_back_together(notices_context, monkeypatch):
+    from app.models import Batch, Notice
+    from app.services import notifications
+    from app.services.execution import PricingService
+
+    factory, cfg = notices_context
+    cfg.coordination_required = True
+    service = PricingService(factory, None, cfg)
+    write = notifications.write_batch_notices
+
+    def interrupt(session, batch_id, **options):
+        assert write(session, batch_id, **options) == 1
+        raise RuntimeError("simulate interruption before commit")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(notifications, "write_batch_notices", interrupt)
+        with pytest.raises(RuntimeError, match="simulate interruption"):
+            service._summarize("b")
+    with factory() as session:
+        assert session.get(Batch, "b").status == "done"
+        assert session.scalar(select(Notice)) is None
+
+    service._summarize("b")
+    service._summarize("b")
+    with factory() as session:
+        assert session.get(Batch, "b").status == "completed"
+        assert session.scalars(select(Notice)).one().delivery_state == "pending"

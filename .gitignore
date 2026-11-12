@@ -16,7 +16,11 @@ runtime/*
 !runtime/.gitkeep
 .superpowers/
 *.log
+# 结构化运行日志可能位于独立桌面输出目录，禁止随代码提交。
+**/logs/
 *.sqlite*
 *.db
 test-results/
 playwright-report/
+# 本地架构图生成产物（含生成时的源码副本）不入 Git。
+/.archify/

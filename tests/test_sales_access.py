@@ -153,3 +153,54 @@ def test_correction_after_verified_price_collects_fresh_baseline(client):
     assert r.status_code==200
     c=r.json();assert c['baseline']['online_rows'][0]['retail_price']=='12'
     with factory() as s:assert s.get(Item,'one').decision['trace']['online_rows'][0]['retail_price']=='10'
+
+
+def test_related_source_issues_do_not_reveal_another_targets_identity(client):
+    from app.domain.types import VariantKey
+    from app.models import Batch, Item
+
+    admin(client)
+    factory = seed_items(client)
+    with factory.begin() as session:
+        mine = session.get(Item, "one")
+        other = session.get(Item, "two")
+        other.key = {**other.key, "shop_id": mine.key["shop_id"]}
+        other.variant_id = VariantKey.model_validate(other.key).identity()
+        own_issue = {
+            "source": "online", "record_number": 1, "key": {**mine.key, "warehouse": None}, "main_sku": "m",
+        }
+        related_issue = {
+            "source": "online", "record_number": 3, "key": other.key, "main_sku": "m",
+            "relation": "shared_main_sku",
+        }
+        mine.decision = {**mine.decision, "trace": {
+            **mine.decision["trace"], "source_issues": [own_issue, related_issue],
+        }}
+        my_target = VariantKey.model_validate(mine.key).target_identity()
+        batch = session.get(Batch, "b")
+        batch.snapshot = {"source_issues": [own_issue, related_issue]}
+
+    audit_path = "/api/batches/b/source-issues"
+    assert client.get("/api/batches/b").json()["source_issue_count"] == 2
+    assert client.get(audit_path, params={"offset": 1, "limit": 1}).json() == {
+        "total": 2, "items": [related_issue],
+    }
+    assert client.get(audit_path, params={"offset": 2}).json() == {"total": 2, "items": []}
+    assert client.get(audit_path, params={"limit": 101}).status_code == 422
+    assert client.get("/api/batches/absent/source-issues").status_code == 404
+    admin_item = client.get("/api/items/one").json()
+    assert admin_item["decision"]["trace"]["source_issues"][1] == related_issue
+    owner = client.post("/api/users", json={
+        "username": "alice", "display_name": "A", "password": "strong-password",
+    }).json()
+    assert client.post("/api/ownerships", json={
+        "platform": "demo", "shop_id": "s1", "site": "MY", "owner_id": owner["id"], "target_id": my_target,
+    }).is_success
+    assert client.post("/api/auth/login", json={"username": "alice", "password": "strong-password"}).is_success
+    assert client.get("/api/items/two").status_code == 404
+    assert client.get(audit_path).status_code == 403
+    assert "source_issue_count" not in client.get("/api/batches/b").json()
+    item = client.get("/api/items/one").json()
+    assert item["decision"]["trace"]["source_issues"] == [
+        own_issue, {"source": "online", "record_number": 3, "relation": "shared_main_sku"},
+    ]

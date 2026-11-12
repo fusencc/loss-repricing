@@ -25,6 +25,7 @@ const traceLabels: Record<string, string> = {
   business_date: '业务日期', evaluated_at: '评估时间', as_of: '快照采集时间',
   fx_rates: '本日汇率（每 1 CNY）', complete_sources: '已齐备的候选来源',
   source_versions: '来源版本', source_rows: '原始候选行', online_rows: '在线快照',
+  source_issues: '来源异常记录',
   site_contract: '站点接口合同', sales_window: '前七个完整自然日',
   excluded_source_rows: '排除的候选行', candidate_unit_losses: '候选单件亏损（原币）',
   station_currency: '站点币', loss_fx_rate: '原币汇率（每 1 CNY）', station_fx_rate: '站点币汇率（每 1 CNY）',
@@ -59,7 +60,7 @@ const traceRows = computed(() => {
           <div v-for="(label, key) in identity" :key="key"><dt>{{ label }}</dt><dd>{{ display(item.key[key]) }}</dd></div>
           <div><dt>更新时间（北京时间）</dt><dd>{{ timeLabel(item.updated_at) }}</dd></div>
         </dl>
-        <ItemCoordination :actor-role="actorRole" :actor-id="actorId" :item="item" @refresh="emit('refresh')" />
+        <ItemCoordination v-if="!item.read_only" :actor-role="actorRole" :actor-id="actorId" :item="item" @refresh="emit('refresh')" />
         <section v-if="item.decision" class="drawer-section">
           <h3>补亏计算</h3>
           <p class="muted">目标实际价为当前实际价加站点币单件亏损。含 VAT 上传价为目标实际价除以折扣系数。</p>
@@ -78,13 +79,13 @@ const traceRows = computed(() => {
             <pre v-else>{{ display(item.decision.trace) }}</pre>
           </details>
         </section>
-        <section class="drawer-section">
+        <section v-if="!item.read_only" class="drawer-section">
           <h3>执行与证据</h3>
           <p class="muted">执行进度：{{ stateLabel(item.phase) }}</p>
           <details class="evidence"><summary>展开提交与回读记录</summary><pre>{{ display(item.execution) }}</pre></details>
           <details class="evidence"><summary>展开来源证据</summary><pre>{{ display(item.evidence) }}</pre></details>
         </section>
-        <section v-if="admin && item.status === '待处理'" class="drawer-section">
+        <section v-if="admin && !item.read_only && item.status === '待处理'" class="drawer-section">
           <h3>重新评估</h3>
           <p class="muted">按当前规则重新获取来源数据并评估。</p>
           <el-input v-model="note" placeholder="补充处理说明（选填）" maxlength="500" />

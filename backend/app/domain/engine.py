@@ -1,10 +1,15 @@
 from collections import defaultdict
+from collections.abc import Iterable
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, DecimalException, localcontext
+from itertools import chain
 
 from .money import MoneyRatio, PRICE_CONTEXT
 
-from .types import Decision, DecisionStatus, OnlineState, Site, Snapshot, SourceLine
+from .types import (
+    CandidateSourceIssue, Decision, DecisionStatus, OnlineState, Site, Snapshot,
+    SourceIssue, SourceLine, VariantKey,
+)
 
 
 # 业务时间统一为当前中国标准时间，Windows 环境也可直接使用此固定时差。
@@ -33,41 +38,141 @@ def sales_window(now: datetime) -> tuple[date, date]:
     return today - timedelta(days=7), today - timedelta(days=1)
 
 
+def conflicting_sales_scopes(
+    online: Iterable[OnlineState], now: datetime,
+) -> set[tuple[str, str, Site, str]]:
+    """同店同站主 SKU 的销量为共享汇总，核对完整窗口数值与当日商品归属。"""
+    today = now.astimezone(BEIJING).date()
+    window = sales_window(now)
+    counts = defaultdict(set)
+    scopes_by_target = defaultdict(set)
+    for state in online:
+        if (not state.main_sku.strip() or state.observed_at > now
+                or state.observed_at.astimezone(BEIJING).date() != today):
+            continue
+        scope = state.key.sales_scope(state.main_sku)
+        scopes_by_target[state.key.target_identity()].add(scope)
+        if (state.sales_complete and state.sales_7d is not None and state.sales_7d >= 0
+                and (state.sales_start, state.sales_end) == window):
+            counts[scope].add(state.sales_7d)
+    conflicted = {scope for scope, values in counts.items() if len(values) > 1}
+    for scopes in scopes_by_target.values():
+        if len(scopes) > 1:
+            # 同一上传对象被关联到不同主 SKU，两组共享销量都不能作为保护依据。
+            conflicted.update(scopes)
+    return conflicted
+
+
 def allowed_error(site: Site) -> Decimal:
     """已确认站点的实际价误差，单位为对应站点币。"""
     return SITE_ERRORS[site]
+
+
+def _order_scope(row: SourceLine | CandidateSourceIssue) -> tuple[str, str, str]:
+    return row.key.platform, row.key.shop_id, row.order_id
+
+
+def _decision_key(group, states) -> VariantKey | None:
+    reference = next((row.key for row in group if row.key.warehouse is not None), None)
+    if reference is None:
+        # 有唯一完整在线键时，用它展示挂起对象。来源仓配仍在异常记录中保持空值。
+        known_keys = {state.key.warehouse: state.key for state in states}
+        if len(known_keys) != 1:
+            return None
+        reference = next(iter(known_keys.values()))
+    return reference if isinstance(reference, VariantKey) else VariantKey.model_validate(reference.model_dump())
 
 
 def evaluate(snapshot: Snapshot, now: datetime) -> list[Decision]:
     """纯计算，按在线子 SKU 产出一条判定，同一身份的仓配冲突不会产生两条提价建议。"""
     window = sales_window(now)
     today = now.astimezone(BEIJING).date()
-    snapshot_problem = _snapshot_problem(snapshot, now, today)
-    candidate_groups: dict[str, list[SourceLine]] = defaultdict(list)
+    batch_problem = snapshot_problem(snapshot, now, today)
+    conflicted_sales = conflicting_sales_scopes(snapshot.online, now)
+    candidate_groups: dict[str, list[SourceLine | CandidateSourceIssue]] = defaultdict(list)
     online_groups: dict[str, list[OnlineState]] = defaultdict(list)
-    for row in snapshot.lines:
-        candidate_groups[row.key.identity()].append(row)
+    order_lines = defaultdict(set)
+    detail_mappings = defaultdict(set)
+    issues_by_identity = defaultdict(list)
+    first_issue_by_target = {}
+    first_issue_by_detail = {}
+    first_issue_by_sales = {}
+    candidate_issues = []
+    for index, issue in enumerate(snapshot.source_issues):
+        issues_by_identity[issue.key.identity()].append(index)
+        first_issue_by_target.setdefault(issue.key.target_identity(), index)
+        if isinstance(issue, CandidateSourceIssue):
+            candidate_issues.append(issue)
+            first_issue_by_detail.setdefault((*_order_scope(issue), issue.row_id), index)
+        else:
+            for scope in issue.sales_scopes():
+                first_issue_by_sales.setdefault(scope, index)
+    for row in chain(snapshot.lines, candidate_issues):
+        identity = row.key.identity()
+        candidate_groups[identity].append(row)
+        # 跨来源的同一明细只记一次。一单多明细仍保留，供整单亏损归属交叉检查。
+        scope = _order_scope(row)
+        order_lines[scope].add((identity, row.row_id))
+        if row.order_id.strip() and row.row_id.strip():
+            detail_mappings[(*scope, row.row_id)].add(identity)
+    # 同一个来源明细只归一个在线变体。先于分组内去重检查，避免两组各自算价。
+    conflicting_mappings = {
+        identity for identities in detail_mappings.values() if len(identities) > 1 for identity in identities
+    }
+    multi_line_orders = {scope for scope, details in order_lines.items() if len(details) > 1}
     for state in snapshot.online:
         online_groups[state.key.identity()].append(state)
 
     # 执行目标与来源匹配分开：同一在线商品若同时对应多个来源SKU，全部挂起。
     # 不能移除SKU后直接取最小亏损，否则不同来源映射的样本会被混算。
     aliases = defaultdict(set)
-    for row in [*snapshot.lines, *snapshot.online]:
+    for row in chain(snapshot.lines, snapshot.online, snapshot.source_issues):
         aliases[row.key.target_identity()].add(row.key.identity())
     results = []
-    for identity, rows in candidate_groups.items():
+    for identity, group in candidate_groups.items():
         states = online_groups.get(identity, [])
+        key = _decision_key(group, states)
+        if key is None:
+            continue  # 完整在线身份未知。来源异常留在批次，仍参与前面的订单归属核对。
+        target = key.target_identity()
+        rows = [row for row in group if isinstance(row, SourceLine)]
+        # 全量异常保存在快照。商品保留自己的记录，关联目标、订单明细和共享主 SKU 各引用一条，
+        # 避免每个商品都保存同一组共享异常。引用保留原来源和记录序号。
+        issue_links = dict.fromkeys(issues_by_identity.get(identity, ()))
+        sales_issue = next((
+            index for row in chain(rows, states)
+            if (index := first_issue_by_sales.get(row.key.sales_scope(row.main_sku))) is not None
+        ), None)
+        detail_issue = next((
+            index for row in group
+            if (index := first_issue_by_detail.get((*_order_scope(row), row.row_id))) is not None
+        ), None)
+        for relation, index in (
+            ("same_target", first_issue_by_target.get(target)),
+            ("shared_main_sku", sales_issue),
+            ("same_order_detail", detail_issue),
+        ):
+            if index is not None:
+                issue_links.setdefault(index, relation)
+        issues = [(snapshot.source_issues[index], relation) for index, relation in issue_links.items()]
         # 在固定十进制精度下统一换算；单行极端数值不能中断同批其他子 SKU。
         with localcontext(PRICE_CONTEXT):
-            problem = snapshot_problem
-            if len(aliases[rows[0].key.target_identity()]) > 1:
+            problem = batch_problem
+            if len(aliases[target]) > 1:
                 problem = ("ambiguous_target_alias", "同一在线商品存在多个来源SKU映射，需先确认唯一映射")
-            results.append(_decide(snapshot, now, window, problem, rows, states))
+            elif identity in conflicting_mappings:
+                problem = ("conflicting_detail_mapping", "同一订单明细映射到多个在线变体，需核对来源")
+            elif issues:
+                problem = ("source_record_invalid", "来源记录字段异常，需核对关联明细或在线主 SKU")
+            elif conflicted_sales and any(
+                row.key.sales_scope(row.main_sku) in conflicted_sales for row in chain(rows, states)
+            ):
+                problem = ("conflicting_main_sku_sales", "共享主 SKU 的在线归属或七日销量存在冲突")
+            results.append(_decide(snapshot, now, window, problem, key, rows, states, multi_line_orders, issues))
     return results
 
 
-def _snapshot_problem(snapshot: Snapshot, now: datetime, today: date) -> tuple[str, str] | None:
+def snapshot_problem(snapshot: Snapshot, now: datetime, today: date) -> tuple[str, str] | None:
     # 待处理来源也必须完整，避免因漏源选了偏大的单件亏损。
     sources = snapshot.complete_sources
     if len(sources) != len(REQUIRED_SOURCES) or set(sources) != REQUIRED_SOURCES:
@@ -78,7 +183,7 @@ def _snapshot_problem(snapshot: Snapshot, now: datetime, today: date) -> tuple[s
         or snapshot.as_of > now
     ):
         return "stale_snapshot", "快照须在本北京时间业务日采集且采集时间有效"
-    # 汇率口径为每 1 CNY 的币种单位。过期数据连同站币候选一起挂起。
+    # 汇率单位由fx_rate_unit明确；两种报价的CNY基准都须为1。过期数据挂起。
     if snapshot.fx_date != today or snapshot.fx_rates.get("CNY") != Decimal("1"):
         return "invalid_fx", "缺少本业务日以 CNY 为基准的有效汇率"
     return None
@@ -89,12 +194,15 @@ def _decide(
     now: datetime,
     window: tuple[date, date],
     snapshot_problem: tuple[str, str] | None,
+    key: VariantKey,
     rows: list[SourceLine],
     states: list[OnlineState],
+    multi_line_orders: set[tuple[str, str, str]],
+    issues: list[tuple[SourceIssue, str | None]],
 ) -> Decision:
-    key = rows[0].key
     contract = snapshot.contracts.get(key.site)
-    row_ids = list(dict.fromkeys(row.row_id for row in rows if row.row_id.strip()))
+    issue_rows = (issue for issue, relation in issues if relation is None and isinstance(issue, CandidateSourceIssue))
+    row_ids = list(dict.fromkeys(row.row_id for row in chain(rows, issue_rows) if row.row_id.strip()))
     trace = {
         "formula_version": FORMULA_VERSION,
         "arithmetic": "decimal-ratio-v1",
@@ -104,6 +212,7 @@ def _decide(
         "as_of": snapshot.as_of.isoformat(),
         "fx_date": snapshot.fx_date.isoformat(),
         "fx_rates": {currency: str(rate) for currency, rate in snapshot.fx_rates.items()},
+        "fx_rate_unit": snapshot.fx_rate_unit,
         "complete_sources": list(snapshot.complete_sources),
         "source_versions": dict(snapshot.source_versions),
         "source_rows": [row.model_dump(mode="json") for row in rows],
@@ -111,6 +220,19 @@ def _decide(
         "site_contract": contract.model_dump(mode="json") if contract else None,
         "sales_window": [day.isoformat() for day in window],
     }
+    if issues:
+        issue_trace = []
+        for issue, relation in issues:
+            if relation is None:
+                issue_trace.append(issue.model_dump(mode="json"))
+            else:
+                issue_trace.append({
+                    "source": issue.source,
+                    "record_number": issue.record_number,
+                    "key": issue.key.model_dump(mode="json"),
+                    "relation": relation,
+                })
+        trace["source_issues"] = issue_trace
 
     def finish(
         code: str,
@@ -175,6 +297,8 @@ def _decide(
         return finish("invalid_station_currency", f"在线币种与 {key.site} 站点币 {station_currency} 不一致")
     if online.observed_at.astimezone(BEIJING).date() != snapshot.business_date or online.observed_at > now:
         return finish("stale_online", "在线价格与保护数据须为本业务日有效快照")
+    if online.last_changed_at is not None and online.last_changed_at > online.observed_at:
+        return finish("stale_online", "价格变更时间晚于该价格的观察时间")
 
     # 提交结果未知需继续锁定；72 小时只按已经确认生效的时间计算。
     if online.pending_submission:
@@ -240,7 +364,11 @@ def _decide(
                 excluded_rows[row.row_id] = "invalid_quantity"
             elif row.loss_amount >= 0:
                 excluded_rows[row.row_id] = "nonnegative_loss"
-            elif row.basis == "order" and not row.allocation_reliable:
+            elif row.basis == "order" and (
+                not row.allocation_reliable or not row.order_id.strip() or _order_scope(row) in multi_line_orders
+            ):
+                # 整单金额仅接受有可靠证据且可归属到单个明细的订单。
+                # 若同批已见多条明细，不按总件数分摊，也不让误标覆盖证据。
                 excluded_rows[row.row_id] = "unreliable_order_allocation"
             else:
                 magnitude = MoneyRatio(row.loss_amount.copy_abs())
@@ -251,10 +379,14 @@ def _decide(
         selected = min(valid_losses, key=lambda row_id: (valid_losses[row_id], row_id))
         unit_ratio = valid_losses[selected]
 
-        # 站点币亏损 = 原币单件亏损 × 站点币每 CNY 单位 / 原币每 CNY 单位。
+        # 原币/CNY报价用站点汇率/亏损币汇率；CNY/原币报价用亏损币汇率/站点汇率。
+        # ERP当前配置直接传原报价及单位，不把50位展示倒数回读为业务输入。
         # 保留精确 Decimal 比值直到档位与毛利判定，避免1/3等近似值少算一档。
+        rate_numerator, rate_denominator = (
+            (from_rate, to_rate) if snapshot.fx_rate_unit == 'cny_per_currency' else (to_rate, from_rate)
+        )
         station_ratio = (unit_ratio if loss_currency == station_currency
-                         else unit_ratio * MoneyRatio(to_rate) / MoneyRatio(from_rate))
+                         else unit_ratio * MoneyRatio(rate_numerator, rate_denominator))
         target_ratio = MoneyRatio(current) + station_ratio
         discount = MoneyRatio(current, retail).decimal()
         # 含 VAT 上传价 = T×R/P；按精确商余数舍入，可支持0.025档位及半档边界。

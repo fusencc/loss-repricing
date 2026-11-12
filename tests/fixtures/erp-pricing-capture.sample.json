@@ -1,0 +1,276 @@
+{
+  "acquisition_mode": "bulk_download",
+  "source_kind": "erp_web_backend",
+  "source_version": "erp-web-bulk-four-20261109",
+  "capture_id": "erp-capture-20261109T063500000000Z-00000000000000000000000000000001",
+  "queried_at": "2026-11-09T14:24:00+08:00",
+  "synthetic": true,
+  "sample_only": false,
+  "capture_complete": true,
+  "pricing_ready": false,
+  "details": [],
+  "groups": [
+    {
+      "source": "loss_allocatable",
+      "kind": "loss",
+      "status": 4,
+      "filters": {
+        "platform": "Tiktok",
+        "bloc": "样例集团",
+        "status": 4,
+        "financecheck": "3"
+      },
+      "list_complete": true,
+      "stage": "complete",
+      "error": null,
+      "total": 1,
+      "candidate_order_ids": [
+        "000001"
+      ],
+      "rows": [
+        {
+          "orderid": "000001",
+          "platform": "Tiktok",
+          "source_status": 4,
+          "current_status_matches_source": true,
+          "fields": {
+            "订单编号": "000001",
+            "订单状态": "可配货",
+            "平台": "Tiktok",
+            "集团": "样例集团",
+            "店铺": "样例店铺",
+            "item ID": "PARENT-A",
+            "商品SKU列表": "SAMPLE-A",
+            "修正一次毛利": "-2.40"
+          }
+        }
+      ],
+      "status_discrepancies": [],
+      "missing_order_ids": [],
+      "batches": [
+        {
+          "number": 1,
+          "status": "complete",
+          "order_ids": [
+            "000001"
+          ],
+          "scope_check": {
+            "requested": 1,
+            "downloaded_rows": 1,
+            "downloaded_unique": 1,
+            "missing": [],
+            "unexpected": [],
+            "duplicate_rows": 0
+          },
+          "polls": [
+            {
+              "status": "success",
+              "queried_at": "2026-11-09T14:27:00+08:00"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "source": "loss_pending",
+      "kind": "loss",
+      "status": 3,
+      "filters": {
+        "platform": "Tiktok",
+        "bloc": "样例集团",
+        "status": 3,
+        "financecheck": "3"
+      },
+      "list_complete": true,
+      "stage": "complete",
+      "error": null,
+      "total": 2,
+      "candidate_order_ids": [
+        "000002",
+        "000003"
+      ],
+      "rows": [
+        {
+          "orderid": "000002",
+          "platform": "Tiktok",
+          "source_status": 3,
+          "current_status_matches_source": true,
+          "fields": {
+            "订单编号": "000002",
+            "订单状态": "待处理",
+            "平台": "Tiktok",
+            "集团": "样例集团",
+            "店铺": "样例店铺",
+            "item ID": "PARENT-B,PARENT-A",
+            "商品SKU列表": "SAMPLE-A,SAMPLE-B",
+            "修正一次毛利": "-4.50"
+          }
+        },
+        {
+          "orderid": "000003",
+          "platform": "Tiktok",
+          "source_status": 3,
+          "current_status_matches_source": true,
+          "fields": {
+            "订单编号": "000003",
+            "订单状态": "待处理",
+            "平台": "Tiktok",
+            "集团": "样例集团",
+            "店铺": "样例店铺",
+            "item ID": "PARENT-C",
+            "商品SKU列表": "SAMPLE-C",
+            "修正一次毛利": "-9.60"
+          }
+        }
+      ],
+      "status_discrepancies": [],
+      "missing_order_ids": [],
+      "batches": [
+        {
+          "number": 1,
+          "status": "complete",
+          "order_ids": [
+            "000002",
+            "000003"
+          ],
+          "scope_check": {
+            "requested": 2,
+            "downloaded_rows": 2,
+            "downloaded_unique": 2,
+            "missing": [],
+            "unexpected": [],
+            "duplicate_rows": 0
+          },
+          "polls": [
+            {
+              "status": "success",
+              "queried_at": "2026-11-09T14:28:00+08:00"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "source": "blocked_allocatable",
+      "kind": "blocked",
+      "status": 4,
+      "filters": {
+        "ptid": "sample-tiktok",
+        "blocs": "样例集团",
+        "status": 4,
+        "jzfh": "1"
+      },
+      "list_complete": true,
+      "stage": "complete",
+      "error": null,
+      "total": 1,
+      "candidate_order_ids": [
+        "000001"
+      ],
+      "rows": [
+        {
+          "orderid": "000001",
+          "platform": "Tiktok",
+          "source_status": 4,
+          "current_status_matches_source": true,
+          "fields": {
+            "订单编号": "000001",
+            "订单状态": "可配货",
+            "平台": "Tiktok",
+            "集团": "样例集团",
+            "店铺": "样例店铺",
+            "item ID": "PARENT-A",
+            "商品SKU列表": "SAMPLE-A",
+            "修正一次毛利": "-2.40"
+          }
+        }
+      ],
+      "status_discrepancies": [],
+      "missing_order_ids": [],
+      "batches": [
+        {
+          "number": 1,
+          "status": "complete",
+          "order_ids": [
+            "000001"
+          ],
+          "scope_check": {
+            "requested": 1,
+            "downloaded_rows": 1,
+            "downloaded_unique": 1,
+            "missing": [],
+            "unexpected": [],
+            "duplicate_rows": 0
+          },
+          "polls": [
+            {
+              "status": "success",
+              "queried_at": "2026-11-09T14:29:00+08:00"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "source": "blocked_pending",
+      "kind": "blocked",
+      "status": 3,
+      "filters": {
+        "ptid": "sample-tiktok",
+        "blocs": "样例集团",
+        "status": 3,
+        "jzfh": "1"
+      },
+      "list_complete": true,
+      "stage": "complete",
+      "error": null,
+      "total": 1,
+      "candidate_order_ids": [
+        "000002"
+      ],
+      "rows": [
+        {
+          "orderid": "000002",
+          "platform": "Tiktok",
+          "source_status": 3,
+          "current_status_matches_source": true,
+          "fields": {
+            "订单编号": "000002",
+            "订单状态": "待处理",
+            "平台": "Tiktok",
+            "集团": "样例集团",
+            "店铺": "样例店铺",
+            "item ID": "PARENT-B,PARENT-A",
+            "商品SKU列表": "SAMPLE-A,SAMPLE-B",
+            "修正一次毛利": "-4.50"
+          }
+        }
+      ],
+      "status_discrepancies": [],
+      "missing_order_ids": [],
+      "batches": [
+        {
+          "number": 1,
+          "status": "complete",
+          "order_ids": [
+            "000002"
+          ],
+          "scope_check": {
+            "requested": 1,
+            "downloaded_rows": 1,
+            "downloaded_unique": 1,
+            "missing": [],
+            "unexpected": [],
+            "duplicate_rows": 0
+          },
+          "polls": [
+            {
+              "status": "success",
+              "queried_at": "2026-11-09T14:30:00+08:00"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

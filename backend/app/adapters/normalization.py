@@ -1,10 +1,13 @@
 """把已确认合同的字段路径转换为内部模型。保留原始币种和价格单位，由领域层算价。"""
+import json
 from datetime import date, datetime
 from decimal import Decimal
 import re
 
 from app.domain.engine import BEIJING
-from app.domain.types import FeeModel, OnlineState, SourceLine, VariantKey
+from app.domain.types import (
+    CandidateSourceIssue, FeeModel, OnlineSourceIssue, OnlineState, SourceLine, VariantKey, VariantReference,
+)
 
 
 KEY_FIELDS = frozenset(f"key.{field}" for field in VariantKey.model_fields)
@@ -82,19 +85,37 @@ def source_stamp(payload, spec, business_date):
     return as_of
 
 
-def identity_text(value):
+def _identifier(value, forbidden):
     # 数字 ID 必须由提供方以原文返回，避免把已丢失前导零的数值转换成假身份。
     if (
         not isinstance(value, str) or not value or value != value.strip()
         or any(not char.isprintable() for char in value)
-        or "://" in value or "?" in value or "#" in value
+        or any(marker in value for marker in forbidden)
     ):
         raise ValueError("商品或订单标识无效")
     return value
 
 
+def identity_text(value):
+    return _identifier(value, ("://", "?", "#"))
+
+
+def sku_text(value):
+    # 平台SKU是原始商家文本；可打印边界空格、@和#均保留，以便逐字核对。
+    # 订单/产品/店铺ID仍使用独立严格校验，不裁剪SKU或合并不同原始文本。
+    if (not isinstance(value,str) or not value.strip()
+            or any(not char.isprintable() for char in value)
+            or any(marker in value for marker in ("://", "?"))):
+        raise ValueError("平台SKU文本无效")
+    return value
+
+
+def _variant_values(values, sku_validator):
+    return {name: (sku_validator if name == "sku" else identity_text)(value) for name, value in values.items()}
+
+
 def variant_key(values):
-    return VariantKey.model_validate({name: identity_text(value) for name, value in values.items()})
+    return VariantKey.model_validate(_variant_values(values, identity_text))
 
 
 def money(value):
@@ -117,11 +138,39 @@ def _validate_common(values):
         raise ValueError("业务状态必须是布尔值")
 
 
+def _order_detail_identity(order_id, detail_id):
+    order_id, detail_id = identity_text(order_id), identity_text(detail_id)
+    # 上游明细号可能只在订单内唯一，JSON 数组保留两个标识的文本前导零。
+    return order_id, json.dumps([order_id, detail_id], ensure_ascii=False, separators=(",", ":"))
+
+
+def source_record_issue(record, spec, source, record_number):
+    fields = (KEY_FIELDS - {"key.warehouse"}) | ({"main_sku"} if source == "online" else {"order_id", "row_id"})
+    values = mapped(
+        record,
+        {name: path for name, path in spec["field_map"].items() if name in fields},
+        {name: value for name, value in spec.get("constants", {}).items() if name in fields},
+    )
+    # 仓配不参与稳定目标身份。异常证据保留空值，仍可定位商品及订单明细。
+    warehouse_path = spec["field_map"].get("key.warehouse")
+    try:
+        raw = read_path(record, warehouse_path) if warehouse_path else spec.get("constants", {}).get("key.warehouse")
+        warehouse = identity_text(raw)
+    except (KeyError, IndexError, TypeError, ValueError):
+        warehouse = None
+    # 已观察到平台子 SKU 含 #。这里只定位挂起范围，正常算价、提交及回读沿用已确认的键合同。
+    key = VariantReference.model_validate({**_variant_values(values["key"], sku_text), "warehouse": warehouse})
+    if source == "online":
+        return OnlineSourceIssue(source=source, record_number=record_number, key=key,
+                                 main_sku=identity_text(values["main_sku"]))
+    order_id, row_id = _order_detail_identity(values["order_id"], values["row_id"])
+    return CandidateSourceIssue(source=source, record_number=record_number, key=key, order_id=order_id, row_id=row_id)
+
+
 def source_line(record, spec, source):
     values = mapped(record, spec["field_map"], spec.get("constants"))
     _validate_common(values)
-    values["row_id"] = identity_text(values["row_id"])
-    values["order_id"] = identity_text(values["order_id"])
+    values["order_id"], values["row_id"] = _order_detail_identity(values["order_id"], values["row_id"])
     values["quantity"] = money(values["quantity"])
     values["loss_amount"] = money(values["loss_amount"])
     # 来源版本和原始明细行定位足以回溯。保留负号、件数、原币和粒度，引用不含下载链接。

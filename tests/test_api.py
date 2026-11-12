@@ -51,3 +51,27 @@ def test_logout_invalidates_browser_cookie(client):
     login(client)
     assert client.post("/api/auth/logout").status_code == 200
     assert client.get("/api/auth/me").status_code == 401
+
+def test_demo_entry_runs_with_coordination_in_a_fresh_database(tmp_path):
+    from app.worker import Worker
+
+    config = Settings(
+        _env_file=None, adapter_mode="demo", coordination_required=True,
+        live_submit_enabled=False, ding_enabled=False, notification_mode="demo",
+        runtime_dir=tmp_path, database_url=f"sqlite:///{tmp_path / 'api.db'}",
+        admin_password="test-local-password", session_secret="test-session-secret-32-characters-long",
+    )
+    with TestClient(create_app(config)) as client:
+        login(client)
+        app = client.app
+        response = client.post("/api/demo/run")
+        assert response.status_code == 200
+        worker = Worker(app.state.factory, app.state.service)
+        worker.tick()
+        job = client.get(f"/api/jobs/{response.json()['job_id']}").json()
+        assert job["state"] == "done"
+        batch = client.get(f"/api/batches/{job['batch_id']}").json()
+        assert batch["mode"] == "demo" and batch["summary"]["已核验"] >= 1
+        worker.tick()
+        inbox = client.get("/api/notifications").json()
+        assert len(inbox) == 1 and inbox[0]["delivery_state"] == "demo"

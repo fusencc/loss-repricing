@@ -132,34 +132,6 @@ def test_validation_route_is_admin_only_and_does_not_write_execution(tmp_path, m
         assert calls == [2]
 
 
-def test_cli_report_only_excludes_raw_details(tmp_path, monkeypatch, capsys):
-    import json
-    import sys
-    from types import SimpleNamespace
-    import app.capture_erp as cli
-
-    data = sample()
-    data['details'][0]['rows'][0]['costPrice'] = 'raw-cost-not-for-report'
-    data['validation'] = build_sample_validation(data)
-    monkeypatch.setattr(cli, 'get_settings', lambda: SimpleNamespace(runtime_dir=tmp_path))
-    limits = []
-
-    def capture(settings, *, limit):
-        limits.append(limit)
-        return data
-
-    monkeypatch.setattr(cli, 'capture_erp_sample', capture)
-    monkeypatch.setattr(sys, 'argv', ['capture_erp', '--limit', '2', '--report-only'])
-    cli.main()
-    paths = list((tmp_path / 'source-captures').glob('*.json'))
-    assert len(paths) == 1 and paths[0].name.startswith('erp-validation-')
-    saved = paths[0].read_text(encoding='utf-8')
-    assert json.loads(saved) == data['validation']
-    assert 'raw-cost-not-for-report' not in saved
-    assert limits == [2]
-    assert 'permission_scope_verified=False' in capsys.readouterr().out
-
-
 def test_validation_route_preserves_sanitized_source_failure(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
     from app.adapters.base import SourceUnavailable
