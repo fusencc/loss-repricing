@@ -18,7 +18,7 @@ def capture():
 
 def settings(tmp_path):
     return Settings(_env_file=None, runtime_dir=tmp_path, vendor_username='test', vendor_password='test',
-                    erp_capture_bloc='SAMPLE-GROUP')
+                    erp_capture_bloc='SAMPLE-GROUP', sales_request_interval_seconds=0)
 
 
 def transport(*, wrong_variant=False, drift=False, missing_variant_id=False):
@@ -48,23 +48,6 @@ def transport(*, wrong_variant=False, drift=False, missing_variant_id=False):
                 row.update(localSellerSku='S1',currency='MYR',priceIncludeVat='EXACT_PRICE')
             content=json.dumps({'resp_code':0,'datas':[row]}).replace('"EXACT_PRICE"','12.1234567890123456789')
             return httpx.Response(200,content=content.encode())
-        if path.endswith('/supplierrateoversea/findByPage'):
-            body=json.loads(request.content)
-            assert body['blocNames']==['SAMPLE-GROUP'] and body['siteCodes']==['MY']
-            return httpx.Response(200,json={'code':0,'count':1,'data':[
-                {'id':'O1','blocName':'SAMPLE-GROUP','siteCode':'MY','authType':1,
-                 'costOfCapital':'2.0000','warehouseCost':'0.7000','marketingRate':'10.0000',
-                 'warehouseStorageRate':'0.0001','otherRate':'0.0010','orderProcessFee':None}]})
-        if path.endswith('/supplierrate/findByPage'):
-            body=json.loads(request.content)
-            assert body['authType']==2 and body['departmentName']=='D1'
-            return httpx.Response(200,json={'resp_code':0,'datas':{'count':1,'data':[
-                {'id':'F1','blocName':'SAMPLE-GROUP','departmentName':'D1','authType':2,
-                 'siteCode':'MY','marketingRate':5,'warehouseCost':None}]}})
-        if path.endswith('/getPublicRatesByShopName'):
-            assert request.url.params['shopName']=='SHOP1MY' and request.url.params['globalPublish']=='false'
-            return httpx.Response(200,json={'resp_code':0,'datas':[
-                {'id':4,'rateType':4,'expense':'1.3','currency':'RMB','site':'MY'}]})
         pytest.fail('Unexpected request, especially any price upload: '+path)
     return httpx.MockTransport(handler)
 
@@ -74,10 +57,10 @@ def test_readonly_capture_deduplicates_scope_and_archives_exact_money(tmp_path):
     with httpx.Client(transport=transport()) as client:
         result=capture_sales_sources(settings(tmp_path),capture(),client=client,page_size=1)
     assert result['acquisition_complete']
-    assert result['summary']=={'requested_products':2,'products':2,'variants':2,'departments':1,'shops':1}
+    assert result['summary']=={'requested_products':2,'products':2,'variants':2,'shops':1}
     assert result['variants'][0]['priceIncludeVat']=='12.1234567890123456789'
-    assert result['department_rates']['D1'][0]['warehouseCost'] is None
-    assert result['public_rates']['SHOP1MY'][0]['expense']=='1.3'
+    assert result['fee_policy'] == 'user_fixed_configuration'
+    assert not {'department_rates','overseas_rates','public_rates'} & result.keys()
     assert result['synthetic'] is True and result['pricing_ready'] is False
     assert result['erp_capture_id']=='erp-capture-test'
     artifact=Path(result['artifact_file'])
@@ -166,37 +149,8 @@ def test_current_variant_state_uses_scoped_online_expansion(tmp_path):
     assert all(row['currentOverseasProfitMargin']=='-14.93' for row in result['variants'])
 
 
-def test_overseas_rates_are_captured_as_a_distinct_company_source(tmp_path):
-    from app.adapters.sales_capture import capture_sales_sources
-    with httpx.Client(transport=transport()) as client:
-        result=capture_sales_sources(settings(tmp_path),capture(),client=client)
-    assert result['acquisition_complete']
-    rates=result['overseas_rates']
-    assert len(rates)==1 and rates[0]['warehouseCost']=='0.7000'
-    assert rates[0]['warehouseStorageRate']=='0.0001'
-    assert rates[0]['orderProcessFee'] is None
-    assert result['department_rates']['D1'][0]['warehouseCost'] is None
-    original=next(f for f in result['files'] if f['stage']=='overseas_rate')
-    assert json.loads(Path(original['file']).read_text())['data'][0]==rates[0]
-    assert result['pricing_ready'] is False
 
 
-def test_out_of_scope_overseas_rates_do_not_replace_other_sources(tmp_path):
-    from app.adapters.sales_capture import capture_sales_sources
-    base=transport()
-    def handler(request):
-        response=base.handle_request(request)
-        if request.url.path.endswith('/supplierrateoversea/findByPage'):
-            payload=response.json();payload['data'][0]['blocName']='OTHER-GROUP'
-            return httpx.Response(200,json=payload)
-        return response
-    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        result=capture_sales_sources(settings(tmp_path),capture(),client=client)
-    assert not result['acquisition_complete'] and result['overseas_rates']==[]
-    assert len(result['variants'])==2 and result['department_rates']['D1']
-    assert result['public_rates']['SHOP1MY']
-    assert any(i['code']=='overseas_rate_scope_mismatch' for i in result['issues'])
-    assert any(b'OTHER-GROUP' in Path(f['file']).read_bytes() for f in result['files'])
 
 
 def test_null_parent_site_uses_the_frontend_shop_name_contract():
@@ -214,7 +168,6 @@ def test_null_parent_site_uses_the_frontend_shop_name_contract():
         with httpx.Client(transport=httpx.MockTransport(handler)) as client:
             result=capture_sales_sources(settings(Path(folder)),capture(),client=client)
     assert result['acquisition_complete']
-    assert result['overseas_rates']
     assert result['shop_sites']=={'SHOP1MY':'MY'}
     assert all(row['site'] is None for row in result['products'])
 

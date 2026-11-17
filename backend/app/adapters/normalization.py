@@ -6,7 +6,7 @@ import re
 
 from app.domain.engine import BEIJING
 from app.domain.types import (
-    CandidateSourceIssue, FeeModel, OnlineSourceIssue, OnlineState, SourceLine, VariantKey, VariantReference,
+    CandidateSourceIssue, FeeModel, OnlineProfitCheck, OnlineSourceIssue, OnlineState, SourceLine, VariantKey, VariantReference,
 )
 
 
@@ -17,9 +17,9 @@ LINE_FIELDS = KEY_FIELDS | {
 }
 ONLINE_FIELDS = KEY_FIELDS | {
     "main_sku", "currency", "retail_price", "marketing_price", "current_margin", "fee_scope",
-    "observed_at", "sales_7d", "sales_start", "sales_end", "sales_complete", "history_known",
-    "last_increase_at", "pending_submission", "protected", "activity_locked", "sellable",
-    "fee_model.revenue_factor", "fee_model.fixed_cost", "fee_model.version", "fee_model.verified",
+    "observed_at", "sales_7d", "sales_basis", "sales_observed_at", "sales_complete",
+    "protected", "activity_locked", "sellable",
+    "fee_model.revenue_factor", "fee_model.fixed_cost", "fee_model.version", "fee_model.verified", "profit_check",
 }
 FX_FIELDS = frozenset({"fx_date", "rates"})
 LOOKUP_FIELDS = KEY_FIELDS | {"actual_price", "currency", "observed_at", "price_basis"}
@@ -28,7 +28,7 @@ LOOKUP_OPTIONAL = frozenset({"effective_at", "row_status", "task_id", "execution
 LINE_CONSTANTS = {"basis", "allocation_reliable", "fee_scope", "abnormal"} | KEY_FIELDS
 ONLINE_CONSTANTS = {"fee_scope"} | KEY_FIELDS
 BOOL_FIELDS = {
-    "allocation_reliable", "abnormal", "sales_complete", "history_known", "pending_submission",
+    "allocation_reliable", "abnormal", "sales_complete",
     "protected", "activity_locked", "sellable",
 }
 CURRENCY = re.compile(r"[A-Z]{3}")
@@ -179,14 +179,14 @@ def source_line(record, spec, source):
     )
 
 
-def online_state(record, spec, fee_versions):
+def online_state(record, spec, fee_versions, profit_versions):
     values = mapped(record, spec["field_map"], spec.get("constants"))
     _validate_common(values)
+    # live来源不映射公司/平台改价历史。待PricingService读取本程序权威库后才能确认历史。
+    values.update(history_known=False, last_increase_at=None, pending_submission=False)
     values["observed_at"] = source_time(values["observed_at"])
-    values["sales_start"] = source_date(values["sales_start"])
-    values["sales_end"] = source_date(values["sales_end"])
-    if values["last_increase_at"] is not None:
-        values["last_increase_at"] = source_time(values["last_increase_at"])
+    if values["sales_observed_at"] is not None:
+        values["sales_observed_at"] = source_time(values["sales_observed_at"])
     for name in ("retail_price", "marketing_price", "current_margin"):
         if name != "marketing_price" or values[name] is not None:
             values[name] = money(values[name])
@@ -207,6 +207,21 @@ def online_state(record, spec, fee_versions):
             version=version,
             verified=fee_values["verified"] and fee_versions.get(values["key"].site) == version,
         )
+    check = values["profit_check"]
+    if check is not None:
+        if not isinstance(check, dict) or not isinstance(check.get("model"), dict):
+            raise ValueError("在线利润合同结构无效")
+        check = {**check, "model": dict(check["model"])}
+        model = check["model"]
+        version = model.get("version")
+        if not isinstance(version, str) or not SAFE_LABEL.fullmatch(version) or type(model.get("verified")) is not bool:
+            raise ValueError("在线利润模型版本或审核标记无效")
+        for field in ("revenue_factor", "fixed_cost", "fixed_cost_divisor"):
+            model[field] = money(model[field])
+        check["overseas_stock"] = money(check["overseas_stock"])
+        check["inventory_observed_at"] = source_time(check["inventory_observed_at"])
+        model["verified"] = model["verified"] and profit_versions.get(values["key"].site) == version
+        values["profit_check"] = OnlineProfitCheck.model_validate(check)
     return OnlineState.model_validate(values)
 
 

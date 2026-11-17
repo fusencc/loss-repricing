@@ -8,7 +8,7 @@ from app.domain.types import Decision
 
 
 UPLOAD_HEADERS = (
-    "店铺名", "产品ID", "商品ID", "税前价格", "税后价格",
+    "店铺名（必填）", "产品ID（必填）", "商品ID（必填）", "税前价格", "税后价格",
     "海外仓税前价格", "直发仓税前价格", "海外仓税后价格", "直发仓税后价格",
 )
 VAT_UPLOAD_COLUMNS = frozenset(UPLOAD_HEADERS[index] for index in (4, 7, 8))

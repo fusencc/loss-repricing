@@ -38,8 +38,12 @@ class SyntheticAdapter:
                                marketing_price="10", current_margin="-0.5", fee_scope="normal",
                                fee_model=dict(revenue_factor="0.9", fixed_cost="9.5",
                                               version="synthetic-fees-v1", verified=True),
+                               profit_check=dict(overseas_stock="0", mode="direct", department="TEST",
+                                                 inventory_observed_at=self.clock[0], source_ref="synthetic-inventory",
+                                                 model=dict(revenue_factor="1", fixed_cost="0",
+                                                            version="synthetic-online-v1", verified=True)),
                                observed_at=self.clock[0], sales_7d=6, history_known=True, sales_complete=True,
-                               sales_start=day - timedelta(days=7), sales_end=day - timedelta(days=1)))
+                               sales_basis="sales_system_web_sku_seven_days", sales_observed_at=self.clock[0]))
         return Snapshot.model_validate(dict(
             as_of=self.clock[0], business_date=day, fx_date=day, fx_rates={"CNY": "1", "MYR": "0.6"},
             lines=lines, online=online,

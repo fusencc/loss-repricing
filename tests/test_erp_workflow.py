@@ -132,12 +132,11 @@ def test_fresh_collection_runs_download_clean_evaluate_and_archive(tmp_path, mon
     assert sales_ref['acquisition_complete'] is False
     sales_file = Path(sales_ref['artifact_file'])
     assert json.loads(sales_file.read_text())['issues'][0]['code'] == 'missing_product_hint'
-    assert result['price_history_status'] == 'saved'
-    history_ref = json.loads(report_path.read_text())['references']['company_price_history']
-    history = json.loads(Path(history_ref['artifact_file']).read_text())
-    assert history['erp_capture_id'] == result['capture_id']
-    assert history['sales_source_id'] == sales_ref['source_id']
-    assert history['platform_manual_changes_complete'] is False
+    assert result['history_scope'] == 'own_program_only'
+    refs = json.loads(report_path.read_text())['references']
+    assert 'company_price_history' not in refs and 'company_price_effects' not in refs
+    assert refs['fixed_fees']['erp_capture_id'] == result['capture_id']
+    assert result['fixed_fee_status'] == 'unavailable'
 
 
 def test_cli_missing_evidence_returns_nonzero_after_persisting_report(tmp_path):
@@ -186,14 +185,6 @@ def test_sampled_sales_source_cannot_be_attached_as_full_source(tmp_path):
             'erp_capture_id':capture_id,'synthetic':True,'sample_only':True})
 
 
-@pytest.mark.parametrize('changed', [{'sample_only':True},{'sales_source_id':'OTHER'},{'erp_capture_id':'OTHER'}])
-def test_price_history_must_match_the_same_capture_and_sales_source(tmp_path, changed):
-    from app.services.erp_pricing import save_pricing_preview
-    config,capture_id,_=inputs(tmp_path)
-    sales={'source_id':'S1','erp_capture_id':capture_id,'synthetic':True,'sample_only':False}
-    history={'erp_capture_id':capture_id,'sales_source_id':'S1','synthetic':True,'sample_only':False,**changed}
-    with pytest.raises(ValueError,match='操作日志来源'):
-        save_pricing_preview(config.runtime_dir,capture_id,sales_source=sales,price_history_source=history)
 
 
 def test_live_order_preparation_archives_facts_without_inventing_online_state(tmp_path):
@@ -229,7 +220,7 @@ def test_live_order_preparation_archives_facts_without_inventing_online_state(tm
         save_pricing_preview(config.runtime_dir,capture_id,evidence=evidence,order_preparation=preparation)
 
 
-@pytest.mark.parametrize('source_name',['sales_window_source','local_history_source','platform_source'])
+@pytest.mark.parametrize('source_name',['sales_window_source','local_history_source','platform_source','fixed_fees_source'])
 @pytest.mark.parametrize('changed',[{'erp_capture_id':'OTHER'},{'sample_only':True},{'synthetic':False}])
 def test_window_and_own_history_refs_cannot_cross_capture_or_environment(tmp_path,source_name,changed):
     from app.services.erp_pricing import save_pricing_preview

@@ -39,8 +39,11 @@ ROW = {
 ONLINE = {
     "product": PRODUCT, "main": "0003", "ccy": "MYR", "r": "20", "m": "10",
     "margin": "-0.04", "seen": OBSERVED, "qty": 10,
-    "start": "2026-10-29", "end": "2026-11-04", "full": True, "history": True,
+    "sales_basis": "sales_system_web_sku_seven_days", "sales_seen": OBSERVED, "full": True, "history": True,
     "last": None, "pending": False, "protected": False, "locked": False, "sellable": True,
+    "profit": {"overseas_stock":"0","mode":"direct","department":"TEST",
+        "inventory_observed_at":OBSERVED,"source_ref":"synthetic/profit",
+        "model":{"revenue_factor":"0.91","fixed_cost":"9.8","fixed_cost_divisor":"1","version":"synthetic-online-v1","verified":True}},
     "fee": {"factor": "0.91", "cost": "9.8", "rev": "fees-v1", "reviewed": True},
 }
 
@@ -53,12 +56,11 @@ def contract():
     }
     online_fields = KEY_MAP | {
         "main_sku": "main", "currency": "ccy", "retail_price": "r", "marketing_price": "m",
-        "current_margin": "margin", "observed_at": "seen", "sales_7d": "qty", "sales_start": "start",
-        "sales_end": "end", "sales_complete": "full", "history_known": "history",
-        "last_increase_at": "last", "pending_submission": "pending", "protected": "protected",
+        "current_margin": "margin", "observed_at": "seen", "sales_7d": "qty", "sales_basis": "sales_basis",
+        "sales_observed_at": "sales_seen", "sales_complete": "full", "protected": "protected",
         "activity_locked": "locked", "sellable": "sellable", "fee_model.revenue_factor": "fee.factor",
         "fee_model.fixed_cost": "fee.cost", "fee_model.version": "fee.rev",
-        "fee_model.verified": "fee.reviewed",
+        "fee_model.verified": "fee.reviewed", "profit_check":"profit",
     }
     collection = {
         "version": "candidate-v1", "service": "erp", "method": "POST", "records_path": "payload.rows",
@@ -75,7 +77,7 @@ def contract():
             **{source: collection | {"path": f"/candidates/{source}", "json": {"day": "{business_date}"}} for source in SOURCES},
             "online": collection | {
                 "version": "online-v1", "service": "vendor", "method": "GET", "path": "/online",
-                "params": {"day": "{business_date}", "from": "{sales_start}", "to": "{sales_end}"},
+                "params": {"day": "{business_date}"},
                 "field_map": online_fields, "constants": {"fee_scope": "normal"},
             },
             "fx": {
@@ -87,7 +89,7 @@ def contract():
         },
         "sites": {
             "MY": {"verified": True, "price_step": "0.01", "rounding": "ROUND_HALF_UP",
-                   "upload_column": "直发仓税后价格", "version": "my-v1", "fee_model_version": "fees-v1",
+                   "upload_column": "直发仓税后价格", "version": "my-v1", "fee_model_version": "fees-v1", "online_profit_model_version":"synthetic-online-v1",
                    "warehouses": ["direct"]},
         },
         "submit": {
@@ -197,7 +199,7 @@ def collection_response(request):
         assert request.headers["authorization"] == "Bearer test-secret-e"
         data["rows"] = [ROW] if path.endswith("/loss_allocatable") else []
     elif path == "/online":
-        assert dict(request.url.params) == {"day": "2026-11-05", "from": "2026-10-29", "to": "2026-11-04"}
+        assert dict(request.url.params) == {"day": "2026-11-05"}
         assert request.headers["authorization"] == "Bearer test-secret-v"
         data["rows"] = [ONLINE]
     else:
@@ -226,6 +228,17 @@ def test_collect_maps_four_sources_online_and_fx(contract, make_adapter):
     assert snapshot.source_versions["fee_model.MY"] == "fees-v1"
 
 
+def test_live_http_does_not_require_or_trust_external_price_history(contract, make_adapter):
+    for field in ('history_known','last_increase_at','pending_submission'):
+        contract['collections']['online']['field_map'].pop(field,None)
+    adapter=make_adapter(contract,collection_response)
+    assert adapter.readiness()['contract_ready']
+    state=adapter.collect(DAY).online[0]
+    # 原始来源中的history/last/pending不参与；只能等服务读取本地权威库。
+    assert state.history_known is False
+    assert state.last_increase_at is None and state.pending_submission is False
+
+
 
 def with_source_rows(**sources):
     def respond(request):
@@ -237,6 +250,20 @@ def with_source_rows(**sources):
         payload["payload"]["rows"] = sources[source]
         return httpx.Response(200, json=payload)
     return respond
+
+
+
+def with_own_history(snapshot):
+    """HTTP只提供外部事实，规则测试也通过真实服务读取空的临时权威库。"""
+    from types import SimpleNamespace
+    from app.db import Base, create_database
+    from app.services.execution import PricingService
+    engine,factory=create_database('sqlite://')
+    try:
+        Base.metadata.create_all(engine)
+        return PricingService(factory,SimpleNamespace(mode='live'),Settings(_env_file=None))._enrich(snapshot)
+    finally:
+        engine.dispose()
 
 
 def test_candidate_field_failure_holds_only_locatable_targets(contract, make_adapter):
@@ -254,7 +281,7 @@ def test_candidate_field_failure_holds_only_locatable_targets(contract, make_ada
     )
 
     snapshot = make_adapter(contract, handler, enabled=False).collect(DAY)
-    results = {decision.key.item_id: decision for decision in evaluate(snapshot, datetime.fromisoformat(OBSERVED))}
+    results = {decision.key.item_id: decision for decision in evaluate(with_own_history(snapshot), datetime.fromisoformat(OBSERVED))}
 
     assert snapshot.complete_sources == SOURCES
     assert results["003"].reason_code == "source_record_invalid"
@@ -296,7 +323,7 @@ def test_invalid_candidate_still_counts_as_a_separate_order_line(contract, make_
     )
 
     snapshot = make_adapter(contract, handler).collect(DAY)
-    results = {decision.key.item_id: decision for decision in evaluate(snapshot, datetime.fromisoformat(OBSERVED))}
+    results = {decision.key.item_id: decision for decision in evaluate(with_own_history(snapshot), datetime.fromisoformat(OBSERVED))}
 
     assert results["003"].reason_code == "no_valid_loss"
     assert results["003"].trace["excluded_source_rows"] == {
@@ -329,7 +356,7 @@ def test_bad_online_state_holds_its_target_and_shared_main_sku(contract, make_ad
     )
 
     snapshot = make_adapter(contract, handler).collect(DAY)
-    results = {decision.key.item_id: decision for decision in evaluate(snapshot, datetime.fromisoformat(OBSERVED))}
+    results = {decision.key.item_id: decision for decision in evaluate(with_own_history(snapshot), datetime.fromisoformat(OBSERVED))}
 
     assert {state.key.item_id for state in snapshot.online} == {"008", "009"}
     assert results["003"].reason_code == "source_record_invalid"
@@ -358,7 +385,7 @@ def test_shared_sales_issue_evidence_is_bounded_per_candidate(contract, make_ada
                                blocked_pending=[], online=online)
 
     snapshot = make_adapter(contract, handler, enabled=False).collect(DAY)
-    results = evaluate(snapshot, datetime.fromisoformat(OBSERVED))
+    results = evaluate(with_own_history(snapshot), datetime.fromisoformat(OBSERVED))
 
     assert len(snapshot.source_issues) == 25 and len(results) == 10
     for result in results:
@@ -451,7 +478,7 @@ def test_well_formed_sales_conflict_cannot_price_affected_main_skus(contract, ma
         loss_pending=[], blocked_allocatable=[], blocked_pending=[], online=online,
     )
     snapshot = make_adapter(contract, respond).collect(DAY)
-    results = {result.key.item_id: result for result in evaluate(snapshot, datetime.fromisoformat(OBSERVED))}
+    results = {result.key.item_id: result for result in evaluate(with_own_history(snapshot), datetime.fromisoformat(OBSERVED))}
 
     assert not snapshot.source_issues  # 字段均合规；问题来自有效记录之间的证据冲突。
     assert results["009"].ready
@@ -502,7 +529,7 @@ def test_missing_candidate_warehouse_retains_scope_without_guessing(contract, ma
     )
     snapshot = make_adapter(contract, respond).collect(DAY)
     snapshot = Snapshot.model_validate_json(snapshot.model_dump_json())
-    results = {decision.key.item_id: decision for decision in evaluate(snapshot, datetime.fromisoformat(OBSERVED))}
+    results = {decision.key.item_id: decision for decision in evaluate(with_own_history(snapshot), datetime.fromisoformat(OBSERVED))}
 
     assert snapshot.complete_sources == SOURCES
     assert len(snapshot.source_issues) == 2
@@ -515,7 +542,7 @@ def test_missing_candidate_warehouse_retains_scope_without_guessing(contract, ma
 
 
 def test_missing_protection_mapping_blocks_collection_before_http(contract, make_adapter):
-    del contract["collections"]["online"]["field_map"]["history_known"]
+    del contract["collections"]["online"]["field_map"]["protected"]
     adapter = make_adapter(contract, never_call)
     with pytest.raises(SourceUnavailable):
         adapter.collect(DAY)
@@ -557,7 +584,7 @@ def test_paginated_detail_ids_are_scoped_to_orders(contract, make_adapter, secon
             adapter.collect(DAY)
         return
     snapshot = adapter.collect(DAY)
-    result = evaluate(snapshot, datetime.fromisoformat(OBSERVED))[0]
+    result = evaluate(with_own_history(snapshot), datetime.fromisoformat(OBSERVED))[0]
     assert result.unit_loss == Decimal("0.2")
     assert json.loads(result.selected_row_id) == [second_order, ROW["detail"]]
 
@@ -632,7 +659,7 @@ def test_submit_creates_exact_template_and_real_multipart(contract, make_adapter
         book = load_workbook(BytesIO(part.get_payload(decode=True)))
         sheet = book["DATA-0"]
         assert [cell.value for cell in sheet[1]] == [
-            "店铺名", "产品ID", "商品ID", "税前价格", "税后价格", "海外仓税前价格",
+            "店铺名（必填）", "产品ID（必填）", "商品ID（必填）", "税前价格", "税后价格", "海外仓税前价格",
             "直发仓税前价格", "海外仓税后价格", "直发仓税后价格",
         ]
         assert [cell.value for cell in sheet[2]] == ["模板专用店名", "002", "003", None, None, None, None, None, 22.15]
@@ -785,3 +812,19 @@ def test_redirect_is_never_followed_with_credentials(contract, make_adapter):
     with pytest.raises(SourceUnavailable):
         make_adapter(contract, redirect).collect(DAY)
     assert calls == ["erp.example.test"]
+
+
+@pytest.mark.parametrize("change", ["unapproved_version", "string_verified", "float_cost"])
+def test_online_profit_http_contract_rejects_unapproved_or_coerced_proof(contract, change):
+    import copy
+    from app.adapters.normalization import online_state
+    raw=copy.deepcopy(ONLINE)
+    if change=="unapproved_version":raw["profit"]["model"]["version"]="personal-old-v1"
+    elif change=="string_verified":raw["profit"]["model"]["verified"]="true"
+    else:raw["profit"]["model"]["fixed_cost"]=9.8
+    if change=="unapproved_version":
+        state=online_state(raw,contract["collections"]["online"],{"MY":"fees-v1"},{"MY":"synthetic-online-v1"})
+        assert state.profit_check.model.verified is False
+    else:
+        with pytest.raises(ValueError):
+            online_state(raw,contract["collections"]["online"],{"MY":"fees-v1"},{"MY":"synthetic-online-v1"})

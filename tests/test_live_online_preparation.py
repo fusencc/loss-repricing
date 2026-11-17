@@ -14,7 +14,7 @@ def sources():
         'currency':'PHP','priceIncludeVat':'61.49','marketPrice':'30.745','overseasStockSum':114,
         'currentOverseasProfitMargin':'-14.93','overseasStockWarehouseInfo':json.dumps([{
             'overseasWarehouses':['WH-PH'],'quantity':114,'jqCostpriceList':['1.0557'],'jqFreightList':['0.0532']}])}
-    rate={'siteCode':'PH','authType':1,'blocName':'GROUP','totalRate':'35.0411','totalCost':'1.4503',
+    rate={'siteCode':'PH','authType':2,'departmentName':'D1','blocName':'GROUP','totalRate':'35.0411','totalCost':'1.4503',
         'costOfCapital':'2','procedureRate':'2.24','platformRate':'12.8','returnRate':'8','warehouseStorageRate':'0.0001',
         'marketingRate':'10','otherRate':'0.001','packageFee':'0.0001','warehouseCost':'0.7','warehouseCostDomestic':'0.0001',
         'overseaPackageFee':'0.2','publishFee':'0.0001','dischargeFee':'0.35','orderProcessFee':'0.2'}
@@ -23,26 +23,21 @@ def sources():
         'currency_rates':[{'name':'CNY','rate':'1'},{'name':'PHP','rate':'0.1042'}]}
     platform={'schema_version':'sales-platform-controls-v1','source_id':'PLATFORM',**flags,'records':[{
         'erp_shop':'SHOPPH','product_id':'P1','observed_at':flags['completed_at'],'ref':'PLATFORM/1',
-        'company_parent':{'shopName':'SHOPPH','shopId':'SHOP-ID','productId':'P1','bloc':'GROUP','localMainSku':'M1','productStatus':4},
+        'company_parent':{'shopName':'SHOPPH','shopId':'SHOP-ID','productId':'P1','bloc':'GROUP','department':'D1','localMainSku':'M1','productStatus':4},
         'company_activity_locked':True,'current_variants':[variant],
         'data':{'id':'P1','product_status':'ACTIVATE','status':'ACTIVATE','is_not_for_sale':False,'skus':[{
             'id':'I1','seller_sku':'S1','price':{'sale_price':'61.49','currency':'PHP'},'status_info':{'status':'NORMAL'}}]}}]}
-    window={'schema_version':'erp-complete-sales-window-v1','source_id':'WINDOW',**flags,
-        'window_start':'2026-11-04','window_end':'2026-11-10','volumes':[{'erp_shop':'SHOPPH','main_sku':'M1','quantity':0,'complete':True}]}
-    company={'schema_version':'sales-company-price-history-v1','source_id':'COMPANY',**flags,
-        'company_log_complete':True,'requested_shops':['SHOPPH'],'records':[],
-        'queried_at':'2026-11-11T02:02:00+00:00','completed_at':'2026-11-11T02:03:00+00:00',
-        'window_start':'2026-11-08T10:02:00+08:00','window_end':'2026-11-11T10:02:00+08:00',
-        'protection_scope':'company_log_and_local_verified_archive','platform_manual_policy':'deferred_by_user_20261111'}
+    window={'schema_version':'sales-web-sku-seven-days-v2','source_id':'WINDOW',**flags,
+        'basis':'sales_system_web_sku_seven_days','volumes':[{'erp_shop':'SHOPPH','main_sku':'M1','quantity':0,'complete':True,'observed_at':flags['completed_at']}]}
     local={'schema_version':'local-live-price-history-v1','source_id':'LOCAL',**flags,
-        'acquisition_complete':True,'archive_binding':'injected_synthetic_test','executions':[],'guards':[],'protections':[],
-        'company_observations':[]}
-    effects={'schema_version':'company-price-effects-v1','source_id':'EFFECTS',**flags,
-        'company_history_source_id':'COMPANY','platform_source_id':'PLATFORM','effects':[{
-            'key':key,'erp_shop':'SHOPPH','history_known':True,'pending_submission':False,'snapshot_stale':False,
-            'confirmed_event_keys':[],'unverified_event_keys':[],'events':[]}],'observations':[]}
-    return capture,[target],{'sales':sales,'platform':platform,'window':window,'company_history':company,
-        'local_history':local,'company_effects':effects}
+        'acquisition_complete':True,'archive_binding':'injected_synthetic_test','executions':[],'guards':[],'protections':[]}
+    rate['vatRate']='0'
+    fixed={'schema_version':'user-fixed-pricing-fees-v1','source_id':'FIXED',**flags,'acquisition_complete':True,
+        'config':{'version':'fixed-test-v1','overseas':{'PH':rate},'public':{},'departments':{},'freight':{},
+          'product_inputs':[{'shop_name':'SHOPPH','product_id':'P1','item_id':'I1','local_sku':'S1',
+            'public_commission_rate':'0','direct_vat_rate':None,'source_cells':'synthetic!A1'}]}}
+    return capture,[target],{'sales':sales,'platform':platform,'window':window,
+        'local_history':local,'fixed_fees':fixed}
 
 
 def test_live_online_uses_actual_platform_price_explicit_activity_exact_fee_and_verified_zero_window():
@@ -67,24 +62,28 @@ def test_unknown_live_input_never_becomes_optimistic_online_state(case):
     if case=='price_changed':s['platform']['records'][0]['data']['skus'][0]['price']['sale_price']='62'
     elif case=='missing_volume':s['window']['volumes']=[]
     elif case=='wrong_main':s['platform']['records'][0]['company_parent']['localMainSku']='OTHER'
-    elif case=='fee_override':s['sales']['overseas_rates'].append({**s['sales']['overseas_rates'][0],'authType':5})
+    elif case=='fee_override':s['fixed_fees']['config']['product_inputs'].append({**s['fixed_fees']['config']['product_inputs'][0],'public_commission_rate':'10'})
     else:s['local_history']['acquisition_complete']=False
     r=prepare_online_states(c,t,**s)
     assert not r['online'] and r['issues']
 
 
-def test_unclassified_company_log_preserves_unknown_history_instead_of_no_increase():
-    from app.adapters.live_online_preparation import prepare_online_states
-    c,t,s=sources();s['company_history']['records']=[{'id':'LOG','shopName':'SHOPPH','productId':'P1','sellerSkuId':'I1','type':2,'status':2}]
-    s['company_effects']['effects'][0]['history_known']=False
-    r=prepare_online_states(c,t,**s)
-    assert r['online'][0]['state']['history_known'] is False
 
 
 def test_foreign_sample_source_cannot_be_joined_to_live_bundle():
     from app.adapters.live_online_preparation import prepare_online_states
     c,t,s=sources();s['platform']['sample_only']=True
     with pytest.raises(ValueError):prepare_online_states(c,t,**s)
+
+
+def test_reference_sales_without_full_main_coverage_do_not_allow_pricing():
+    from app.adapters.live_online_preparation import prepare_online_states
+    c,t,s=sources()
+    s['window']['volumes'][0].update(quantity=2,complete=False,discovered_scope_complete=True)
+    s['window']['erp_main_catalog_exhaustive']=False
+    r=prepare_online_states(c,t,**s)
+    assert not r['online']
+    assert any('七日销量窗口不完整' in issue['reason'] for issue in r['issues'])
 
 
 def test_released_verified_guard_after_72_hours_is_not_a_permanent_submission_lock():
@@ -121,12 +120,6 @@ def test_confirmed_terminal_failure_is_not_a_permanent_submission_lock():
 
 
 
-def test_company_history_ending_before_current_prices_is_unknown():
-    from app.adapters.live_online_preparation import prepare_online_states
-    c,t,s=sources()
-    s['company_history'].update(window_start='2026-11-08T09:00:00+08:00',window_end='2026-11-11T09:00:00+08:00')
-    state=prepare_online_states(c,t,**s)['online'][0]['state']
-    assert state['history_known'] is False
 
 
 
@@ -146,27 +139,13 @@ def test_user_approved_rounding_runs_the_shared_engine_to_an_archivable_price():
         lines=lines,online=[state],contracts={entry['contract']['site']:SiteContract.model_validate(entry['contract'])
             for entry in bundle['contracts']})
     decision=evaluate(snapshot,source_time(bundle['evaluated_at']))[0]
-    assert decision.ready and decision.upload_price==Decimal('67.12')
+    assert decision.ready and decision.upload_price==Decimal('75.62')
     assert decision.target_actual>=Decimal('33.556') and decision.predicted_profit>=0
 
 
 
-def test_persisted_company_confirmation_protects_after_parent_log_leaves_window():
-    from app.adapters.live_online_preparation import prepare_online_states
-    from app.domain.types import VariantKey
-    c,t,s=sources();key=VariantKey.model_validate(t[0]['key'])
-    s['local_history']['company_observations']=[{'event_key':'E1','key':t[0]['key'],'state':'confirmed',
-        'first_confirmed_at':'2026-11-10T02:00:00+00:00'}]
-    state=prepare_online_states(c,t,**s)['online'][0]['state']
-    assert state['last_increase_at'] is not None and state['history_known']
 
 
-def test_unverified_company_observation_stays_pending_when_absent_from_new_query():
-    from app.adapters.live_online_preparation import prepare_online_states
-    c,t,s=sources();s['local_history']['company_observations']=[{'event_key':'E1','key':t[0]['key'],
-        'state':'unverified','first_confirmed_at':None}]
-    state=prepare_online_states(c,t,**s)['online'][0]['state']
-    assert state['pending_submission']
 
 
 @pytest.mark.parametrize('platform_matches',[True,False])
@@ -191,10 +170,64 @@ def test_conflicting_target_warehouses_are_all_held_without_stopping_independent
     control=inputs['platform']['records'][0]
     variant=copy.deepcopy(control['current_variants'][0]);variant['sellerSkuId']='I2';control['current_variants'].append(variant)
     sku=copy.deepcopy(control['data']['skus'][0]);sku['id']='I2';control['data']['skus'].append(sku)
-    effect=copy.deepcopy(inputs['company_effects']['effects'][0]);effect['key']=independent['key'];inputs['company_effects']['effects'].append(effect)
+    fixed=inputs['fixed_fees']['config']['product_inputs'];fixed.append({**fixed[0],'item_id':'I2'})
     candidates=[targets[0],conflict,independent]
     if reverse:candidates.reverse()
     result=prepare_online_states(c,candidates,**inputs)
     assert [entry['state']['key']['item_id'] for entry in result['online']]==['I2']
     assert {entry['target']['warehouse'] for entry in result['issues']}=={'WH-PH','OTHER-WH'}
     assert all('冲突' in entry['reason'] for entry in result['issues'])
+
+
+def test_fixed_fee_ignores_dynamic_personal_and_shop_overrides():
+    from app.adapters.live_online_preparation import prepare_online_states
+    c,t,s=sources()
+    parent=s["platform"]["records"][0]["company_parent"]
+    parent["department"]="D1"
+    rate=s["sales"]["overseas_rates"][0]
+    rate.update(authType=2,departmentName="D1")
+    s["sales"]["overseas_rates"].append({**rate,"authType":5,"totalRate":"99"})
+    result=prepare_online_states(c,t,**s)
+    assert not result["issues"]
+    check=result["online"][0]["state"]["profit_check"]
+    assert check["mode"]=="overseas" and check["department"]=="D1"
+    assert Decimal(check["model"]["revenue_factor"])==Decimal("0.649589")
+
+
+def test_no_overseas_inventory_never_uses_overseas_fee_as_direct_formula():
+    from app.adapters.live_online_preparation import prepare_online_states
+    c,t,s=sources()
+    s["platform"]["records"][0]["current_variants"][0]["overseasStockSum"]=0
+    result=prepare_online_states(c,t,**s)
+    assert not result["online"]
+    assert "固定费率表未覆盖" in result["issues"][0]["reason"]
+
+
+def test_th_online_vat_flows_into_profit_model_without_new_source():
+    from app.adapters.live_online_preparation import prepare_online_states
+    from test_fixed_pricing_fees import direct_source
+    c,targets,inputs=sources()
+    targets[0]['key']['site']='TH'
+    control=inputs['platform']['records'][0]
+    parent=control['company_parent'];parent.update(taxVatRate='24.12',tkCategoryIdLeaf='600747')
+    variant=control['current_variants'][0]
+    variant.update(currency='THB',overseasStockSum=0,localWeight='21',costPrice='2')
+    control['data']['skus'][0]['price']['currency']='THB'
+    inputs['sales']['currency_rates']=[{'name':'CNY','rate':'1'},{'name':'THB','rate':'0.1'}]
+    _,rate=direct_source()
+    config=inputs['fixed_fees']['config']
+    config['public']={'TH':{k:rate[k] for k in ('vatRate','procedureRate','commissionRate','warehouseCost')}}
+    config['public']['TH']['vatRate']=None
+    config['departments']={'D1':{'TH':{k:rate[k] for k in ('returnRate','otherRate','marketingRate','packageFee','fixedFreight')}}}
+    config['freight']={'TH':rate['freight']}
+    result=prepare_online_states(c,targets,**inputs)
+    assert not result['issues']
+    state=result['online'][0]['state']
+    assert Decimal(state['profit_check']['model']['fixed_cost'])==Decimal('6.206')
+    proof=next(iter(result['references']['proofs'].values()))['fee']['vat_source']
+    assert proof['category_id']=='600747'
+    assert proof['source_ref']=='PLATFORM/1'
+    assert proof['observed_at']==control['observed_at']
+    parent['taxVatRate']=None
+    result=prepare_online_states(c,targets,**inputs)
+    assert not result['online'] and 'VAT' in result['issues'][0]['reason']

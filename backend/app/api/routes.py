@@ -231,6 +231,16 @@ def batch_source_issues(batch_id: str, request: Request,
         return {"total": len(issues), "items": issues[offset:offset + limit]}
 
 
+@router.get("/records")
+def records(request: Request, department: str | None = Query(None, max_length=200)):
+    """免登录部门日志，仅投影保存数据；管理接口保持独立认证。"""
+    from app.services.records import department_records
+    with request.app.state.factory() as session:
+        try:
+            return department_records(session, department)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from None
+
 @secured.get("/items")
 def items(request: Request, status: str | None = None, batch_id: str | None = None, actor=Depends(require_user)):
     with request.app.state.factory() as session:

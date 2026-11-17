@@ -92,6 +92,38 @@ class FeeModel(BaseModel):
         return price * MoneyRatio(self.revenue_factor) - MoneyRatio(self.fixed_cost, self.fixed_cost_divisor)
 
 
+class OnlineProfitCheck(BaseModel):
+    """11/12新增的完整在线利润校验，与排除广告营销的一次毛利分开。
+
+    库存为当前目标的海外可售件数；0明确选直发，正数选海外仓。模型以站点币
+    实际售价输入，保留部门底表及库存来源，不使用切价售价对应的利润率。
+    """
+
+    overseas_stock: FiniteDecimal
+    mode: Literal["direct", "overseas"]
+    department: StrictStr
+    inventory_observed_at: AwareDatetime
+    source_ref: StrictStr
+    model: FeeModel
+
+    def problem(self, now, business_date):
+        from .engine import BEIJING
+        selected = "overseas" if self.overseas_stock > 0 else "direct"
+        if self.overseas_stock < 0 or self.mode != selected:
+            return "海外仓库存与利润校验仓配不一致"
+        if (not self.department.strip() or not self.source_ref.strip()
+                or self.inventory_observed_at > now
+                or self.inventory_observed_at.astimezone(BEIJING).date() != business_date):
+            return "库存日期、部门或利润公式来源未确认"
+        if (not self.model.verified or not self.model.version.strip()
+                or self.model.revenue_factor <= 0 or self.model.fixed_cost < 0):
+            return "在线利润模型未确认或不能求得保本价"
+        return None
+
+    def break_even(self):
+        return MoneyRatio(self.model.fixed_cost, self.model.fixed_cost_divisor) / MoneyRatio(self.model.revenue_factor)
+
+
 class OnlineState(BaseModel):
     """在线子 SKU 的当前快照。含 VAT 零售价和营销实际售价均为站点币。"""
 
@@ -104,10 +136,13 @@ class OnlineState(BaseModel):
     current_margin: FiniteDecimal
     fee_scope: StrictStr
     fee_model: FeeModel | None = None
+    # 缺少新证据仅能展示/排除，不能生成可提交价格；禁止回退到一次毛利模型。
+    profit_check: OnlineProfitCheck | None = None
     observed_at: AwareDatetime
     sales_7d: StrictInt | None = None
-    sales_start: date
-    sales_end: date
+    # 网页七日指标无明确起止日期；保存实际来源口径与采集时点，不编造自然日窗口。
+    sales_basis: Literal['sales_system_web_sku_seven_days'] | None = None
+    sales_observed_at: AwareDatetime | None = None
     # 完整销量与确证历史必须由来源明示；文件缺字段不能获得乐观放行。
     sales_complete: bool = False
     history_known: bool = False

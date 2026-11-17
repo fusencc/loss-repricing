@@ -9,6 +9,8 @@ import {
   type Batch, type Contracts, type ErpReconciliation, type Identifier, type Item, type ItemStatus,
   type Job, type Overview, type Protection, type Settings,
 } from './api'
+import RecordsPage from './RecordsPage.vue'
+import 'element-plus/theme-chalk/dark/css-vars.css'
 import ItemTable from './ItemTable.vue'
 import BatchSourceIssues from './BatchSourceIssues.vue'
 import ItemDrawer from './ItemDrawer.vue'
@@ -23,6 +25,7 @@ import NotificationsPanel from './NotificationsPanel.vue'
 import type { Principal } from './api'
 
 const pages = [
+  { id: 'records', label: '提价日志', icon: DataAnalysis, description: '按部门查看销售员及全部提价日志。' },
   { id: 'overview', label: '运行概览', icon: DataAnalysis, description: '查看当前环境、处理进度和最近批次。' },
   { id: 'batches', label: '运行批次', icon: Files, description: '按业务日期查看批次、商品结果和计算依据。' },
   { id: 'exceptions', label: '异常处理', icon: Bell, description: '查看待处理和待核验商品，按需要重新评估。' },
@@ -44,7 +47,7 @@ function route(): Page {
   if (noticeIdFromHash()) return 'notifications'
   if (erpReportFromHash()) return 'settings'
   const hash = window.location.hash.slice(1)
-  return pages.find(entry => entry.id === hash)?.id ?? 'overview'
+  return pages.find(entry => entry.id === hash)?.id ?? 'records'
 }
 
 const noticeId = ref(noticeIdFromHash())
@@ -56,7 +59,7 @@ const principal = ref<Principal | null>(null)
 const isAdmin = computed(() => principal.value?.role === 'admin')
 const visiblePages = computed(() => pages.filter(entry => isAdmin.value || !['settings', 'protections', 'coordination'].includes(entry.id)))
 const dingConfig = ref<{ enabled?: boolean; configured?: boolean; corp_id?: string; client_id?: string; message?: string }>({})
-async function setPrincipal() { const { data } = await api.get<Principal>('/auth/me'); principal.value = data; username.value = data.username; if (!visiblePages.value.some(p => p.id === page.value)) page.value = 'overview' }
+async function setPrincipal() { const { data } = await api.get<Principal>('/auth/me'); principal.value = data; username.value = data.username; if (!visiblePages.value.some(p => p.id === page.value)) page.value = 'records' }
 async function dingLogin() {
   loginBusy.value = true; loginError.value = ''
   try {
@@ -140,6 +143,12 @@ function endSession() {
   closeItem()
 }
 async function init() {
+  // 销售记录首页直接读取公开展示接口，不请求登录状态或钉钉认证配置。
+  if (page.value === 'records') {
+    initialized.value = true
+    try { healthMode.value = (await api.get<{ mode: string }>('/health')).data.mode } catch { /* 记录页独立提示取数失败 */ }
+    return
+  }
   const health = api.get<{ mode: string }>('/health')
     .then(response => { healthMode.value = response.data.mode })
     .catch(() => undefined)
@@ -203,7 +212,10 @@ function onRoute() {
 watch(page, () => {
   activeBatch.value = null
   closeItem()
-  if (username.value) void loadPage()
+  if (page.value !== 'records') {
+    if (username.value) void loadPage()
+    else void init()
+  }
 })
 watch(itemFilter, () => { if (page.value === 'exceptions' && username.value) void loadPage() })
 
@@ -406,7 +418,8 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <main v-if="!initialized" class="login-shell"><p class="startup">正在连接运营工作台…</p></main>
+  <RecordsPage v-if="page === 'records'" :mode="mode" />
+  <main v-else-if="!initialized" class="login-shell"><p class="startup">正在连接运营工作台…</p></main>
   <main v-else-if="!username" class="login-shell">
     <div class="login-card">
       <div class="brand-mark"><el-icon><DataAnalysis /></el-icon></div>
@@ -427,7 +440,7 @@ onUnmounted(() => {
 
   <div v-else class="app-shell">
     <aside class="sidebar">
-      <a href="#overview" class="brand">
+      <a href="#records" class="brand">
         <span class="brand-mark"><el-icon><DataAnalysis /></el-icon></span>
         <span><strong>亏损补亏</strong><small>运营工作台</small></span>
       </a>
@@ -583,7 +596,3 @@ onUnmounted(() => {
     <ItemDrawer :actor-role="principal?.role || 'sales'" :actor-id="principal?.id || ''" :admin="isAdmin" :open="drawerOpen" :item="item" :loading="itemLoading" :error="itemError" :busy="actionBusy || !!activeJob || itemLoading" @close="closeItem" @refresh="item && openItem(item)" @reevaluate="reevaluate" />
   </div>
 </template>
-
-
-
-

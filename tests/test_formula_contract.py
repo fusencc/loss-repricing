@@ -9,7 +9,7 @@ from fractions import Fraction
 import pytest
 
 from app.domain.engine import FORMULA_VERSION, evaluate
-from app.domain.types import FeeModel, OnlineState, SiteContract, Snapshot, SourceLine, VariantKey
+from app.domain.types import FeeModel, OnlineProfitCheck, OnlineState, SiteContract, Snapshot, SourceLine, VariantKey
 
 
 NOW = datetime(2026, 11, 5, 1, tzinfo=timezone.utc)
@@ -28,9 +28,12 @@ def sample(*, loss="-2", quantity="1", basis="unit", currency="CNY", current="10
                           currency=currency, basis=basis, allocation_reliable=True)],
         online=[OnlineState(key=key, main_sku="main", currency="MYR", retail_price=retail,
                             marketing_price=current, current_margin="-0.05", fee_scope="normal",
+                            profit_check=OnlineProfitCheck(overseas_stock="0",mode="direct",department="TEST",
+                                inventory_observed_at=NOW,source_ref="synthetic/profit",
+                                model=FeeModel(revenue_factor="1",fixed_cost="0",version="synthetic-online-v1",verified=True)),
                             observed_at=NOW, sales_7d=0, sales_complete=True, history_known=True,
-                            sales_start=date(2026, 10, 29),
-                            sales_end=date(2026, 11, 4), fee_model=FeeModel(
+                            sales_basis="sales_system_web_sku_seven_days",
+                            sales_observed_at=NOW, fee_model=FeeModel(
                                 revenue_factor=factor, fixed_cost=cost, version="synthetic-v1", verified=True))],
         contracts={"MY": SiteContract(site="MY", verified=True, price_step=step, rounding=rounding,
                                       upload_column="税后价格", version="synthetic-v1", warehouses=["direct"])},
@@ -56,7 +59,7 @@ def test_documented_synthetic_example_and_formula_provenance():
     assert result.selected_row_id == "r1"
     assert (result.unit_loss, result.discount, result.target_actual, result.upload_price,
             result.predicted_profit) == tuple(map(Decimal, ["1", "0.5", "11", "22", "0.4"]))
-    assert result.trace["formula_version"] == FORMULA_VERSION == "direct-loss-v1"
+    assert result.trace["formula_version"] == FORMULA_VERSION == "loss-local-history-web-sales-20261113-v3"
     assert result.trace["decimal_precision"] == 50
 
 
@@ -129,13 +132,15 @@ def test_raw_company_fx_converts_between_two_foreign_currencies():
     assert result.upload_price == Decimal('13.00')
 
 
-@pytest.mark.parametrize(("cost", "ready"), [("9.9", True), ("9.900000000000000000000000000001", False)])
-def test_profit_zero_boundary_does_not_use_display_rounding(cost, ready):
+@pytest.mark.parametrize(("cost", "upload"), [("9.9", "22"), ("9.900000000000000000000000000001", "22.01")])
+def test_profit_zero_boundary_requires_an_extra_tick_for_any_negative_amount(cost, upload):
     result = evaluate(sample(loss="-1", currency="MYR", cost=cost), NOW)[0]
-    assert result.ready is ready
-    assert result.target_actual == Decimal("11")
-    assert result.upload_price == Decimal("22")  # 亏损时也不反算追加涨价。
-    assert (result.predicted_profit >= 0) is ready
+    assert result.ready
+    assert result.upload_price == Decimal(upload)
+    assert result.predicted_profit >= 0
+    # 即使差额低于展示精度，也不能通过取整伪造零利润。
+    before = (Fraction(upload)-Fraction("0.01"))/2 * Fraction("0.9") - Fraction(cost)
+    assert before < 0
 
 
 @pytest.mark.parametrize(("loss", "current", "retail", "rounding", "cost", "upload"), [

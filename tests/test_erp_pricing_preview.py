@@ -48,7 +48,7 @@ def test_replay_deduplicates_by_detail_and_uses_the_existing_price_formula(sourc
     assert Decimal(decision["current_actual"]) == Decimal("18")
     assert Decimal(decision["target_actual"]) == Decimal("18.72")
     assert Decimal(decision["upload_price"]) == Decimal("20.80")
-    assert decision["trace"]["formula_version"] == "direct-loss-v1"
+    assert decision["trace"]["formula_version"] == "loss-local-history-web-sales-20261113-v3"
     assert json.loads(decision["selected_row_id"]) == ["000001", "01"]
     assert {tuple(json.loads(row_id)) for row_id in decision["source_row_ids"]} == {
         ("000001", "01"), ("000002", "01"), ("000002", "03")

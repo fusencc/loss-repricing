@@ -13,7 +13,7 @@ from app.models.coordination import Correction, UserAccount
 from app.services.coordination import Principal, principal, can_access, lock_authorization
 from app.services.price_control import price_baseline, same_price, lock_control
 from app.services.store import utcnow, stamp, BEIJING, is_erp_reconciliation
-from app.domain.engine import allowed_error, conflicting_sales_scopes, SITE_CURRENCIES, sales_window
+from app.domain.engine import allowed_error, conflicting_sales_scopes, SITE_CURRENCIES, valid_sales_observation
 from app.domain.money import MoneyRatio
 from app.domain.types import Decision, OnlineSourceIssue, VariantKey
 
@@ -62,7 +62,7 @@ def manual_decision(snapshot, online, desired, reason, correction_id, now):
         raise ValueError("调价历史不完整或仍有未知提交")
     if (online.protected or not online.sales_complete or online.sales_7d is None
             or online.sales_7d < 0 or online.sales_7d >= 21
-            or (online.sales_start, online.sales_end) != sales_window(now)):
+            or not valid_sales_observation(online, now)):
         raise ValueError("人工修正仍需满足保护与完整销量依据")
     if online.activity_locked or not online.sellable:
         raise ValueError("活动锁价或不可售，先完成对应人工处理")
@@ -79,9 +79,17 @@ def manual_decision(snapshot, online, desired, reason, correction_id, now):
     if current <= 0 or current > online.retail_price:
         raise ValueError("折扣数据无效")
     discount = MoneyRatio(current) / MoneyRatio(online.retail_price)
+    profit_check = online.profit_check
+    if profit_check is None:
+        raise ValueError("缺少库存分流、部门费率及完整在线利润公式")
+    if problem := profit_check.problem(now, today):
+        raise ValueError(problem)
     target = MoneyRatio(desired)
     upload = (target / discount).round_to_step(contract.price_step, contract.rounding)
     actual = MoneyRatio(upload) * discount
+    if (profit_check.model.profit_exact(target).numerator < 0
+            or profit_check.model.profit_exact(actual).numerator < 0):
+        raise ValueError("人工指定价的在线利润率仍为负，请修正价格")
     profit = model.profit_exact(actual)
     if model.profit_exact(target).numerator < 0 or profit.numerator < 0:
         raise ValueError("修正目标或档位后的正常一次毛利仍为负")

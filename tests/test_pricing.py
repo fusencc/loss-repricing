@@ -4,8 +4,8 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from app.domain.engine import allowed_error, evaluate, sales_window
-from app.domain.types import FeeModel, OnlineState, SiteContract, Snapshot, SourceLine, VariantKey
+from app.domain.engine import allowed_error, evaluate, valid_sales_observation
+from app.domain.types import FeeModel, OnlineProfitCheck, OnlineState, SiteContract, Snapshot, SourceLine, VariantKey
 
 
 NOW = datetime(2026, 11, 5, 0, 15, tzinfo=timezone.utc)
@@ -35,7 +35,10 @@ def online(variant, **overrides):
         "key": variant, "main_sku": "主款", "currency": "MYR", "retail_price": "10",
         "marketing_price": None, "current_margin": "-1", "fee_scope": "normal",
         "fee_model": FeeModel(revenue_factor="1", fixed_cost="10", version="f1", verified=True),
-        "observed_at": NOW, "sales_7d": 20, "sales_start": START, "sales_end": END,
+        "profit_check": OnlineProfitCheck(overseas_stock="0",mode="direct",department="TEST",
+            inventory_observed_at=NOW,source_ref="synthetic/profit",
+            model=FeeModel(revenue_factor="1",fixed_cost="0",version="synthetic-online-v1",verified=True)),
+        "observed_at": NOW, "sales_7d": 20, "sales_basis": "sales_system_web_sku_seven_days", "sales_observed_at": NOW,
         "sales_complete": True, "history_known": True,
         **overrides,
     })
@@ -244,8 +247,8 @@ def test_exactly_four_sources_are_required(sources):
         {"sales_complete": False},
         {"sales_7d": None},
         {"sales_7d": -1},
-        {"sales_start": date(2026, 10, 30)},
-        {"sales_end": date(2026, 11, 3)},
+        {"sales_observed_at": NOW - timedelta(days=1)},
+        {"sales_observed_at": NOW + timedelta(seconds=1)},
         {"fee_model": None},
         {"fee_model": FeeModel(revenue_factor="1", fixed_cost="10", version="f1")},
     ],
@@ -263,8 +266,10 @@ def test_protected_or_non_loss_margins_are_excluded(online_fields):
     assert not result.ready
 
 
-def test_sales_window_uses_shanghai_midnight_and_includes_yesterday():
-    assert sales_window(datetime(2026, 11, 4, 16, 0, tzinfo=timezone.utc)) == (START, END)
+def test_web_sales_observation_uses_shanghai_business_day():
+    midnight = datetime(2026, 11, 4, 16, 0, tzinfo=timezone.utc)
+    assert valid_sales_observation(online(key(), sales_observed_at=midnight), NOW)
+    assert not valid_sales_observation(online(key(), sales_observed_at=midnight-timedelta(seconds=1)), NOW)
 
 
 def test_previous_day_fx_blocks_even_when_amounts_are_already_station_currency():
@@ -341,17 +346,17 @@ def test_invalid_current_prices_are_pending(online_fields):
     assert not result.ready
 
 
-def test_fee_shortfall_does_not_trigger_a_larger_automatic_increase():
+def test_fee_shortfall_is_raised_to_break_even_without_extra_profit():
     result = single(online_fields={
         "fee_model": FeeModel(revenue_factor="1", fixed_cost="11.21", version="f1", verified=True),
     })
     assert result.status == "待处理"
-    assert not result.ready
-    assert result.target_actual == Decimal("11.2")
-    assert result.predicted_profit == Decimal("-0.01")
+    assert result.ready
+    assert result.target_actual == Decimal("11.21")
+    assert result.predicted_profit == Decimal("0")
 
 
-def test_rounding_can_turn_nonnegative_target_profit_into_a_shortfall():
+def test_rounding_shortfall_is_corrected_to_first_nonnegative_tick():
     result = single(
         line_fields={"loss_amount": "-1.209"},
         online_fields={
@@ -359,9 +364,9 @@ def test_rounding_can_turn_nonnegative_target_profit_into_a_shortfall():
         },
         snapshot_fields={"contracts": {"MY": contract(rounding="ROUND_DOWN")}},
     )
-    assert not result.ready
-    assert result.upload_price == Decimal("11.20")
-    assert result.predicted_profit == Decimal("-0.005")
+    assert result.ready
+    assert result.upload_price == Decimal("11.21")
+    assert result.predicted_profit == Decimal("0.005")
 
 
 @pytest.mark.parametrize(

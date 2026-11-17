@@ -25,6 +25,8 @@ class LookupResult:
     effective_at: datetime | None = None
     price_basis: str = "actual_including_vat"
     message: str = ""
+    # 独立价格口径及官方查询证据；actual_price继续只表示营销实际有效价。
+    price_record: dict | None = None
 
 
 class Adapter(Protocol):

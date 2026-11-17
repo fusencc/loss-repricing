@@ -154,7 +154,7 @@ def _check_pagination(spec):
 
 
 def _check_collection(name, spec, services):
-    _check_request(spec, services, dict.fromkeys(("business_date", "sales_start", "sales_end"), "2026-01-01"))
+    _check_request(spec, services, {"business_date": "2026-01-01"})
     if not all(valid_path(spec.get(key)) for key in ("as_of_path", "business_date_path")):
         raise ValueError("来源日期映射未齐备")
     if "export" in spec:
@@ -246,6 +246,7 @@ class HttpAdapter:
         self._collections = {}
         self._sites = {}
         self._fee_versions = {}
+        self._profit_versions = {}
         self._submit = None
         self._lookup = None
         self._versions = {}
@@ -297,7 +298,7 @@ class HttpAdapter:
                     if (
                         spec.get("verified") is not True or contract.price_step <= 0
                         or contract.upload_column not in VAT_UPLOAD_COLUMNS or not _label(contract.version)
-                        or not _label(spec.get("fee_model_version")) or not contract.warehouses
+                        or not _label(spec.get("fee_model_version")) or not _label(spec.get("online_profit_model_version")) or not contract.warehouses
                     ):
                         continue
                     for warehouse in contract.warehouses:
@@ -306,10 +307,12 @@ class HttpAdapter:
                     continue
                 self._sites[site] = contract
                 self._fee_versions[site] = spec["fee_model_version"]
+                self._profit_versions[site] = spec["online_profit_model_version"]
+                self._versions[f"online_profit_model.{site}"] = spec["online_profit_model_version"]
                 self._versions[f"site.{site}"] = contract.version
                 self._versions[f"fee_model.{site}"] = spec["fee_model_version"]
         if not self._sites:
-            self._execution_missing.append("缺少已审计站点的上传列与一次毛利模型版本")
+            self._execution_missing.append("缺少已审计站点的上传列、一次毛利及完整在线利润模型版本")
 
         submit = config.get("submit")
         try:
@@ -426,7 +429,7 @@ class HttpAdapter:
         normalized, issues, seen = [], [], set()
         for number, record in enumerate(records, start=1):
             try:
-                row = online_state(record, spec, self._fee_versions) if online else source_line(record, spec, name)
+                row = online_state(record, spec, self._fee_versions, self._profit_versions) if online else source_line(record, spec, name)
                 normalized.append(row)
             except BAD_DATA:
                 try:
@@ -451,8 +454,6 @@ class HttpAdapter:
             raise SourceUnavailable("；".join(self._collection_missing))
         variables = {
             "business_date": business_date.isoformat(),
-            "sales_start": (business_date - timedelta(days=7)).isoformat(),
-            "sales_end": (business_date - timedelta(days=1)).isoformat(),
         }
         lines, online, issues, stamps = [], [], [], []
         for name in (*SOURCES, "online"):
@@ -538,7 +539,9 @@ class HttpAdapter:
             if matched and matched[1] == str(spec.get("single_data_row_number")):
                 return SubmitResult("rejected", message="上传数据行在在线列表中不存在")
             return unknown
-        if message not in {"", "上传完成", "上传成功", "成功"}:
+        # 2026-11-17单SKU真实响应为“上传完成,”，随后出现同SKU同目标价任务。
+        # 精确接受该已见回执；含逐行错误或其他未知文字仍不能因此放行。
+        if message not in {"", "上传完成", "上传完成,", "上传成功", "成功"}:
             return unknown
         task_id = None
         if "task_id_path" in spec:

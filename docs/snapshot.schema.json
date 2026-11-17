@@ -96,6 +96,56 @@
       "title": "FeeModel",
       "type": "object"
     },
+    "OnlineProfitCheck": {
+      "description": "11/12新增的完整在线利润校验，与排除广告营销的一次毛利分开。\n\n库存为当前目标的海外可售件数；0明确选直发，正数选海外仓。模型以站点币\n实际售价输入，保留部门底表及库存来源，不使用切价售价对应的利润率。",
+      "properties": {
+        "overseas_stock": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "title": "Overseas Stock"
+        },
+        "mode": {
+          "enum": [
+            "direct",
+            "overseas"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "department": {
+          "title": "Department",
+          "type": "string"
+        },
+        "inventory_observed_at": {
+          "format": "date-time",
+          "title": "Inventory Observed At",
+          "type": "string"
+        },
+        "source_ref": {
+          "title": "Source Ref",
+          "type": "string"
+        },
+        "model": {
+          "$ref": "#/$defs/FeeModel"
+        }
+      },
+      "required": [
+        "overseas_stock",
+        "mode",
+        "department",
+        "inventory_observed_at",
+        "source_ref",
+        "model"
+      ],
+      "title": "OnlineProfitCheck",
+      "type": "object"
+    },
     "OnlineSourceIssue": {
       "description": "可定位的在线记录字段异常。主 SKU 是七天销量保护的共享范围。",
       "properties": {
@@ -199,6 +249,17 @@
           ],
           "default": null
         },
+        "profit_check": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OnlineProfitCheck"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "observed_at": {
           "format": "date-time",
           "title": "Observed At",
@@ -216,15 +277,31 @@
           "default": null,
           "title": "Sales 7D"
         },
-        "sales_start": {
-          "format": "date",
-          "title": "Sales Start",
-          "type": "string"
+        "sales_basis": {
+          "anyOf": [
+            {
+              "const": "sales_system_web_sku_seven_days",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sales Basis"
         },
-        "sales_end": {
-          "format": "date",
-          "title": "Sales End",
-          "type": "string"
+        "sales_observed_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sales Observed At"
         },
         "sales_complete": {
           "default": false,
@@ -302,9 +379,7 @@
         "retail_price",
         "current_margin",
         "fee_scope",
-        "observed_at",
-        "sales_start",
-        "sales_end"
+        "observed_at"
       ],
       "title": "OnlineState",
       "type": "object"

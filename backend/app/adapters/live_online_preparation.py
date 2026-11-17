@@ -1,6 +1,6 @@
 """已绑定真实来源的在线输入准备；仅复用统一费用模型和规则，不计算第二套建议价。
 
-无归属/销量/保护证据不生成乐观状态。公司日志尚未分类的影响保留history_known=False。
+无归属/销量/保护证据不生成乐观状态。72小时只消费本程序确认生效档案，不查询或合并公司操作日志。
 站点步长和向上取整来自2026-11-11用户明确确认；税后价格列与当前模板核对。
 """
 from collections import defaultdict
@@ -10,37 +10,24 @@ from decimal import Decimal
 from app.adapters.erp_order_loss import _bound
 from app.adapters.erp_pricing import LiveOnlinePreparation, MappedKey, ReviewedOnlineState
 from app.adapters.normalization import money, source_time
-from app.adapters.sales_fee_model import compile_overseas_fee
-from app.domain.engine import BEIJING, SITE_CURRENCIES, sales_window
+from app.adapters.sales_fee_model import compile_overseas_fee, compile_direct_fee
+from app.adapters.fixed_pricing_fees import select_fixed_rate
+from app.domain.engine import BEIJING, SITE_CURRENCIES
 from app.domain.types import VariantKey
 
 SCHEMAS={'sales':'sales-source-observations-v1','platform':'sales-platform-controls-v1',
-    'window':'erp-complete-sales-window-v1','company_history':'sales-company-price-history-v1',
-    'local_history':'local-live-price-history-v1','company_effects':'company-price-effects-v1'}
+    'window':'sales-web-sku-seven-days-v2','local_history':'local-live-price-history-v1',
+    'fixed_fees':'user-fixed-pricing-fees-v1'}
 
 
-def prepare_online_states(capture,targets,*,sales,platform,window,company_history,local_history,company_effects):
+def prepare_online_states(capture,targets,*,sales,platform,window,local_history,fixed_fees):
     capture=dict(capture,synthetic=capture.get('synthetic',False),sample_only=capture.get('sample_only',False))
     if type(capture['synthetic']) is not bool or type(capture['sample_only']) is not bool:
         raise ValueError('采集环境标记无效')
     sources=locals().copy()
     for name,schema in SCHEMAS.items():_bound(capture,sources[name],schema)
-    if (company_effects['company_history_source_id']!=company_history['source_id']
-            or company_effects['platform_source_id']!=platform['source_id']):
-        raise ValueError('公司任务影响与历史或当前平台来源不一致')
     observed=max(source_time(sources[name]['completed_at']) for name in SCHEMAS)
-    latest_price=max([source_time(sales['completed_at']),source_time(window['completed_at']),
-        *(source_time(row['observed_at']) for row in platform['records'])])
-    history_coverage=False
-    evaluated=latest_price
-    try:
-        history_start=source_time(company_history['window_start'])
-        history_end=source_time(company_history['window_end'])
-        if history_end<=source_time(company_history['queried_at']) and history_end<=observed:
-            evaluated=max(latest_price,history_end)
-            history_coverage=history_end>=latest_price and history_start<=history_end-timedelta(hours=72)
-    except (ValueError,TypeError,KeyError):
-        pass
+    evaluated=observed
     result={'schema_version':'erp-live-online-preparation-v1','version':'erp-live-online-v1',
         'erp_capture_id':capture['capture_id'],'synthetic':capture['synthetic'],'sample_only':capture['sample_only'],
         'pricing_ready':False,'observed_at':observed.isoformat(),'evaluated_at':evaluated.isoformat(),'online':[],'contracts':[],'issues':[],
@@ -50,9 +37,8 @@ def prepare_online_states(capture,targets,*,sales,platform,window,company_histor
     for row in platform['records']:controls[row['erp_shop'],row['product_id']].append(row)
     volumes=defaultdict(list)
     for row in window['volumes']:volumes[row['erp_shop'],row['main_sku']].append(row)
-    start,end=sales_window(source_time(capture['queried_at']))
-    if window['window_start']!=str(start) or window['window_end']!=str(end):
-        raise ValueError('在线准备的销量窗口与本次业务日不一致')
+    if window.get('basis')!='sales_system_web_sku_seven_days':
+        raise ValueError('销量不是用户指定的销售网页七日指标')
     # 同一平台SKU可能来自不同历史订单仓；先收齐定义再判断，不能保留先到的一条。
     # 冲突只挂起该SKU，其他独立目标继续，符合项目的异常范围约束。
     target_groups=defaultdict(list)
@@ -95,21 +81,32 @@ def prepare_online_states(capture,targets,*,sales,platform,window,company_histor
             if (len(window_rows)!=1 or window_rows[0].get('complete') is not True
                     or type(window_rows[0].get('quantity')) is not int or window_rows[0]['quantity']<0):
                 raise ValueError('七日销量窗口不完整，不填0')
+            sales_observed=source_time(window_rows[0].get('observed_at'))
+            if not source_time(window['queried_at'])<=sales_observed<=source_time(window['completed_at']):
+                raise ValueError('七日销量观察时间不在实际查询范围内')
             allowed_binding={'configured_live_history_database','live_runtime_database'}
             if capture['synthetic']:allowed_binding.add('injected_synthetic_test')
             if (local_history.get('acquisition_complete') is not True
                     or local_history.get('archive_binding') not in allowed_binding):
                 raise ValueError('本程序人工保护与执行档案未取全')
-            rates=[row for row in sales['overseas_rates'] if row.get('siteCode')==key.site]
-            if (len(rates)!=1 or rates[0].get('authType')!=1 or rates[0].get('blocName')!=parent.get('bloc')
-                    or any(row.get('stage')=='overseas_rate' for row in sales.get('issues',[]))):
-                raise ValueError('海外仓费用层级不能唯一确认，不能越过未知覆盖项')
+            # 11/12最终口径按当前海外库存选一个公式，不能要求两仓同时为正。
+            stock=money(variant.get('overseasStockSum'))
+            if stock<0:raise ValueError('海外仓库存为负，无法选择利润公式')
+            department=parent.get('department')
+            if not isinstance(department,str) or not department.strip():
+                raise ValueError('商品部门归属未知，不能选取固定费率')
+            mode='overseas' if stock>0 else 'direct'
+            rate=select_fixed_rate(fixed_fees,variant,parent,key.site,mode)
             quotes=[row['rate'] for row in sales['currency_rates'] if row.get('name')==currency]
             cny=[row['rate'] for row in sales['currency_rates'] if row.get('name')=='CNY']
             if (sales.get('currency_rate_unit')!='cny_per_currency' or len(quotes)!=1
                     or len(cny)!=1 or money(cny[0])!=1):raise ValueError('公司费用报价单位或基准未确认')
-            fee=compile_overseas_fee(variant,rates[0],site=key.site,warehouse=key.warehouse,
-                company_cny_per_currency=quotes[0])
+            fee=(compile_overseas_fee(variant,rate,site=key.site,warehouse=key.warehouse,
+                company_cny_per_currency=quotes[0]) if mode=='overseas' else
+                compile_direct_fee(variant,rate,site=key.site,company_cny_per_currency=quotes[0]))
+            if 'vat_source' in rate:
+                fee['proof']['vat_source'] = {**rate['vat_source'],
+                    'source_ref': control['ref'], 'observed_at': control['observed_at']}
             if (type(control.get('company_activity_locked')) is not bool
                     or type(data.get('is_not_for_sale')) is not bool
                     or not isinstance(data.get('product_status'),str) or not isinstance(data.get('status'),str)
@@ -118,30 +115,10 @@ def prepare_online_states(capture,targets,*,sales,platform,window,company_histor
                 raise ValueError('平台可售或公司活动状态字段未知')
             sellable=(parent['productStatus']==4 and data['product_status']=='ACTIVATE' and data['status']=='ACTIVATE'
                 and data['is_not_for_sale'] is False and sku['status_info']['status']=='NORMAL')
-            history_known=(history_coverage and company_history.get('company_log_complete') is True
-                and target['erp_shop'] in company_history['requested_shops']
-                and company_history.get('protection_scope')=='company_log_and_local_verified_archive'
-                and company_history.get('platform_manual_policy')=='deferred_by_user_20261111')
-            matched_effects=[row for row in company_effects['effects']
-                if MappedKey.model_validate(row['key']).identity()==key.identity()]
-            if len(matched_effects)!=1 or matched_effects[0]['erp_shop']!=target['erp_shop']:
-                raise ValueError('公司任务影响缺少唯一的当前目标归属')
-            effect=matched_effects[0]
-            history_known=history_known and effect.get('history_known') is True and effect.get('snapshot_stale') is False
-            pending=effect.get('pending_submission') is True
+            # 本地权威档案可确证首次运行无历史；公司日志不再影响保护或锁定。
+            history_known=True
+            pending=False
             last=None;verified_times=set()
-            observations={row['event_key']:row for row in local_history['company_observations']}
-            for event_key in effect['confirmed_event_keys']:
-                if event_key not in observations or observations[event_key]['state']!='confirmed':
-                    raise ValueError('公司实价确认尚未登记到权威档案')
-            for row in observations.values():
-                if VariantKey.model_validate(row['key']).target_identity()!=key.target_identity():continue
-                if row['state']=='unverified':pending=True;continue
-                if row['state']!='confirmed':raise ValueError('公司观察状态未知')
-                effective=source_time(row['first_confirmed_at'])
-                if effective>evaluated:
-                    pending=True;history_known=False;continue
-                last=max(last,effective) if last else effective
             for row in local_history['executions']:
                 if VariantKey.model_validate(row['key']).target_identity()!=key.target_identity():continue
                 if row['state']=='failed':continue
@@ -174,16 +151,20 @@ def prepare_online_states(capture,targets,*,sales,platform,window,company_histor
             state=ReviewedOnlineState.model_validate({'key':key.model_dump(mode='json'),'main_sku':target['main_sku'],
                 'currency':currency,'retail_price':format(retail,'f'),'marketing_price':format(actual,'f'),
                 'current_margin':format(fee['current_margin'],'f'),'fee_scope':'erp-corrected-first-margin-v1',
-                'fee_model':fee['model'].model_dump(mode='json'),'observed_at':control['observed_at'],
-                'sales_7d':window_rows[0]['quantity'],'sales_start':str(start),'sales_end':str(end),'sales_complete':True,
+                 'fee_model':fee['model'].model_dump(mode='json'),
+                'profit_check':{'overseas_stock':format(stock,'f'),'mode':mode,'department':department,
+                    'inventory_observed_at':control['observed_at'],'source_ref':control['ref'],
+                    'model':fee['online_model'].model_dump(mode='json')},'observed_at':control['observed_at'],
+                'sales_7d':window_rows[0]['quantity'],'sales_basis':window['basis'],
+                'sales_observed_at':sales_observed.isoformat(),'sales_complete':True,
                 'history_known':history_known,'last_increase_at':last.isoformat() if last else None,
                 'pending_submission':pending,'protected':protected,'activity_locked':control['company_activity_locked'],
                 'sellable':sellable})
             result['online'].append({'ref':control['ref'],'state':state.model_dump(mode='json')})
-            result['references']['proofs'][key.identity()]={'fee':fee['proof'],'company_events':effect['events'],
+            result['references']['proofs'][key.identity()]={'fee':fee['proof'],'fixed_fee_source':fixed_fees['source_id'],
                 'platform_observed_at':control.get('platform_price_observed_at'),
                 'current_components_observed_at':control['observed_at'],'bundle_completed_at':observed.isoformat(),
-                'company_history_cutoff':company_history.get('window_end'),'evaluated_at':evaluated.isoformat()}
+                'sales_observed_at':sales_observed.isoformat(),'evaluated_at':evaluated.isoformat()}
         except (ValueError,TypeError,KeyError,ArithmeticError) as error:
             result['issues'].append({'code':'live_online_state_pending','reason':str(error),'target':key.model_dump(mode='json')})
     warehouses=defaultdict(set)

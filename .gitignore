@@ -14,6 +14,8 @@ dist/
 deploy/live-contract.json
 runtime/*
 !runtime/.gitkeep
+# 手动采集脚本默认输出目录，含原件与实时进度，不入 Git。
+/output/
 .superpowers/
 *.log
 # 结构化运行日志可能位于独立桌面输出目录，禁止随代码提交。

@@ -112,7 +112,7 @@ def test_manual_price_keeps_profit_and_rounding_checks(world):
     snapshot=adapter.collect(utcnow().astimezone(BEIJING).date())
     accepted=manual_decision(snapshot,snapshot.online[0],Decimal("11"),"reason","c1",utcnow())
     assert accepted.upload_price == Decimal("22")
-    with pytest.raises(ValueError,match="毛利"):
+    with pytest.raises(ValueError,match="利润率"):
         manual_decision(snapshot,snapshot.online[0],Decimal("10"),"reason","c1",utcnow())
 
 @pytest.mark.parametrize(("identity_changes", "blocked"), [

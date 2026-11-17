@@ -14,7 +14,7 @@ from pydantic import AfterValidator, AwareDatetime, BaseModel, BeforeValidator, 
 from app.adapters.erp_bulk_capture import SOURCES, STATUS_LABELS, finance_batch_scope
 from app.adapters.normalization import identity_text, sku_text, source_date, source_time
 from app.domain.engine import BEIJING, conflicting_sales_scopes
-from app.domain.types import FeeModel, OnlineState, SiteContract, Snapshot, Source, SourceLine, VariantKey
+from app.domain.types import OnlineProfitCheck, FeeModel, OnlineState, SiteContract, Snapshot, Source, SourceLine, VariantKey
 
 # 仅消费今天已核对的批量合同。逐单诊断与规范 Snapshot 各有独立入口。
 CAPTURE_VERSION = "erp-web-bulk-four-20261109"
@@ -221,6 +221,15 @@ class ReviewedFeeModel(FeeModel):
     verified: StrictBool
 
 
+class ReviewedOnlineProfitCheck(OnlineProfitCheck):
+    model_config = ConfigDict(extra="forbid")
+    overseas_stock: DecimalText
+    department: Identifier
+    source_ref: Identifier
+    inventory_observed_at: SourceTime
+    model: ReviewedFeeModel
+
+
 class ReviewedOnlineState(OnlineState):
     model_config = ConfigDict(extra="forbid")
 
@@ -232,10 +241,11 @@ class ReviewedOnlineState(OnlineState):
     current_margin: DecimalText
     fee_scope: Identifier
     fee_model: ReviewedFeeModel | None
+    profit_check: ReviewedOnlineProfitCheck | None = None
     observed_at: SourceTime
     sales_7d: StrictInt | None
-    sales_start: SourceDate
-    sales_end: SourceDate
+    sales_basis: Literal["sales_system_web_sku_seven_days"] | None
+    sales_observed_at: SourceTime | None
     sales_complete: StrictBool
     history_known: StrictBool
     last_increase_at: SourceTime | None

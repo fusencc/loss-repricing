@@ -1,13 +1,14 @@
 """按ERP父产品候选读取销售来源原件；不把原始字段冒充完整定价快照。
 
-合同依据：当前销售前端13924及2026-11-11真实只读响应。父产品分页、
-逐父产品展开变体、authType=2部门配置及globalPublish=false区域公共费用均已核对。
-接口字段仍保留原币、百分数及空值；这里不推断销量窗口、保护或费用模型审核状态。
+合同依据：当前销售前端及真实只读响应，读取父产品、逐父产品变体和费用币种报价。
+2026-11-13起费用仅使用用户固定表，不再查询动态个人、店铺或部门费率。
+这里保留原币、百分数及空值，不推断销量窗口、保护或费用模型审核状态。
 """
 from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
 import json
+from time import monotonic, sleep
 from pathlib import Path
 from urllib.parse import quote
 from uuid import uuid4
@@ -27,9 +28,6 @@ from app.services.erp_capture_store import write_verified
 
 PRODUCTS = '/Api/api-tiktok-sales/online/findByPage'
 VARIANTS = '/Api/api-tiktok-sales/online/findProductVariants/'
-DEPARTMENT_RATES = '/Api/api-tiktok-sales/supplierrate/findByPage'
-OVERSEAS_RATES = '/Api/api-tiktok-sales/supplierrateoversea/findByPage'
-PUBLIC_RATES = '/Api/api-tiktok-publish/autoPublishConfig/getPublicRatesByShopName'
 CURRENCY_RATES = '/Api/api-b/rate/findAll'
 
 
@@ -76,14 +74,15 @@ def capture_sales_sources(settings, capture, *, client=None, page_size=100, prod
         'sample_only':bool(capture.get('sample_only', False)),
         'queried_at':datetime.now(timezone.utc).isoformat(), 'pricing_ready':False,
         'requested_product_ids':requested, 'missing_product_hint_orders':sorted(missing_hints),
-        'products':[], 'variants':[], 'department_rates':{}, 'overseas_rates':[], 'public_rates':{}, 'issues':[], 'files':[],
+        'products':[], 'variants':[], 'issues':[], 'files':[], 'fee_policy':'user_fixed_configuration',
         'currency_rates':[], 'currency_rate_unit':'cny_per_currency', 'read_retries':[],
         'shop_sites':{}, 'shop_site_contract':SHOP_SITE_CONTRACT,
     }
     owned = client is None
-    client = client or httpx.Client(timeout=40, trust_env=False, follow_redirects=False)
+    client = client or httpx.Client(timeout=40, trust_env=False, follow_redirects=False, headers={'Connection':'close'})
     auth = SalesAuth(settings, client)
     unavailable = False
+    last_request = None
     context = private_request.set(True)
 
     def issue(stage, code, **scope):
@@ -93,9 +92,13 @@ def capture_sales_sources(settings, capture, *, client=None, page_size=100, prod
         issue('scope', 'missing_product_hint', order_id=order_id)
 
     def request(stage, path, *, body=None, params=None):
-        nonlocal unavailable
+        nonlocal unavailable, last_request
         if unavailable:
             raise _Issue('source_not_attempted')
+        # 网页来源量大容易限流；当前串行节流，后续应以正式批量/增量接口替换。
+        if last_request is not None:
+            sleep(max(0, settings.sales_request_interval_seconds - (monotonic()-last_request)))
+        last_request = monotonic()
         try:
             token = auth.get_token()
         except (httpx.HTTPError, SourceUnavailable):
@@ -119,7 +122,7 @@ def capture_sales_sources(settings, capture, *, client=None, page_size=100, prod
                 timeout=40, follow_redirects=False),archive,retry_events=result['read_retries'],stage=stage)
         except (httpx.HTTPError, SourceUnavailable):
             raise _Issue('source_request_failed') from None
-        if response.status_code in (401, 403):
+        if response.status_code in (401, 403, 429):
             unavailable = True
         if not 200 <= response.status_code < 300:
             raise _Issue('source_http_failed')
@@ -134,7 +137,7 @@ def capture_sales_sources(settings, capture, *, client=None, page_size=100, prod
                     or len({str(row['id']) for row in payload}) != len(payload)):
                 raise _Issue('currency_rate_response_invalid')
             return payload
-        code_field = 'code' if path in (PRODUCTS, OVERSEAS_RATES) else 'resp_code'
+        code_field = 'code' if path == PRODUCTS else 'resp_code'
         if not isinstance(payload, dict) or type(payload.get(code_field)) is not int or payload[code_field] != 0:
             raise _Issue('source_business_failed')
         return payload
@@ -144,7 +147,7 @@ def capture_sales_sources(settings, capture, *, client=None, page_size=100, prod
         page = 1
         while True:
             payload = request(stage, path, body={**filters, 'page':page, 'limit':page_size})
-            container = payload if path in (PRODUCTS, OVERSEAS_RATES) else payload.get('datas')
+            container = payload if path == PRODUCTS else payload.get('datas')
             if not isinstance(container, dict):
                 raise _Issue(stage + '_pagination_incomplete')
             records, count = container.get('data'), container.get('count')
@@ -203,7 +206,7 @@ def capture_sales_sources(settings, capture, *, client=None, page_size=100, prod
         for product in result['products']:
             site = site_from_shop_name(product['shopName'])
             if site is None:
-                issue('overseas_rate', 'unknown_shop_site', product_id=product['productId'], shop=product['shopName'])
+                issue('identity', 'unknown_shop_site', product_id=product['productId'], shop=product['shopName'])
             else:
                 sites.add(site)
                 result['shop_sites'][product['shopName']] = site
@@ -220,39 +223,7 @@ def capture_sales_sources(settings, capture, *, client=None, page_size=100, prod
                         issue('currency_rate', 'currency_rate_missing_or_invalid', currency=currency)
             except _Issue as error:
                 issue('currency_rate', error.code)
-            if progress:
-                progress('读取销售海外仓费率，保留集团至店铺各层配置。')
-            try:
-                rows = pages('overseas_rate', OVERSEAS_RATES, {
-                    'blocNames':[settings.erp_capture_bloc], 'siteCodes':sorted(sites)})
-                if any(row.get('blocName') != settings.erp_capture_bloc or row.get('siteCode') not in sites
-                       or type(row.get('authType')) is not int or row['authType'] not in range(1, 6) for row in rows):
-                    raise _Issue('overseas_rate_scope_mismatch')
-                result['overseas_rates'] = rows
-            except _Issue as error:
-                issue('overseas_rate', error.code)
-
-        departments = sorted({row['department'] for row in result['products']
-                              if isinstance(row.get('department'), str) and row['department'].strip()})
-        for department in departments:
-            try:
-                rows = pages('department', DEPARTMENT_RATES, {'authType':2,
-                    'blocName':settings.erp_capture_bloc, 'departmentName':department})
-                if any(row.get('authType') != 2 or row.get('departmentName') != department
-                       or row.get('blocName') != settings.erp_capture_bloc for row in rows):
-                    raise _Issue('department_scope_mismatch')
-                result['department_rates'][department] = rows
-            except _Issue as error:
-                issue('department', error.code, department=department)
-        for shop in sorted({row['shopName'] for row in result['products']}):
-            try:
-                payload = request('public', PUBLIC_RATES, params={'shopName':shop, 'globalPublish':False})
-                rows = payload.get('datas')
-                if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
-                    raise _Issue('public_response_invalid')
-                result['public_rates'][shop] = rows
-            except _Issue as error:
-                issue('public', error.code, shop=shop)
+        # 2026-11-13费率改由用户固定Excel导入；不查询部门、个人、店铺或公共费用覆盖。
     finally:
         private_request.reset(context)
         if owned:
@@ -261,7 +232,7 @@ def capture_sales_sources(settings, capture, *, client=None, page_size=100, prod
     result['acquisition_complete'] = not result['issues']
     result['completed_at'] = datetime.now(timezone.utc).isoformat()
     result['summary'] = {'requested_products':len(requested), 'products':len(result['products']),
-        'variants':len(result['variants']), 'departments':len(result['department_rates']), 'shops':len(result['public_rates'])}
+        'variants':len(result['variants']), 'shops':len({row['shopName'] for row in result['products']})}
     result['artifact_file'] = str((directory / 'result.json').resolve())
     result = _json_values(result)
     write_verified(result['artifact_file'], result)

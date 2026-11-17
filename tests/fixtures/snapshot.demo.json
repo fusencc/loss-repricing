@@ -405,15 +405,28 @@
       },
       "observed_at": "2026-11-05T03:33:10.203250Z",
       "sales_7d": 6,
-      "sales_start": "2026-10-29",
-      "sales_end": "2026-11-04",
       "sales_complete": true,
       "history_known": true,
       "last_increase_at": null,
       "pending_submission": false,
       "protected": false,
       "activity_locked": false,
-      "sellable": true
+      "sellable": true,
+      "profit_check": {
+        "overseas_stock": "0",
+        "mode": "direct",
+        "department": "SYNTHETIC",
+        "inventory_observed_at": "2026-11-05T03:33:10.203250Z",
+        "source_ref": "synthetic-profit-evidence",
+        "model": {
+          "revenue_factor": "1",
+          "fixed_cost": "0",
+          "version": "synthetic-online-v1",
+          "verified": true
+        }
+      },
+      "sales_basis": "sales_system_web_sku_seven_days",
+      "sales_observed_at": "2026-11-05T03:33:10.203250Z"
     },
     {
       "key": {
@@ -439,15 +452,28 @@
       },
       "observed_at": "2026-11-05T03:33:10.203250Z",
       "sales_7d": 6,
-      "sales_start": "2026-10-29",
-      "sales_end": "2026-11-04",
       "sales_complete": true,
       "history_known": true,
       "last_increase_at": null,
       "pending_submission": false,
       "protected": false,
       "activity_locked": false,
-      "sellable": true
+      "sellable": true,
+      "profit_check": {
+        "overseas_stock": "0",
+        "mode": "direct",
+        "department": "SYNTHETIC",
+        "inventory_observed_at": "2026-11-05T03:33:10.203250Z",
+        "source_ref": "synthetic-profit-evidence",
+        "model": {
+          "revenue_factor": "1",
+          "fixed_cost": "0",
+          "version": "synthetic-online-v1",
+          "verified": true
+        }
+      },
+      "sales_basis": "sales_system_web_sku_seven_days",
+      "sales_observed_at": "2026-11-05T03:33:10.203250Z"
     },
     {
       "key": {
@@ -473,15 +499,28 @@
       },
       "observed_at": "2026-11-05T03:33:10.203250Z",
       "sales_7d": 21,
-      "sales_start": "2026-10-29",
-      "sales_end": "2026-11-04",
       "sales_complete": true,
       "history_known": true,
       "last_increase_at": null,
       "pending_submission": false,
       "protected": false,
       "activity_locked": false,
-      "sellable": true
+      "sellable": true,
+      "profit_check": {
+        "overseas_stock": "0",
+        "mode": "direct",
+        "department": "SYNTHETIC",
+        "inventory_observed_at": "2026-11-05T03:33:10.203250Z",
+        "source_ref": "synthetic-profit-evidence",
+        "model": {
+          "revenue_factor": "1",
+          "fixed_cost": "0",
+          "version": "synthetic-online-v1",
+          "verified": true
+        }
+      },
+      "sales_basis": "sales_system_web_sku_seven_days",
+      "sales_observed_at": "2026-11-05T03:33:10.203250Z"
     },
     {
       "key": {
@@ -507,15 +546,28 @@
       },
       "observed_at": "2026-11-05T03:33:10.203250Z",
       "sales_7d": 6,
-      "sales_start": "2026-10-29",
-      "sales_end": "2026-11-04",
       "sales_complete": true,
       "history_known": true,
       "last_increase_at": null,
       "pending_submission": false,
       "protected": false,
       "activity_locked": true,
-      "sellable": true
+      "sellable": true,
+      "profit_check": {
+        "overseas_stock": "0",
+        "mode": "direct",
+        "department": "SYNTHETIC",
+        "inventory_observed_at": "2026-11-05T03:33:10.203250Z",
+        "source_ref": "synthetic-profit-evidence",
+        "model": {
+          "revenue_factor": "1",
+          "fixed_cost": "0",
+          "version": "synthetic-online-v1",
+          "verified": true
+        }
+      },
+      "sales_basis": "sales_system_web_sku_seven_days",
+      "sales_observed_at": "2026-11-05T03:33:10.203250Z"
     },
     {
       "key": {
@@ -541,15 +593,28 @@
       },
       "observed_at": "2026-11-05T03:33:10.203250Z",
       "sales_7d": 6,
-      "sales_start": "2026-10-29",
-      "sales_end": "2026-11-04",
       "sales_complete": true,
       "history_known": true,
       "last_increase_at": null,
       "pending_submission": false,
       "protected": false,
       "activity_locked": false,
-      "sellable": true
+      "sellable": true,
+      "profit_check": {
+        "overseas_stock": "0",
+        "mode": "direct",
+        "department": "SYNTHETIC",
+        "inventory_observed_at": "2026-11-05T03:33:10.203250Z",
+        "source_ref": "synthetic-profit-evidence",
+        "model": {
+          "revenue_factor": "1",
+          "fixed_cost": "0",
+          "version": "synthetic-online-v1",
+          "verified": true
+        }
+      },
+      "sales_basis": "sales_system_web_sku_seven_days",
+      "sales_observed_at": "2026-11-05T03:33:10.203250Z"
     },
     {
       "key": {
@@ -575,15 +640,28 @@
       },
       "observed_at": "2026-11-05T03:33:10.203250Z",
       "sales_7d": 6,
-      "sales_start": "2026-10-29",
-      "sales_end": "2026-11-04",
       "sales_complete": true,
       "history_known": false,
       "last_increase_at": null,
       "pending_submission": false,
       "protected": false,
       "activity_locked": false,
-      "sellable": true
+      "sellable": true,
+      "profit_check": {
+        "overseas_stock": "0",
+        "mode": "direct",
+        "department": "SYNTHETIC",
+        "inventory_observed_at": "2026-11-05T03:33:10.203250Z",
+        "source_ref": "synthetic-profit-evidence",
+        "model": {
+          "revenue_factor": "1",
+          "fixed_cost": "0",
+          "version": "synthetic-online-v1",
+          "verified": true
+        }
+      },
+      "sales_basis": "sales_system_web_sku_seven_days",
+      "sales_observed_at": "2026-11-05T03:33:10.203250Z"
     },
     {
       "key": {
@@ -609,15 +687,28 @@
       },
       "observed_at": "2026-11-05T03:33:10.203250Z",
       "sales_7d": 6,
-      "sales_start": "2026-10-29",
-      "sales_end": "2026-11-04",
       "sales_complete": true,
       "history_known": true,
       "last_increase_at": null,
       "pending_submission": false,
       "protected": false,
       "activity_locked": false,
-      "sellable": true
+      "sellable": true,
+      "profit_check": {
+        "overseas_stock": "0",
+        "mode": "direct",
+        "department": "SYNTHETIC",
+        "inventory_observed_at": "2026-11-05T03:33:10.203250Z",
+        "source_ref": "synthetic-profit-evidence",
+        "model": {
+          "revenue_factor": "1",
+          "fixed_cost": "0",
+          "version": "synthetic-online-v1",
+          "verified": true
+        }
+      },
+      "sales_basis": "sales_system_web_sku_seven_days",
+      "sales_observed_at": "2026-11-05T03:33:10.203250Z"
     },
     {
       "key": {
@@ -643,15 +734,28 @@
       },
       "observed_at": "2026-11-05T03:33:10.203250Z",
       "sales_7d": 6,
-      "sales_start": "2026-10-29",
-      "sales_end": "2026-11-04",
       "sales_complete": true,
       "history_known": true,
       "last_increase_at": null,
       "pending_submission": false,
       "protected": false,
       "activity_locked": false,
-      "sellable": true
+      "sellable": true,
+      "profit_check": {
+        "overseas_stock": "0",
+        "mode": "direct",
+        "department": "SYNTHETIC",
+        "inventory_observed_at": "2026-11-05T03:33:10.203250Z",
+        "source_ref": "synthetic-profit-evidence",
+        "model": {
+          "revenue_factor": "1",
+          "fixed_cost": "0",
+          "version": "synthetic-online-v1",
+          "verified": true
+        }
+      },
+      "sales_basis": "sales_system_web_sku_seven_days",
+      "sales_observed_at": "2026-11-05T03:33:10.203250Z"
     }
   ],
   "contracts": {
@@ -662,7 +766,9 @@
       "rounding": "ROUND_HALF_UP",
       "upload_column": "税后价格",
       "version": "demo-only-v1",
-      "warehouses": ["direct"]
+      "warehouses": [
+        "direct"
+      ]
     },
     "PH": {
       "site": "PH",
@@ -671,7 +777,9 @@
       "rounding": "ROUND_HALF_UP",
       "upload_column": "税后价格",
       "version": "demo-only-v1",
-      "warehouses": ["direct"]
+      "warehouses": [
+        "direct"
+      ]
     },
     "SG": {
       "site": "SG",
@@ -680,7 +788,9 @@
       "rounding": "ROUND_HALF_UP",
       "upload_column": "税后价格",
       "version": "demo-only-v1",
-      "warehouses": ["direct"]
+      "warehouses": [
+        "direct"
+      ]
     },
     "TH": {
       "site": "TH",
@@ -689,7 +799,9 @@
       "rounding": "ROUND_HALF_UP",
       "upload_column": "税后价格",
       "version": "demo-only-v1",
-      "warehouses": ["direct"]
+      "warehouses": [
+        "direct"
+      ]
     },
     "VN": {
       "site": "VN",
@@ -698,7 +810,9 @@
       "rounding": "ROUND_HALF_UP",
       "upload_column": "税后价格",
       "version": "demo-only-v1",
-      "warehouses": ["direct"]
+      "warehouses": [
+        "direct"
+      ]
     }
   },
   "complete_sources": [

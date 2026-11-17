@@ -16,7 +16,7 @@ def read_response(send,archive,*,retry_events,stage):
             retry_events.append(event);sleep(1);continue
         archive(response,attempt)
         if event is not None:event['http_recovered']=200<=response.status_code<300
-        if attempt==1 and 400<=response.status_code<600 and response.status_code not in (401,403):
+        if attempt==1 and 400<=response.status_code<600 and response.status_code not in (401,403,429):
             event={'stage':stage,'error_kind':'HTTP'+str(response.status_code),'http_recovered':False}
             retry_events.append(event);sleep(1);continue
         return response

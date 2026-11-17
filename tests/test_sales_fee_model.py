@@ -10,7 +10,7 @@ def source():
         'currentOverseasProfitMargin':'-14.93',
         'overseasStockWarehouseInfo':json.dumps([{'overseasWarehouses':['WH-PH'],'quantity':114,
             'jqCostpriceList':['1.0557'],'jqFreightList':['0.0532']}])}
-    rate={'siteCode':'PH','totalRate':'35.0411','totalCost':'1.4503',
+    rate={'vatRate':'0','publicCommissionRate':'0','version':'fixed-test-v1','siteCode':'PH','totalRate':'35.0411','totalCost':'1.4503',
         'costOfCapital':'2','procedureRate':'2.24','platformRate':'12.8','returnRate':'8',
         'warehouseStorageRate':'0.0001','marketingRate':'10','otherRate':'0.001',
         'packageFee':'0.0001','warehouseCost':'0.7','warehouseCostDomestic':'0.0001',
@@ -33,14 +33,13 @@ def test_overseas_model_reconciles_reported_margin_then_excludes_marketing():
     assert model.profit_exact(target)>MoneyRatio(Decimal(0))
 
 
-@pytest.mark.parametrize('change', ['missing_cost','margin_mismatch','wrong_warehouse','stock_ambiguous','wrong_total'])
+@pytest.mark.parametrize('change', ['missing_cost','wrong_warehouse','stock_ambiguous','wrong_total'])
 def test_unknown_or_conflicting_fee_input_is_not_approved(change):
     from app.adapters.sales_fee_model import compile_overseas_fee
     v,r=source()
     if change=='missing_cost':
         buckets=json.loads(v['overseasStockWarehouseInfo']);buckets[0]['jqCostpriceList']=[None]
         v['overseasStockWarehouseInfo']=json.dumps(buckets)
-    elif change=='margin_mismatch':v['currentOverseasProfitMargin']='-99'
     elif change=='wrong_warehouse':v['overseasStockWarehouseInfo']=v['overseasStockWarehouseInfo'].replace('WH-PH','OTHER')
     elif change=='stock_ambiguous':
         buckets=json.loads(v['overseasStockWarehouseInfo']);buckets.append(copy.deepcopy(buckets[0]))

@@ -85,7 +85,7 @@ def _public_preview(artifact):
     return report
 
 
-def save_pricing_preview(runtime_dir, capture_id, evidence=None, *, exports=None, current_fx=None, sales_source=None, native_source=None, order_preparation=None, price_history_source=None, order_headers_source=None, sales_window_source=None, local_history_source=None, platform_source=None, online_preparation=None, company_effects_source=None):
+def save_pricing_preview(runtime_dir, capture_id, evidence=None, *, exports=None, current_fx=None, sales_source=None, native_source=None, order_preparation=None, order_headers_source=None, sales_window_source=None, local_history_source=None, platform_source=None, online_preparation=None, fixed_fees_source=None):
     capture = load_capture(runtime_dir, capture_id)
     if sales_source is not None and (
         sales_source['erp_capture_id'] != capture_id
@@ -105,14 +105,7 @@ def save_pricing_preview(runtime_dir, capture_id, evidence=None, *, exports=None
         or (order_preparation is not None and order_preparation['references']['native_source'] != native_source['source_id'])
     ):
         raise ValueError('原生明细来源与采集、样本或订单准备引用不一致')
-    if price_history_source is not None and (
-        price_history_source['erp_capture_id'] != capture_id
-        or price_history_source['synthetic'] != bool(capture.get('synthetic', False))
-        or price_history_source['sample_only'] != bool(capture.get('sample_only', False))
-        or sales_source is None or price_history_source['sales_source_id'] != sales_source['source_id']
-    ):
-        raise ValueError('操作日志来源与采集、样本或销售来源引用不一致')
-    for label, source in (('七日销量',sales_window_source),('本程序真实提价历史',local_history_source),('平台现态',platform_source),('公司任务影响',company_effects_source)):
+    for label, source in (('七日销量',sales_window_source),('本程序真实提价历史',local_history_source),('平台现态',platform_source),('固定费率',fixed_fees_source)):
         if source is not None and (source['erp_capture_id'] != capture_id
                 or source['synthetic'] != bool(capture.get('synthetic', False))
                 or source['sample_only'] != bool(capture.get('sample_only', False))):
@@ -124,13 +117,9 @@ def save_pricing_preview(runtime_dir, capture_id, evidence=None, *, exports=None
         or (order_preparation is not None and order_preparation['references']['order_headers'] != order_headers_source['source_id'])
     ):
         raise ValueError('订单归属来源与采集、样本或订单准备引用不一致')
-    if company_effects_source is not None and (price_history_source is None or platform_source is None
-            or company_effects_source['company_history_source_id']!=price_history_source['source_id']
-            or company_effects_source['platform_source_id']!=platform_source['source_id']):
-        raise ValueError('公司任务影响来源与公司历史或当前平台引用不一致')
     if online_preparation is not None:
         for name, source in (('sales',sales_source),('platform',platform_source),('window',sales_window_source),
-                             ('company_history',price_history_source),('local_history',local_history_source),('company_effects',company_effects_source)):
+                             ('local_history',local_history_source),('fixed_fees',fixed_fees_source)):
             expected = source['source_id'] if source else None
             if online_preparation['references'].get(name) != expected:
                 raise ValueError('实时在线准备与'+name+'来源引用不一致')
@@ -140,8 +129,8 @@ def save_pricing_preview(runtime_dir, capture_id, evidence=None, *, exports=None
     if sales_source is not None:
         # 来源观察可回查，不将原始在线／费率字段冒充已审核的完整定价输入。
         artifact['references']['sales_source'] = sales_source
-    if company_effects_source is not None:
-        artifact['references']['company_history_effects']=company_effects_source
+    if fixed_fees_source is not None:
+        artifact['references']['fixed_fees']=fixed_fees_source
     if platform_source is not None:
         artifact['references']['platform_current_state'] = platform_source
     if sales_window_source is not None:
@@ -152,8 +141,6 @@ def save_pricing_preview(runtime_dir, capture_id, evidence=None, *, exports=None
         artifact['references']['order_headers'] = order_headers_source
     if native_source is not None:
         artifact['references']['native_details'] = native_source
-    if price_history_source is not None:
-        artifact['references']['company_price_history'] = price_history_source
     if order_preparation is not None:
         path = Path(runtime_dir) / 'erp-order-preparations' / (uuid4().hex + '.json')
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)

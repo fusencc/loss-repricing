@@ -17,6 +17,7 @@ from app.domain.types import Decision, VariantKey
 from app.domain.engine import evaluate, allowed_error, snapshot_problem
 from app.domain.money import MoneyRatio
 from app.adapters.base import SourceUnavailable, SubmitResult
+from app.adapters.normalization import money
 from app.services.store import utcnow, stamp, parse_stamp, BEIJING, settings_value, settings_for_submit, pause_site, enqueue, is_erp_reconciliation, write_decisions
 from app.services.coordination import automation_gate, authorization_snapshot, lock_authorization
 from app.services.price_control import observe_prices, price_baseline, same_price, record_conflict, lock_control, verified_baseline
@@ -27,12 +28,40 @@ class PricingService:
         self.factory, self.adapter, self.config = factory, adapter, settings
 
     def _enrich(self, snapshot):
-        """外部历史和本程序历史合并；外部历史读取失败仍保持unknown，不用本地记录掩盖。"""
+        """真实72小时保护仅依据本程序档案；demo/file保留各自隔离的合成/对账输入。"""
         result = snapshot.model_copy(deep=True)
         with self.factory() as session:
             protections = session.scalars(select(Protection).where(Protection.active.is_(True))).all()
             for online in result.online:
                 guard = session.get(VariantGuard, online.key.target_identity())
+                if self.adapter.mode == 'live':
+                    # 2026-11-13用户明确暂不查询销售系统改价记录。空的自有档案可确证
+                    # 本程序尚未提价；外部传来的历史/未知提交字段不参与本程序保护。
+                    online.history_known, online.pending_submission, online.last_increase_at = True, False, None
+                    confirmed = set()
+                    executions = session.scalars(select(Execution).join(Item, Execution.item_id == Item.id)
+                        .join(Batch, Item.batch_id == Batch.id).where(Batch.mode == 'live',
+                            Execution.variant_id == online.key.target_identity())).all()
+                    for execution in executions:
+                        if execution.state == 'failed':
+                            continue
+                        if execution.state != 'verified':
+                            online.pending_submission = True
+                            continue
+                        try:
+                            evidence = execution.evidence
+                            effective = parse_stamp(evidence.get('effective_at'))
+                            if (evidence.get('mode') != 'live' or evidence.get('price_basis') != 'actual_including_vat'
+                                    or money(evidence['actual_price']) <= 0 or effective is None or effective > utcnow()):
+                                raise ValueError()
+                            confirmed.add(effective)
+                            online.last_increase_at = max(confirmed)
+                        except (ValueError, TypeError, KeyError, ArithmeticError):
+                            online.history_known = False
+                    if guard and guard.last_effective_at:
+                        effective = parse_stamp(guard.last_effective_at)
+                        if effective not in confirmed and utcnow() - effective < timedelta(hours=72):
+                            online.history_known = False
                 if guard:
                     online.pending_submission = online.pending_submission or bool(guard.execution_id)
                     effective = parse_stamp(guard.last_effective_at)
@@ -65,7 +94,11 @@ class PricingService:
                 return False, "真实数据源待接入，提交保持关闭"
             if key.site not in readiness.get("verified_sites", []):
                 return False, "本站点尚未完成真实合同验证"
-            if self.config.coordination_required and not self.config.live_writer_exclusive:
+            # 2026-11-17明确单商品人工执行授权：原价基线在run_correction重取核对，
+            # 修正权限/目标锁仍由_claim校验，适配器再约束当日目标及精确上传价。
+            # 此范围不宣称外部独占，也不允许自动任务借人工授权执行。
+            scoped_manual = manual and key.target_identity() in readiness.get('manual_targets', [])
+            if self.config.coordination_required and not self.config.live_writer_exclusive and not scoped_manual:
                 return False, "外部改价入口及独占写入范围尚未确认，真实提交保持关闭"
         if self.config.coordination_required and not manual:
             with self.factory() as session:
@@ -420,6 +453,10 @@ class PricingService:
                 if decision.key.target_identity() != execution.variant_id:
                     raise ValueError("保存的调价请求与执行锁目标不一致")
                 result = self.adapter.lookup(execution.id, execution.task_id, decision.key)
+                if result.price_record is not None:
+                    from app.services.price_log_archive import validate_price_record_binding
+                    validate_price_record_binding(result.price_record, execution.id, decision.key,
+                        decision.upload_price, result.actual_price)
                 difference_ratio = None
                 if (result.status == "accepted" and result.actual_price is not None
                         and result.actual_price.is_finite() and result.actual_price > 0):
@@ -465,6 +502,8 @@ class PricingService:
                         "difference": str(difference), "tolerance": str(allowed_error(decision.key.site)),
                         "observed_at": stamp(result.observed_at), "price_basis": result.price_basis,
                         "message": result.message, "mode": self.adapter.mode}
+                    if result.price_record is not None:
+                        current.evidence['price_record'] = result.price_record
                     if difference_ratio <= MoneyRatio(allowed_error(decision.key.site)):
                         confirmed_at = utcnow()
                         effective = result.effective_at

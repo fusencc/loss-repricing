@@ -4,7 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 import json
 from hashlib import sha256
-from app.domain.types import Snapshot, VariantKey, SourceLine, OnlineState, FeeModel, SiteContract
+from app.domain.types import Snapshot, VariantKey, SourceLine, OnlineState, OnlineProfitCheck, FeeModel, SiteContract
 from app.domain.money import MoneyRatio
 from app.adapters.base import SubmitResult, LookupResult, SourceUnavailable
 
@@ -54,8 +54,11 @@ class DemoAdapter:
                 retail_price=price * 2, marketing_price=price, current_margin=Decimal("0.03") if scenario == "no_loss" else Decimal("-0.05"),
                 fee_scope="normal", fee_model=FeeModel(revenue_factor=Decimal("0.9"), fixed_cost=fixed,
                                                       version="demo-no-marketing-v1", verified=True),
+                profit_check=OnlineProfitCheck(overseas_stock="0",mode="direct",department="DEMO",
+                    inventory_observed_at=now,source_ref="synthetic-online-profit-v1",
+                    model=FeeModel(revenue_factor="0.9",fixed_cost=fixed,version="demo-online-v1",verified=True)),
                 observed_at=now, sales_7d=21 if scenario == "protected" else 6, sales_complete=True,
-                sales_start=business_date - timedelta(days=7), sales_end=business_date - timedelta(days=1),
+                sales_basis="sales_system_web_sku_seven_days", sales_observed_at=now,
                 history_known=scenario != "history", activity_locked=scenario == "activity"))
         # 模拟来源也反映自己已生效的价格，避免下一轮把固定样本旧价误判为人工修改。
         for row in online:

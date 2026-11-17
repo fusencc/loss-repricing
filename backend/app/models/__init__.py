@@ -46,26 +46,6 @@ class Execution(Base):
     updated_at: Mapped[str] = mapped_column(String(40))
 
 
-class CompanyPriceObservation(Base):
-    """外部公司调价的实价观察，独立于本程序执行记录；首次确认时间不滚动。"""
-    __tablename__ = 'company_price_observations'
-    event_key: Mapped[str] = mapped_column(String(64), primary_key=True)
-    log_id: Mapped[str] = mapped_column(String(255), index=True)
-    variant_id: Mapped[str] = mapped_column(String(64), index=True)
-    key: Mapped[dict] = mapped_column(JSON)
-    state: Mapped[str] = mapped_column(String(24))
-    currency: Mapped[str] = mapped_column(String(3))
-    old_price: Mapped[str] = mapped_column(String(80))
-    new_price: Mapped[str] = mapped_column(String(80))
-    first_observed_at: Mapped[str] = mapped_column(String(40))
-    first_confirmed_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
-    logged_complete_at: Mapped[str] = mapped_column(String(40))
-    company_context: Mapped[dict] = mapped_column(JSON)
-    first_evidence: Mapped[dict] = mapped_column(JSON)
-    confirmation_evidence: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    created_at: Mapped[str] = mapped_column(String(40))
-
-
 class VariantGuard(Base):
     __tablename__ = "variant_guards"
     variant_id: Mapped[str] = mapped_column(String(64), primary_key=True)

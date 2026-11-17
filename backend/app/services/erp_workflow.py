@@ -12,13 +12,12 @@ from app.adapters.erp_rates import query_current_erp_fx
 from app.adapters.erp_detail_capture import capture_erp_details
 from app.adapters.erp_order_loss import prepare_order_losses
 from app.adapters.erp_order_headers import capture_order_headers
-from app.adapters.erp_sales_window import capture_sales_window
+from app.adapters.sales_sales_window import capture_sales_window
+from app.adapters.fixed_pricing_fees import capture_fixed_fees
 from app.adapters.erp_pricing import prepare_pricing
-from app.services.local_price_history import capture_local_price_history,record_company_observations
-from app.adapters.company_price_history import capture_company_history_effects
+from app.services.local_price_history import capture_local_price_history
 from decimal import Decimal
 from app.adapters.sales_capture import capture_sales_sources
-from app.adapters.sales_price_history import capture_price_history
 from app.adapters.sales_platform_capture import capture_platform_controls
 from app.adapters.live_online_preparation import prepare_online_states
 from app.services.erp_capture_store import load_capture, rebuild_clean_capture, save_capture, write_verified
@@ -58,17 +57,12 @@ def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, prog
     platform_status = 'not_requested'
     local_history_ref = None
     local_history_status = 'not_requested'
-    company_effects = None
-    effects_ref = None
-    effects_status = 'not_requested'
-    observation_status = 'not_requested'
-    history_ref = None
-    history_status = 'not_requested'
+    fixed_fees = None
+    fixed_fees_ref = None
     order_preparation = None
     online_preparation = None
     window = None
     platform = None
-    history = None
     pricing_targets = []
     native_status = 'not_requested'
     sales_status = 'not_requested'
@@ -144,40 +138,20 @@ def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, prog
                     'acquisition_complete','artifact_file')}
                 platform_ref['sha256'] = sha256(content).hexdigest()
                 platform_status = 'saved' if platform['acquisition_complete'] else 'partial'
-        if sales is not None:
-            try:
-                history = capture_price_history(settings, sales, progress=progress,
-                    shop_scope=sorted({target['erp_shop'] for target in pricing_targets}),
-                    not_before=max(source_time(source['completed_at']) for source in (sales,platform,window) if source is not None))
-            except SourceUnavailable:
-                history_status = 'unavailable'
-            else:
-                content = Path(history['artifact_file']).read_bytes()
-                history = json.loads(content)
-                history_ref = {key:history[key] for key in ('source_id','erp_capture_id','sales_source_id',
-                    'synthetic','sample_only','company_log_complete','platform_manual_changes_complete','artifact_file')}
-                history_ref['sha256'] = sha256(content).hexdigest()
-                history_status = 'saved' if history['company_log_complete'] else 'partial'
+        fixed_fees = capture_fixed_fees(settings,capture)
+        fixed_fees_ref = {key:fixed_fees[key] for key in ('source_id','erp_capture_id','synthetic','sample_only',
+            'acquisition_complete','artifact_file')}
+        fixed_fees_ref['sha256'] = sha256(Path(fixed_fees['artifact_file']).read_bytes()).hexdigest()
         local_history = capture_local_price_history(settings,capture)
-        if history is not None and platform is not None:
-            company_effects=capture_company_history_effects(settings,capture,pricing_targets,history,platform,
-                local_history,progress=progress)
-            content=Path(company_effects['artifact_file']).read_bytes();company_effects=json.loads(content)
-            effects_ref={key:company_effects[key] for key in ('source_id','erp_capture_id','synthetic','sample_only',
-                'company_history_source_id','platform_source_id','prior_local_history_source_id','acquisition_complete','artifact_file')}
-            effects_ref['sha256']=sha256(content).hexdigest()
-            effects_status='saved' if company_effects['acquisition_complete'] else 'partial'
-            observation_status=record_company_observations(settings,capture,company_effects['observations'])['status']
-            local_history=capture_local_price_history(settings,capture)
         content = Path(local_history['artifact_file']).read_bytes()
         local_history = json.loads(content)
         local_history_ref = {key:local_history[key] for key in ('source_id','erp_capture_id','synthetic','sample_only',
             'acquisition_complete','artifact_file')}
         local_history_ref['sha256'] = sha256(content).hexdigest()
         local_history_status = 'saved' if local_history['acquisition_complete'] else 'partial'
-        if all(source is not None for source in (sales,platform,window,history,company_effects)):
+        if all(source is not None for source in (sales,platform,window,fixed_fees)):
             online_preparation = prepare_online_states(capture,pricing_targets,sales=sales,
-                platform=platform,window=window,company_history=history,local_history=local_history,company_effects=company_effects)
+                platform=platform,window=window,local_history=local_history,fixed_fees=fixed_fees)
         try:
             current_fx = query_current_erp_fx(settings)
         except SourceUnavailable:
@@ -190,8 +164,8 @@ def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, prog
             fx_status = 'saved'
     report = save_pricing_preview(settings.runtime_dir, capture_id, evidence, exports=exports,
                                   current_fx=current_fx, sales_source=sales_ref, native_source=native_ref,
-                                  order_preparation=order_preparation, price_history_source=history_ref, order_headers_source=headers_ref,
-                                  sales_window_source=window_ref, local_history_source=local_history_ref, platform_source=platform_ref, online_preparation=online_preparation,company_effects_source=effects_ref)
+                                  order_preparation=order_preparation, order_headers_source=headers_ref,
+                                  sales_window_source=window_ref, local_history_source=local_history_ref, platform_source=platform_ref, online_preparation=online_preparation,fixed_fees_source=fixed_fees_ref)
     # 下游只消费已持久化并回读的报告，待提价保留完整 Decimal 文本和明细引用。
     report, digest = load_pricing_preview(settings.runtime_dir, capture_id, report['preview_id'])
     ready = [row for row in report['decisions'] if row['ready']]
@@ -225,9 +199,8 @@ def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, prog
         'online_prepared_records':len(online_preparation['online']) if online_preparation else 0,
         'online_preparation_issues':len(online_preparation['issues']) if online_preparation else None,
         'local_history_status': local_history_status,
-        'price_history_status': history_status,
-        'company_effects_status':effects_status,
-        'company_observation_archive_status':observation_status,
+        'history_scope':'own_program_only',
+        'fixed_fee_status':('saved' if fixed_fees['acquisition_complete'] else 'unavailable') if fixed_fees else 'not_requested',
         'order_preparation_summary': order_preparation['summary'] if order_preparation is not None else None,
         'summary': report['summary'], 'ready_prices': len(ready),
         'issue_counts': dict(Counter(row['code'] for row in report['issues'])),
