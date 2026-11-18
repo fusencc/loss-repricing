@@ -4,7 +4,7 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from app.domain.engine import allowed_error, evaluate, valid_sales_observation
+from app.domain.engine import allowed_error, evaluate
 from app.domain.types import FeeModel, OnlineProfitCheck, OnlineState, SiteContract, Snapshot, SourceLine, VariantKey
 
 
@@ -34,11 +34,10 @@ def online(variant, **overrides):
     return OnlineState(**{
         "key": variant, "main_sku": "主款", "currency": "MYR", "retail_price": "10",
         "marketing_price": None, "current_margin": "-1", "fee_scope": "normal",
-        "fee_model": FeeModel(revenue_factor="1", fixed_cost="10", version="f1", verified=True),
         "profit_check": OnlineProfitCheck(overseas_stock="0",mode="direct",department="TEST",
             inventory_observed_at=NOW,source_ref="synthetic/profit",
             model=FeeModel(revenue_factor="1",fixed_cost="0",version="synthetic-online-v1",verified=True)),
-        "observed_at": NOW, "sales_7d": 20, "sales_basis": "sales_system_web_sku_seven_days", "sales_observed_at": NOW,
+        "observed_at": NOW, "sales_7d": 20, "sales_basis": "erp_goods_warehouse_seven_days_reference", "sales_observed_at": NOW,
         "sales_complete": True, "history_known": True,
         **overrides,
     })
@@ -75,7 +74,7 @@ def test_cny_fixed_cost_preserves_exact_break_even_and_returns_station_currency(
     assert model.profit_exact(MoneyRatio(Decimal(4),Decimal(3)))==MoneyRatio(Decimal(0))
     assert model.profit_exact(MoneyRatio(Decimal('1.34')))==MoneyRatio(Decimal('0.02'),Decimal(3))
     result=single(line_fields={'loss_amount':'-1','currency':'CNY'},
-        online_fields={'retail_price':'1','current_margin':'-1','fee_model':model},
+        online_fields={'retail_price':'1','current_margin':'-1','profit_check':online(key()).profit_check.model_copy(update={'model':model})},
         snapshot_fields={'fx_rates':{'CNY':'1','MYR':'3'},'fx_rate_unit':'cny_per_currency',
                          'contracts':{'MY':contract(rounding='ROUND_UP')}})
     assert result.ready and result.upload_price==Decimal('1.34')
@@ -211,8 +210,8 @@ def test_same_sku_and_row_id_in_different_stores_are_independent():
     assert results["02"].unit_loss == Decimal("0.8")
 
 
-@pytest.mark.parametrize(("units", "status", "ready"), [(20, "待处理", True), (21, "本轮不调", False)])
-def test_twenty_one_sales_is_the_protection_boundary(units, status, ready):
+@pytest.mark.parametrize(("units", "status", "ready"), [(20, "待处理", True), (21, "待处理", True)])
+def test_sales_quantity_is_reference_only(units, status, ready):
     result = single(online_fields={"sales_7d": units})
     assert (result.status, result.ready) == (status, ready)
 
@@ -244,13 +243,6 @@ def test_exactly_four_sources_are_required(sources):
         {"pending_submission": True},
         {"activity_locked": True},
         {"sellable": False},
-        {"sales_complete": False},
-        {"sales_7d": None},
-        {"sales_7d": -1},
-        {"sales_observed_at": NOW - timedelta(days=1)},
-        {"sales_observed_at": NOW + timedelta(seconds=1)},
-        {"fee_model": None},
-        {"fee_model": FeeModel(revenue_factor="1", fixed_cost="10", version="f1")},
     ],
 )
 def test_unavailable_online_conditions_are_pending(online_fields):
@@ -266,10 +258,8 @@ def test_protected_or_non_loss_margins_are_excluded(online_fields):
     assert not result.ready
 
 
-def test_web_sales_observation_uses_shanghai_business_day():
-    midnight = datetime(2026, 11, 4, 16, 0, tzinfo=timezone.utc)
-    assert valid_sales_observation(online(key(), sales_observed_at=midnight), NOW)
-    assert not valid_sales_observation(online(key(), sales_observed_at=midnight-timedelta(seconds=1)), NOW)
+def test_stale_reference_sales_do_not_block_price_calculation():
+    assert single(online_fields={'sales_observed_at':NOW-timedelta(days=1)}).ready
 
 
 def test_previous_day_fx_blocks_even_when_amounts_are_already_station_currency():
@@ -328,7 +318,7 @@ def test_discount_uses_actual_over_retail_and_is_applied_after_upload_rounding()
         line_fields={"loss_amount": "-0.9"},
         online_fields={
             "retail_price": "20", "marketing_price": "9",
-            "fee_model": FeeModel(revenue_factor="0.9", fixed_cost="8.5", version="f2", verified=True),
+            "profit_check": online(key()).profit_check.model_copy(update={"model": FeeModel(revenue_factor="0.9", fixed_cost="8.5", version="f2", verified=True)}),
         },
     )
     assert result.ready
@@ -346,9 +336,9 @@ def test_invalid_current_prices_are_pending(online_fields):
     assert not result.ready
 
 
-def test_fee_shortfall_is_raised_to_break_even_without_extra_profit():
+def test_online_profit_shortfall_is_raised_to_break_even_without_extra_profit():
     result = single(online_fields={
-        "fee_model": FeeModel(revenue_factor="1", fixed_cost="11.21", version="f1", verified=True),
+        "profit_check": online(key()).profit_check.model_copy(update={"model": FeeModel(revenue_factor="1", fixed_cost="11.21", version="f1", verified=True)}),
     })
     assert result.status == "待处理"
     assert result.ready
@@ -360,7 +350,7 @@ def test_rounding_shortfall_is_corrected_to_first_nonnegative_tick():
     result = single(
         line_fields={"loss_amount": "-1.209"},
         online_fields={
-            "fee_model": FeeModel(revenue_factor="1", fixed_cost="11.205", version="f1", verified=True),
+            "profit_check": online(key()).profit_check.model_copy(update={"model": FeeModel(revenue_factor="1", fixed_cost="11.205", version="f1", verified=True)}),
         },
         snapshot_fields={"contracts": {"MY": contract(rounding="ROUND_DOWN")}},
     )

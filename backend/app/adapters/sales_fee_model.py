@@ -1,4 +1,6 @@
-"""用户固定BD表费用公式：区分前置一次毛利和最终在线利润。
+"""用户固定BD表费用公式：费率用于库存对应完整在线利润。
+
+当前一次毛利仅计算现价筛选观测值，不输出独立新价保本模型。
 
 固定费率与商品输入由fixed_pricing_fees绑定版本；库存、成本、重量与报价由
 当前来源提供。未知成本、多个有效海外仓或分项不完整时不生成模型。
@@ -83,7 +85,7 @@ def compile_overseas_fee(variant, rate, *, site, warehouse, company_cny_per_curr
     included_model.verified = True
     model = FeeModel(revenue_factor=normal_factor.numerator, fixed_cost=fixed.numerator,
         fixed_cost_divisor=quote, version=version, verified=True)
-    return {'model':model, 'online_model':included_model, 'current_margin':(model.profit_exact(MoneyRatio(actual)) / MoneyRatio(actual)).decimal(),
+    return {'online_model':included_model, 'current_margin':(model.profit_exact(MoneyRatio(actual)) / MoneyRatio(actual)).decimal(),
         'proof':{'version':version,'fixed_cost_currency':'CNY','company_quote_unit':'CNY/'+variant['currency'],
             'company_quote':format(quote,'f'),'fixed_cost':format(fixed.numerator,'f'),
             'reported_margin_percent':None if reported is None else str(reported),
@@ -129,7 +131,7 @@ def compile_direct_fee(variant, rate, *, site, company_cny_per_currency):
                     fixed_cost_divisor=quote, version=version, verified=True)
     online = FeeModel(revenue_factor=full_factor.decimal(), fixed_cost=fixed.decimal(),
                      fixed_cost_divisor=quote, version=version, verified=True)
-    return {'model': model, 'online_model': online,
+    return {'online_model': online,
         'current_margin': (model.profit_exact(MoneyRatio(actual)) / MoneyRatio(actual)).decimal(),
         'proof': {'version': version, 'mode': 'direct', 'source_cells': rate.get('source_cells'),
                   'fixed_rate_ref': rate.get('source_ref'), 'weight_g': str(weight),

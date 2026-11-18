@@ -11,9 +11,9 @@ from typing import Annotated, Any, Literal
 
 from pydantic import AfterValidator, AwareDatetime, BaseModel, BeforeValidator, ConfigDict, Field, StrictBool, StrictInt, StrictStr, model_validator
 
-from app.adapters.erp_bulk_capture import SOURCES, STATUS_LABELS, finance_batch_scope
+from app.adapters.erp_bulk_capture import ERP_DEPARTMENTS, SOURCES, STATUS_LABELS, finance_batch_scope
 from app.adapters.normalization import identity_text, sku_text, source_date, source_time
-from app.domain.engine import BEIJING, conflicting_sales_scopes
+from app.domain.engine import BEIJING, conflicting_main_sku_scopes
 from app.domain.types import OnlineProfitCheck, FeeModel, OnlineState, SiteContract, Snapshot, Source, SourceLine, VariantKey
 
 # 仅消费今天已核对的批量合同。逐单诊断与规范 Snapshot 各有独立入口。
@@ -43,6 +43,8 @@ class FinanceFields(BaseModel):
     platform: StrictStr = Field(alias="平台")
     bloc: StrictStr = Field(alias="集团")
     shop: StrictStr | None = Field(default=None, alias="店铺")
+    salesperson: StrictStr | None = Field(default=None, alias="销售员")
+    department: StrictStr | None = Field(default=None, alias="部门")
     product_hint: Any = Field(default=None, alias="item ID")
     # ERP 财务表按订单导出的修正一次毛利，原样展示十进制文本和空值。
     # 只有完整同SKU明细、总件数与RMB来源合同另经核对后，才可按整单粒度准备输入。
@@ -90,13 +92,24 @@ class CaptureGroup(BaseModel):
     rows: list[FinanceRow]
     batches: list[ExportBatch]
 
-    def scope_bloc(self):
+    def scope_bloc(self, department=None):
         kind, expected_status = SOURCES[self.source]
         if self.status != expected_status or self.filters.get("status") != expected_status:
             return None
+        # 只接受同一部门的四组范围。无部门的采集必须没有部门选择字段。
+        department_key = "department" if kind == "loss" else "departments"
+        extra_scope = {department_key} if department is not None else set()
+        if department is not None and (
+            department not in ERP_DEPARTMENTS or self.filters.get(department_key) != department
+        ):
+            return None
+        filter_keys = set(self.filters) - extra_scope
         if kind == "loss":
+            if "username" in self.filters and (not isinstance(self.filters["username"], str)
+                    or not self.filters["username"] or self.filters["username"] != self.filters["username"].strip()):
+                return None
             if (
-                set(self.filters) != {"platform", "bloc", "status", "financecheck"}
+                (filter_keys - {"username"}) != {"platform", "bloc", "status", "financecheck"}
                 or str(self.filters.get("platform", "")).casefold() != "tiktok"
                 or self.filters.get("financecheck") != "3"
             ):
@@ -104,21 +117,24 @@ class CaptureGroup(BaseModel):
             bloc = self.filters.get("bloc")
         else:
             if (
-                set(self.filters) != {"ptid", "blocs", "status", "jzfh"}
+                filter_keys != {"ptid", "blocs", "status", "jzfh"}
                 or not self.filters.get("ptid") or self.filters.get("jzfh") != "1"
             ):
                 return None
             bloc = self.filters.get("blocs")
         return bloc if isinstance(bloc, str) and bloc.strip() else None
 
-    def finance_coverage(self, bloc):
+    def finance_coverage(self, bloc, department=None):
         ids = set(self.candidate_order_ids)
         row_ids = {row.orderid for row in self.rows}
         list_known = self.list_complete and self.total == len(ids) == len(self.candidate_order_ids)
         rows_in_scope = (
             bloc is not None and row_ids <= ids
             and all(row.fields.order_id == row.orderid and row.fields.bloc == bloc
-                    and row.fields.platform.casefold() == "tiktok" for row in self.rows)
+                    and row.fields.platform.casefold() == "tiktok"
+                    and ("username" not in self.filters or row.fields.salesperson == self.filters["username"])
+                    and (department is None or (row.fields.department or "").casefold() == department.casefold())
+                    for row in self.rows)
         )
         if not list_known or not rows_in_scope or not self._batches_cover_orders(ids):
             return False, False
@@ -153,6 +169,11 @@ class CaptureGroup(BaseModel):
         return requested == candidate_ids and offset == len(self.rows)
 
 
+class CaptureSalesperson(BaseModel):
+    name: StrictStr
+    id: Identifier
+
+
 class BulkCapture(BaseModel):
     acquisition_mode: Literal["bulk_download"]
     source_kind: Literal["erp_web_backend"]
@@ -163,6 +184,8 @@ class BulkCapture(BaseModel):
     sample_only: StrictBool
     capture_complete: StrictBool
     groups: list[CaptureGroup]
+    salesperson: CaptureSalesperson | None = None
+    department: StrictStr | None = None
 
 
 class EvidenceModel(BaseModel):
@@ -240,13 +263,12 @@ class ReviewedOnlineState(OnlineState):
     marketing_price: DecimalText | None
     current_margin: DecimalText
     fee_scope: Identifier
-    fee_model: ReviewedFeeModel | None
     profit_check: ReviewedOnlineProfitCheck | None = None
     observed_at: SourceTime
-    sales_7d: StrictInt | None
-    sales_basis: Literal["sales_system_web_sku_seven_days"] | None
-    sales_observed_at: SourceTime | None
-    sales_complete: StrictBool
+    sales_7d: StrictInt | None = None
+    sales_basis: Literal["erp_goods_warehouse_seven_days_reference"] | None = None
+    sales_observed_at: SourceTime | None = None
+    sales_complete: StrictBool = False
     history_known: StrictBool
     last_increase_at: SourceTime | None
     pending_submission: StrictBool
@@ -449,10 +471,17 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
     fx = evidence.fx if evidence else current_fx
     evaluated_at = evidence.evaluated_at if evidence else (current_fx.queried_at if current_fx else (live.observed_at if live else None))
 
-    scope_by_source = {source: group.scope_bloc() for source, group in groups.items()}
+    scope_by_source = {source: group.scope_bloc(capture.department) for source, group in groups.items()}
     scope_blocs = set(scope_by_source.values())
     blocked_platforms = {str(group.filters.get("ptid")) for group in groups.values() if group.source.startswith("blocked_")}
-    scope_matches = len(scope_blocs) == 1 and None not in scope_blocs and len(blocked_platforms) <= 1
+    # 按销售员采集必须保留采集器确认的身份，且所有来源使用同一筛选；
+    # 财务行另逐行核对销售员，不能把个人范围与集团全量来源混合。
+    selectors = {group.filters.get('username') if isinstance(group.filters.get('username'), str)
+                 else None for group in groups.values()}
+    person_scope_matches = (selectors == {None} and capture.salesperson is None) or (
+        capture.salesperson is not None and selectors == {capture.salesperson.name})
+    scope_matches = (len(scope_blocs) == 1 and None not in scope_blocs and len(blocked_platforms) <= 1
+                     and person_scope_matches)
 
     memberships = defaultdict(dict)
     order_finance = defaultdict(list)
@@ -516,7 +545,7 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
         if any(entry.state.observed_at > live_online.evaluated_at for entry in live_online.online):
             raise ValueError('在线记录观察时间晚于准备完成时间')
         evaluated_at = live_online.evaluated_at
-        sales_conflicts = conflicting_sales_scopes((entry.state for entry in live_online.online),evaluated_at)
+        sales_conflicts = conflicting_main_sku_scopes((entry.state for entry in live_online.online),evaluated_at)
         source_versions['online'] = live_online.version
         evidence_refs['live_online_sources'] = live_online.references
         evidence_refs['online'] = [{'key':entry.state.key.model_dump(mode='json'),'ref':entry.ref}
@@ -536,7 +565,7 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
         contracts = {entry.contract.site: entry.contract for entry in evidence.contracts}
         if len(contracts) != len(evidence.contracts):
             raise ValueError("同一站点出现多份合同，需确定适用版本")
-        sales_conflicts = conflicting_sales_scopes((entry.state for entry in evidence.online), evidence.evaluated_at)
+        sales_conflicts = conflicting_main_sku_scopes((entry.state for entry in evidence.online), evidence.evaluated_at)
         source_versions.update(evidence.source_versions.model_dump())
         if evidence.fx:
             source_versions["fx"] = evidence.fx.version
@@ -601,6 +630,11 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
             continue
 
         for line in order.lines:
+            # 已核实的非亏损单不需要在线商品映射；未知财务或归属仍走异常检查。
+            if (live is not None and order_problem is None and len(order.lines) == 1
+                    and line.loss is not None and line.loss.amount >= 0 and not line.loss.abnormal
+                    and line.loss.allocation_reliable and line.loss.basis == 'order'):
+                continue
             if line.mapping is None or (shops and line.mapping.erp_shop not in shops):
                 if order_problem:
                     _add_issue(issues, order_id, sources, order_problem, line)
@@ -647,8 +681,22 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
             raise ValueError('实时在线准备包含已挂起或不在规范候选范围的在线身份')
         issues.extend(live_online.issues)
 
+    online_entries = live_online.online if live_online is not None else (evidence.online if evidence else [])
+    online_states = []
+    for entry in online_entries:
+        state = entry.state
+        if capture.department is not None and (
+            state.profit_check is None or state.profit_check.department.casefold() != capture.department.casefold()
+        ):
+            # 商品可能换过部门。同一目标只能由当前在线商品归属的部门出价。
+            issues.append({"code": "online_department_mismatch",
+                           "reason": "在线商品部门缺失或与本次采集部门不一致",
+                           "target": state.key.model_dump(mode="json")})
+            continue
+        online_states.append(state)
+
     finance_coverage = {
-        source: group.finance_coverage(scope_by_source[source]) for source, group in groups.items()
+        source: group.finance_coverage(scope_by_source[source], capture.department) for source, group in groups.items()
     }
     any_known_issue = any(known_issue for _, known_issue in finance_coverage.values())
     complete_sources = [
@@ -711,6 +759,8 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
         "references": {"lines": references, "retained_row_ids": sorted({line.row_id for line in lines}),
                        "order_finance": dict(order_finance), **evidence_refs},
     }
+    if capture.department is not None:
+        report["department"] = capture.department
     if fx is None:
         return Preparation(report, None, None)
 
@@ -718,7 +768,7 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
         as_of=max([latest_observation, live.observed_at, *(entry.state.observed_at for entry in live_online.online)]) if live_online else (max(latest_observation, live.observed_at) if live else latest_observation), business_date=business_date,
         fx_date=fx.date, fx_rates=fx.source_rates if current_fx is not None else fx.rates,
         fx_rate_unit='cny_per_currency' if current_fx is not None else 'currency_per_cny',
-        complete_sources=complete_sources, lines=lines, online=[entry.state for entry in live_online.online] if live_online else ([entry.state for entry in evidence.online] if evidence else []),
+        complete_sources=complete_sources, lines=lines, online=online_states,
         contracts=contracts, source_versions=source_versions,
     )
     return Preparation(report, snapshot, evaluated_at)

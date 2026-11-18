@@ -17,7 +17,7 @@ const decisionFields = {
   current_actual: '当前实际价', discount: '折扣系数',
   unit_loss: '单件亏损', loss_currency: '亏损原币',
   station_loss: '单件亏损（站点币）', target_actual: '目标实际价（站点币）',
-  upload_price: '含 VAT 上传价', predicted_profit: '预测正常一次毛利',
+  upload_price: '含 VAT 上传价', predicted_profit: '预测利润额（见公式版本）',
   selected_row_id: '选中来源行', source_row_ids: '候选来源行',
 } as const
 
@@ -26,7 +26,7 @@ const traceLabels: Record<string, string> = {
   fx_rates: '本日汇率（每 1 CNY）', complete_sources: '已齐备的候选来源',
   source_versions: '来源版本', source_rows: '原始候选行', online_rows: '在线快照',
   source_issues: '来源异常记录',
-  site_contract: '站点接口合同', sales_window: '前七个完整自然日',
+  site_contract: '站点接口合同', sales_window: '仓库七日参考销量',
   excluded_source_rows: '排除的候选行', candidate_unit_losses: '候选单件亏损（原币）',
   station_currency: '站点币', loss_fx_rate: '原币汇率（每 1 CNY）', station_fx_rate: '站点币汇率（每 1 CNY）',
   raw_upload_price: '舍入前含 VAT 上传价', rounded_actual: '舍入后实际价',
@@ -34,7 +34,7 @@ const traceLabels: Record<string, string> = {
   quantity: '数量', loss_grain: '亏损粒度', fx_rate: '换算汇率', fx_date: '汇率日期',
   rate: '换算汇率', station_loss: '站点币亏损', current_actual: '当前实际价',
   discount: '折扣系数', revenue_factor: '费用模型收入系数', fixed_cost: '费用模型固定成本',
-  target_actual: '目标实际价', upload_price: '含 VAT 上传价', predicted_profit: '预测一次毛利',
+  target_actual: '目标实际价', upload_price: '含 VAT 上传价', predicted_profit: '预测利润额（见公式版本）',
   retail: '含 VAT 零售价', marketing_price: '营销价', source: '来源',
 }
 const traceRows = computed(() => {

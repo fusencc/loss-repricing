@@ -238,17 +238,6 @@
           "title": "Fee Scope",
           "type": "string"
         },
-        "fee_model": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/FeeModel"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
         "profit_check": {
           "anyOf": [
             {
@@ -280,7 +269,7 @@
         "sales_basis": {
           "anyOf": [
             {
-              "const": "sales_system_web_sku_seven_days",
+              "const": "erp_goods_warehouse_seven_days_reference",
               "type": "string"
             },
             {
@@ -312,6 +301,17 @@
           "default": false,
           "title": "History Known",
           "type": "boolean"
+        },
+        "recent_price_log": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RecentPriceLog"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "last_increase_at": {
           "anyOf": [
@@ -382,6 +382,38 @@
         "observed_at"
       ],
       "title": "OnlineState",
+      "type": "object"
+    },
+    "RecentPriceLog": {
+      "description": "开放接口按子商品ID返回的72小时日志数量；不伪造最近生效时间。",
+      "properties": {
+        "count": {
+          "minimum": 0,
+          "title": "Count",
+          "type": "integer"
+        },
+        "window_start": {
+          "format": "date-time",
+          "title": "Window Start",
+          "type": "string"
+        },
+        "window_end": {
+          "format": "date-time",
+          "title": "Window End",
+          "type": "string"
+        },
+        "source_id": {
+          "title": "Source Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "count",
+        "window_start",
+        "window_end",
+        "source_id"
+      ],
+      "title": "RecentPriceLog",
       "type": "object"
     },
     "SiteContract": {

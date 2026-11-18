@@ -23,12 +23,13 @@ def check_originals(capture):
         # 合成样例可能只有归档投影，报告不计入原件通过数。
         if capture.get("synthetic") and not files:
             continue
-        finance_batches = [batch for batch in group.get("batches", []) if batch.get("status") in {"complete", "partial"}]
-        numbers = [batch.get("number") for batch in finance_batches]
-        numbered = all(type(number) is int and number == index for index, number in enumerate(numbers, 1))
+        batches = group.get("batches", [])
+        numbered = all(type(batch.get("number")) is int and batch["number"] == index
+                       for index, batch in enumerate(batches, 1))
         if not numbered:
             failures.append({"source": source, "reason": "finance_batch_number_mismatch"})
-        finance_names = [f"{source}-order-finance-{number:03d}.xlsx" for number in numbers] if numbered else []
+        finance_batches = [batch for batch in batches if batch.get("status") in {"complete", "partial"}]
+        finance_names = [f"{source}-order-finance-{batch['number']:03d}.xlsx" for batch in finance_batches] if numbered else []
         loss_name = f"{source}-loss-orders.xlsx"
         expected = dict.fromkeys(finance_names, BUSINESS_FIELDS)
         if source.startswith("loss_") and group["list_complete"]:

@@ -32,8 +32,8 @@ def test_workflow_archives_only_ready_prices_and_preserves_unresolved_orders(tmp
     root = Path(result['artifact_dir'])
     pending = json.loads((root / 'pending-prices.json').read_text())
     assert result['status'] == 'needs_attention'  # 第三笔订单缺明细亏损，不能宣称全部闭环。
-    assert result['ready_prices'] == 1
-    assert len(pending['decisions']) == 1
+    assert result['ready_prices'] == 2
+    assert len(pending['decisions']) == 2
     price = pending['decisions'][0]
     assert price['key']['item_id'] == '0001001'
     assert price['upload_price'] == '20.80'
@@ -41,7 +41,7 @@ def test_workflow_archives_only_ready_prices_and_preserves_unresolved_orders(tmp
     assert json.loads(price['selected_row_id']) == ['000001', '01']
     unresolved = json.loads((root / 'unresolved.json').read_text())
     assert any(row['code'] == 'missing_line_loss' for row in unresolved['issues'])
-    assert any(row['reason_code'] == 'sales_protection' for row in unresolved['decisions'])
+    assert not any(row['reason_code'] == 'sales_protection' for row in unresolved['decisions'])
     assert pending['capture_id'] == capture_id and pending['synthetic'] is True
     assert not pending['execution_allowed']
     assert json.loads((root / 'result.json').read_text()) == result
@@ -98,9 +98,11 @@ def test_fresh_collection_runs_download_clean_evaluate_and_archive(tmp_path, mon
     def collect(settings, **kwargs):
         capture, _ = run(settings.runtime_dir)
         capture['synthetic'] = True
+        capture['department'] = kwargs['department']
         collected.update(capture)
         return capture
     monkeypatch.setattr(erp_workflow, 'capture_erp_bulk', collect)
+    monkeypatch.setattr(erp_workflow, 'ERP_DEPARTMENTS', ('Tiktok一部',))
     def company_fx(settings):
         if not fx_available:
             from app.adapters.base import SourceUnavailable
@@ -113,7 +115,10 @@ def test_fresh_collection_runs_download_clean_evaluate_and_archive(tmp_path, mon
                 'source_effective_date':None, 'date_policy':'current_config_on_usage_day',
                 'source_rates':{'CNY':'1','PHP':'0.1'}}
     monkeypatch.setattr(erp_workflow, 'query_current_erp_fx', company_fx, raising=False)
-    result = erp_workflow.run_workflow(Settings(_env_file=None, runtime_dir=tmp_path))
+    monkeypatch.setattr(erp_workflow, 'capture_recent_price_changes',
+        lambda *args,**kwargs:pytest.fail('没有可算价目标时不应查询调价日志'))
+    workflow = erp_workflow.run_workflow(Settings(_env_file=None, runtime_dir=tmp_path))
+    result, = workflow['departments']
     assert result['mode'] == 'capture' and result['status'] == 'blocked'
     assert result['summary']['unique_orders'] == 1
     assert result['cleaning_status'] == 'saved'
@@ -121,6 +126,11 @@ def test_fresh_collection_runs_download_clean_evaluate_and_archive(tmp_path, mon
     with sqlite3.connect(tmp_path / 'erp-clean.sqlite3') as db:
         assert db.execute('select count(*) from observations').fetchone()[0] == 1
     assert (Path(result['artifact_dir']) / 'pending-prices.json').is_file()
+    candidates = json.loads(Path(result['seller_candidates_file']).read_text())
+    assert candidates['capture_id'] == result['capture_id']
+    assert candidates['department'] == 'Tiktok一部'
+    assert candidates['sellers'] == {}
+    assert [item['reason'] for item in candidates['unresolved']] == ['shop_unverified']
     assert result['fx_status'] == ('saved' if fx_available else 'unavailable')
     assert (tmp_path / 'source-fx' / 'test-company-fx.json').is_file() is fx_available
     assert any('汇率' in message for message in result['global_issues']) is not fx_available
@@ -132,7 +142,7 @@ def test_fresh_collection_runs_download_clean_evaluate_and_archive(tmp_path, mon
     assert sales_ref['acquisition_complete'] is False
     sales_file = Path(sales_ref['artifact_file'])
     assert json.loads(sales_file.read_text())['issues'][0]['code'] == 'missing_product_hint'
-    assert result['history_scope'] == 'own_program_only'
+    assert result['history_scope'] == 'official_type_2_last_72_hours'
     refs = json.loads(report_path.read_text())['references']
     assert 'company_price_history' not in refs and 'company_price_effects' not in refs
     assert refs['fixed_fees']['erp_capture_id'] == result['capture_id']

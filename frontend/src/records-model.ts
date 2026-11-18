@@ -5,6 +5,7 @@ export interface RecordItem {
   id: string; batch_id: string; key: Record<string, string>
   seller: { id: string | null; name: string }; department: string | null; shop_name: string | null
   status: ItemStatus; reason: string; updated_at: string; business_date: string; mode: string; synthetic: boolean
+  first_margin: { amount: string; currency: string } | null
   decision: { current_actual: string | null; target_actual: string | null; upload_price: string | null
     trace: { station_currency: string | null } } | null
   execution: { state: string; task_id: string | null; uploaded_price: string | null; actual_price: string | null

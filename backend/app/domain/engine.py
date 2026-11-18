@@ -16,9 +16,9 @@ from .types import (
 BEIJING = timezone(timedelta(hours=8), name="Asia/Shanghai")
 REQUIRED_SOURCES = frozenset({"loss_allocatable", "loss_pending", "blocked_allocatable", "blocked_pending"})
 # 依据：已确认设计“数据与算价说明”；完整变量/单位见 docs/calculation-and-sources.md。
-# 11/13改用自有历史、网页七日指标和指定固定费率；金额规则仍为补亏后保本。
+# 11/17近72小时保护用官方计数；用户确认删去独立一次毛利保本门槛，费用仅在完整在线利润校验。
 # 规则版本不是公司费率或接口验收标志，固定表另存内容版本。
-FORMULA_VERSION = "loss-local-history-web-sales-20261113-v3"
+FORMULA_VERSION = "loss-optional-sales-reference-20261117-v6"
 # 保存/展示为50位有效数字；档位、容限、毛利正负以 Decimal 精确比值判定。
 # 不能先把循环小数近似为50位，再用其决定整档/半档或毛利是否为零。
 SITE_CURRENCIES: dict[Site, str] = {"MY": "MYR", "PH": "PHP", "SG": "SGD", "TH": "THB", "VN": "VND"}
@@ -31,20 +31,11 @@ SITE_ERRORS = {
 }
 
 
-def valid_sales_observation(state: OnlineState, now: datetime) -> bool:
-    """用户指定销售网页七日指标；同业务日取得完整主SKU汇总才可用于21件保护。"""
-    observed = state.sales_observed_at
-    return (state.sales_complete and state.sales_7d is not None and state.sales_7d >= 0
-            and state.sales_basis == "sales_system_web_sku_seven_days" and observed is not None
-            and observed <= now and observed.astimezone(BEIJING).date() == now.astimezone(BEIJING).date())
-
-
-def conflicting_sales_scopes(
+def conflicting_main_sku_scopes(
     online: Iterable[OnlineState], now: datetime,
 ) -> set[tuple[str, str, Site, str]]:
-    """同店同站主 SKU 的销量为共享汇总，核对完整窗口数值与当日商品归属。"""
+    """只核对当日商品主SKU归属冲突；参考销量的差异不影响定价。"""
     today = now.astimezone(BEIJING).date()
-    counts = defaultdict(set)
     scopes_by_target = defaultdict(set)
     for state in online:
         if (not state.main_sku.strip() or state.observed_at > now
@@ -52,12 +43,10 @@ def conflicting_sales_scopes(
             continue
         scope = state.key.sales_scope(state.main_sku)
         scopes_by_target[state.key.target_identity()].add(scope)
-        if valid_sales_observation(state, now):
-            counts[scope].add(state.sales_7d)
-    conflicted = {scope for scope, values in counts.items() if len(values) > 1}
+    conflicted = set()
     for scopes in scopes_by_target.values():
         if len(scopes) > 1:
-            # 同一上传对象被关联到不同主 SKU，两组共享销量都不能作为保护依据。
+            # 同一上传对象被关联到不同主 SKU，相关身份定义均需核对。
             conflicted.update(scopes)
     return conflicted
 
@@ -86,7 +75,7 @@ def evaluate(snapshot: Snapshot, now: datetime) -> list[Decision]:
     """纯计算，按在线子 SKU 产出一条判定，同一身份的仓配冲突不会产生两条提价建议。"""
     today = now.astimezone(BEIJING).date()
     batch_problem = snapshot_problem(snapshot, now, today)
-    conflicted_sales = conflicting_sales_scopes(snapshot.online, now)
+    conflicted_sales = conflicting_main_sku_scopes(snapshot.online, now)
     candidate_groups: dict[str, list[SourceLine | CandidateSourceIssue]] = defaultdict(list)
     online_groups: dict[str, list[OnlineState]] = defaultdict(list)
     order_lines = defaultdict(set)
@@ -165,7 +154,7 @@ def evaluate(snapshot: Snapshot, now: datetime) -> list[Decision]:
             elif conflicted_sales and any(
                 row.key.sales_scope(row.main_sku) in conflicted_sales for row in chain(rows, states)
             ):
-                problem = ("conflicting_main_sku_sales", "共享主 SKU 的在线归属或七日销量存在冲突")
+                problem = ("conflicting_main_sku_sales", "共享主 SKU 的在线归属存在冲突")
             results.append(_decide(snapshot, now, problem, key, rows, states, multi_line_orders, issues))
     return results
 
@@ -215,7 +204,7 @@ def _decide(
         "source_rows": [row.model_dump(mode="json") for row in rows],
         "online_rows": [state.model_dump(mode="json") for state in states],
         "site_contract": contract.model_dump(mode="json") if contract else None,
-        "sales_basis": "sales_system_web_sku_seven_days",
+        "sales_policy": "optional_reference_only",
     }
     if issues:
         issue_trace = []
@@ -297,35 +286,36 @@ def _decide(
     if online.last_changed_at is not None and online.last_changed_at > online.observed_at:
         return finish("stale_online", "价格变更时间晚于该价格的观察时间")
 
-    # 提交结果未知需继续锁定；72 小时只按已经确认生效的时间计算。
+    # 未完成提交持续锁定；真实近期调价保护使用官方日志计数。
     if online.pending_submission:
         return finish("pending_submission", "已有未完成核验的提交")
     if not online.history_known:
-        return finish("unknown_history", "缺少可确认的生效历史")
+        return finish("unknown_history", "缺少可确认的近72小时调价日志")
     if online.last_increase_at is not None and online.last_increase_at > now:
         return finish("invalid_history", "上次确认生效时间晚于评估时间")
     if online.protected:
         return finish("manual_protection", "命中人工保护名单", status="本轮不调")
     if online.current_margin >= 0:
         return finish("current_margin_nonnegative", "当前一次毛利已不亏损", status="本轮不调")
-    if online.last_increase_at is not None:
+    if online.recent_price_log is not None:
+        history = online.recent_price_log
+        if (not history.source_id or history.window_end-history.window_start != timedelta(hours=72)
+                or history.window_end > now
+                or history.window_end.astimezone(BEIJING).date()!=snapshot.business_date):
+            return finish("invalid_history", "开放调价日志查询窗口无效或不属于本业务日")
+        if history.count > 0:
+            return finish("recent_price_change", "近72小时存在调价日志，本轮不调", status="本轮不调")
+    elif online.last_increase_at is not None:
         elapsed = now.astimezone(timezone.utc) - online.last_increase_at.astimezone(timezone.utc)
         if elapsed < timedelta(hours=72):
             return finish("recent_increase", "距离上次确认生效不足 72 小时", status="本轮不调")
 
-    # 销量来源是同店同站的主 SKU 汇总。在线子 SKU 共用销量保护，独立取亏损值。
-    if not valid_sales_observation(online, now):
-        return finish("invalid_sales", "缺少本业务日完整的销售网页主SKU七日销量")
-    if online.sales_7d >= 21:
-        return finish("sales_protection", "主 SKU 销售网页七日销量达到 21 件", status="本轮不调")
+    # 2026-11-17用户取消销量保护：开放接口仓库销量仅供参考，缺失不阻断。
     if online.activity_locked:
         return finish("activity_locked", "商品活动限制当前提价")
     if not online.sellable:
         return finish("not_sellable", "子 SKU 当前不可售")
 
-    model = online.fee_model
-    if model is None or not model.verified or not model.version.strip():
-        return finish("unverified_fee_model", "缺少经确认并带版本的公司一次毛利模型")
     if (
         contract is None
         or contract.site != key.site
@@ -343,8 +333,6 @@ def _decide(
         return finish("unverified_online_profit", "缺少库存分流、部门费率及完整在线利润公式")
     if problem := profit_check.problem(now, snapshot.business_date):
         return finish("unverified_online_profit", problem)
-    if model.revenue_factor <= 0 or model.fixed_cost < 0:
-        return finish("unverified_fee_model", "正常一次毛利模型不能求得保本价")
 
     from_rate = snapshot.fx_rates.get(loss_currency)
     to_rate = snapshot.fx_rates.get(station_currency)
@@ -391,15 +379,14 @@ def _decide(
         # 对已核实仿射公式一次求保本下限，等价于继续提价到不亏；不设1%目标。
         initial_target = MoneyRatio(current) + station_ratio
         online_floor = profit_check.break_even()
-        normal_floor = MoneyRatio(model.fixed_cost, model.fixed_cost_divisor) / MoneyRatio(model.revenue_factor)
-        target_ratio = max(initial_target, online_floor, normal_floor)
+        target_ratio = max(initial_target, online_floor)
         discount = MoneyRatio(current, retail).decimal()
         # 含 VAT 上传价 = T×R/P；按精确商余数舍入，可支持0.025档位及半档边界。
         raw_ratio = target_ratio * MoneyRatio(retail) / MoneyRatio(current)
         upload_price = raw_ratio.round_to_step(contract.price_step, contract.rounding)
 
         # 原合同舍入不得把已达到的保本价再次舍入到负利润；最低可用上传档位向上取整。
-        floor_upload = (max(online_floor, normal_floor) * MoneyRatio(retail) / MoneyRatio(current)).round_to_step(
+        floor_upload = (online_floor * MoneyRatio(retail) / MoneyRatio(current)).round_to_step(
             contract.price_step, "ROUND_UP")
         upload_price = max(upload_price, floor_upload)
         rounded_ratio = MoneyRatio(upload_price) * MoneyRatio(current) / MoneyRatio(retail)
@@ -407,13 +394,11 @@ def _decide(
         tolerance = allowed_error(key.site)
         online_target_profit = profit_check.model.profit_exact(target_ratio)
         online_rounded_profit = profit_check.model.profit_exact(rounded_ratio)
-        target_profit_ratio = model.profit_exact(target_ratio)
-        rounded_profit_ratio = model.profit_exact(rounded_ratio)
         # 下面的有限小数仅用于持久化/展示；分支仍使用精确比值，不给负毛利加容差。
         unit_loss, station_loss = unit_ratio.decimal(), station_ratio.decimal()
         target_actual, raw_upload = target_ratio.decimal(), raw_ratio.decimal()
         rounded_actual, error = rounded_ratio.decimal(), error_ratio.decimal()
-        target_profit, rounded_profit = target_profit_ratio.decimal(), rounded_profit_ratio.decimal()
+        target_profit, rounded_profit = online_target_profit.decimal(), online_rounded_profit.decimal()
     except DecimalException:
         return finish("invalid_calculation", "价格、汇率或费用模型超出可计算范围")
 
@@ -448,6 +433,4 @@ def _decide(
         return finish("rounding_error", "站点价格档位导致实际价无效或超出误差容限", **prices)
     if online_target_profit.numerator < 0 or online_rounded_profit.numerator < 0:
         return finish("online_profit_shortfall", "目标价或档位后在线利润率仍为负", **prices)
-    if target_profit_ratio.numerator < 0 or rounded_profit_ratio.numerator < 0:
-        return finish("fee_shortfall", "直接补亏后的目标价或舍入后实际价仍亏损", **prices)
-    return finish("ready", "补亏价格通过站点精度、正常一次毛利及库存对应在线利润率核验", ready=True, **prices)
+    return finish("ready", "补亏价格通过站点精度、库存对应完整在线利润率核验", ready=True, **prices)

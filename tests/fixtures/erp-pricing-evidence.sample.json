@@ -159,12 +159,6 @@
         "protected": false,
         "activity_locked": false,
         "sellable": true,
-        "fee_model": {
-          "revenue_factor": "0.90",
-          "fixed_cost": "16.80",
-          "version": "sample-fee-v1",
-          "verified": true
-        },
         "profit_check": {
           "overseas_stock": "0",
           "mode": "direct",
@@ -178,7 +172,7 @@
             "verified": true
           }
         },
-        "sales_basis": "sales_system_web_sku_seven_days",
+        "sales_basis": "erp_goods_warehouse_seven_days_reference",
         "sales_observed_at": "2026-11-09T14:45:00+08:00"
       }
     },
@@ -209,12 +203,6 @@
         "protected": false,
         "activity_locked": false,
         "sellable": true,
-        "fee_model": {
-          "revenue_factor": "0.90",
-          "fixed_cost": "28.00",
-          "version": "sample-fee-v1",
-          "verified": true
-        },
         "profit_check": {
           "overseas_stock": "0",
           "mode": "direct",
@@ -228,7 +216,7 @@
             "verified": true
           }
         },
-        "sales_basis": "sales_system_web_sku_seven_days",
+        "sales_basis": "erp_goods_warehouse_seven_days_reference",
         "sales_observed_at": "2026-11-09T14:45:00+08:00"
       }
     }

@@ -46,7 +46,7 @@ def seed_items(client):
         s.add(Batch(id='b',run_key='b',business_date='2026-11-05',mode='demo',status='done',created_at=stamp(),snapshot={},summary={'private':99}))
         for ident,shop in [('one','s1'),('two','s2')]:
             key=dict(platform='demo',shop_id=shop,site='MY',product_id='p',item_id=ident,sku=ident,warehouse='w')
-            online=dict(key=key,retail_price='10',marketing_price=None,current_margin='-1',currency='MYR',fee_scope='normal',fee_model={'revenue_factor':'1','fixed_cost':'5','version':'f','verified':True},observed_at=stamp(),main_sku='m')
+            online=dict(key=key,retail_price='10',marketing_price=None,current_margin='-1',currency='MYR',fee_scope='normal',observed_at=stamp(),main_sku='m')
             s.add(Item(id=ident,batch_id='b',variant_id=VariantKey.model_validate(key).identity(),key=key,status='待处理',phase='blocked',reason='x',decision={'trace':{'online_rows':[online]}},updated_at=stamp()))
         s.add(Job(id='private-job',dedupe_key='j',kind='run',state='queued',payload={'item_id':'two'},batch_id='b',lease_until=0,created_at=stamp()))
     original_collect=client.app.state.adapter.collect

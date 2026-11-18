@@ -30,11 +30,10 @@ def sample(*, loss="-2", quantity="1", basis="unit", currency="CNY", current="10
                             marketing_price=current, current_margin="-0.05", fee_scope="normal",
                             profit_check=OnlineProfitCheck(overseas_stock="0",mode="direct",department="TEST",
                                 inventory_observed_at=NOW,source_ref="synthetic/profit",
-                                model=FeeModel(revenue_factor="1",fixed_cost="0",version="synthetic-online-v1",verified=True)),
+                                model=FeeModel(revenue_factor=factor,fixed_cost=cost,version="synthetic-online-v1",verified=True)),
                             observed_at=NOW, sales_7d=0, sales_complete=True, history_known=True,
-                            sales_basis="sales_system_web_sku_seven_days",
-                            sales_observed_at=NOW, fee_model=FeeModel(
-                                revenue_factor=factor, fixed_cost=cost, version="synthetic-v1", verified=True))],
+                            sales_basis="erp_goods_warehouse_seven_days_reference",
+                            sales_observed_at=NOW)],
         contracts={"MY": SiteContract(site="MY", verified=True, price_step=step, rounding=rounding,
                                       upload_column="税后价格", version="synthetic-v1", warehouses=["direct"])},
         complete_sources=["loss_allocatable", "loss_pending", "blocked_allocatable", "blocked_pending"],
@@ -59,7 +58,7 @@ def test_documented_synthetic_example_and_formula_provenance():
     assert result.selected_row_id == "r1"
     assert (result.unit_loss, result.discount, result.target_actual, result.upload_price,
             result.predicted_profit) == tuple(map(Decimal, ["1", "0.5", "11", "22", "0.4"]))
-    assert result.trace["formula_version"] == FORMULA_VERSION == "loss-local-history-web-sales-20261113-v3"
+    assert result.trace["formula_version"] == FORMULA_VERSION == "loss-optional-sales-reference-20261117-v6"
     assert result.trace["decimal_precision"] == 50
 
 
@@ -182,7 +181,6 @@ def test_equivalent_exact_losses_tie_break_by_row_id():
 
 @pytest.mark.parametrize(("section", "field", "reason"), [
     ("lines", "allocation_reliable", "no_valid_loss"),
-    ("online", "sales_complete", "invalid_sales"),
     ("online", "history_known", "unknown_history"),
 ])
 def test_missing_confirmation_does_not_default_to_approval(section, field, reason):

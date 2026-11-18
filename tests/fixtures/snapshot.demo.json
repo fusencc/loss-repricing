@@ -397,12 +397,6 @@
       "marketing_price": "10",
       "current_margin": "-0.05",
       "fee_scope": "normal",
-      "fee_model": {
-        "revenue_factor": "0.9",
-        "fixed_cost": "9.5",
-        "version": "demo-no-marketing-v1",
-        "verified": true
-      },
       "observed_at": "2026-11-05T03:33:10.203250Z",
       "sales_7d": 6,
       "sales_complete": true,
@@ -425,7 +419,7 @@
           "verified": true
         }
       },
-      "sales_basis": "sales_system_web_sku_seven_days",
+      "sales_basis": "erp_goods_warehouse_seven_days_reference",
       "sales_observed_at": "2026-11-05T03:33:10.203250Z"
     },
     {
@@ -444,12 +438,6 @@
       "marketing_price": "10",
       "current_margin": "-0.05",
       "fee_scope": "normal",
-      "fee_model": {
-        "revenue_factor": "0.9",
-        "fixed_cost": "9.5",
-        "version": "demo-no-marketing-v1",
-        "verified": true
-      },
       "observed_at": "2026-11-05T03:33:10.203250Z",
       "sales_7d": 6,
       "sales_complete": true,
@@ -472,7 +460,7 @@
           "verified": true
         }
       },
-      "sales_basis": "sales_system_web_sku_seven_days",
+      "sales_basis": "erp_goods_warehouse_seven_days_reference",
       "sales_observed_at": "2026-11-05T03:33:10.203250Z"
     },
     {
@@ -491,12 +479,6 @@
       "marketing_price": "10",
       "current_margin": "-0.05",
       "fee_scope": "normal",
-      "fee_model": {
-        "revenue_factor": "0.9",
-        "fixed_cost": "9.5",
-        "version": "demo-no-marketing-v1",
-        "verified": true
-      },
       "observed_at": "2026-11-05T03:33:10.203250Z",
       "sales_7d": 21,
       "sales_complete": true,
@@ -519,7 +501,7 @@
           "verified": true
         }
       },
-      "sales_basis": "sales_system_web_sku_seven_days",
+      "sales_basis": "erp_goods_warehouse_seven_days_reference",
       "sales_observed_at": "2026-11-05T03:33:10.203250Z"
     },
     {
@@ -538,12 +520,6 @@
       "marketing_price": "10",
       "current_margin": "-0.05",
       "fee_scope": "normal",
-      "fee_model": {
-        "revenue_factor": "0.9",
-        "fixed_cost": "9.5",
-        "version": "demo-no-marketing-v1",
-        "verified": true
-      },
       "observed_at": "2026-11-05T03:33:10.203250Z",
       "sales_7d": 6,
       "sales_complete": true,
@@ -566,7 +542,7 @@
           "verified": true
         }
       },
-      "sales_basis": "sales_system_web_sku_seven_days",
+      "sales_basis": "erp_goods_warehouse_seven_days_reference",
       "sales_observed_at": "2026-11-05T03:33:10.203250Z"
     },
     {
@@ -585,12 +561,6 @@
       "marketing_price": "100000",
       "current_margin": "-0.05",
       "fee_scope": "normal",
-      "fee_model": {
-        "revenue_factor": "0.9",
-        "fixed_cost": "90500.0",
-        "version": "demo-no-marketing-v1",
-        "verified": true
-      },
       "observed_at": "2026-11-05T03:33:10.203250Z",
       "sales_7d": 6,
       "sales_complete": true,
@@ -613,7 +583,7 @@
           "verified": true
         }
       },
-      "sales_basis": "sales_system_web_sku_seven_days",
+      "sales_basis": "erp_goods_warehouse_seven_days_reference",
       "sales_observed_at": "2026-11-05T03:33:10.203250Z"
     },
     {
@@ -632,12 +602,6 @@
       "marketing_price": "10",
       "current_margin": "-0.05",
       "fee_scope": "normal",
-      "fee_model": {
-        "revenue_factor": "0.9",
-        "fixed_cost": "9.5",
-        "version": "demo-no-marketing-v1",
-        "verified": true
-      },
       "observed_at": "2026-11-05T03:33:10.203250Z",
       "sales_7d": 6,
       "sales_complete": true,
@@ -660,7 +624,7 @@
           "verified": true
         }
       },
-      "sales_basis": "sales_system_web_sku_seven_days",
+      "sales_basis": "erp_goods_warehouse_seven_days_reference",
       "sales_observed_at": "2026-11-05T03:33:10.203250Z"
     },
     {
@@ -679,12 +643,6 @@
       "marketing_price": "10",
       "current_margin": "-0.05",
       "fee_scope": "normal",
-      "fee_model": {
-        "revenue_factor": "0.9",
-        "fixed_cost": "9.5",
-        "version": "demo-no-marketing-v1",
-        "verified": true
-      },
       "observed_at": "2026-11-05T03:33:10.203250Z",
       "sales_7d": 6,
       "sales_complete": true,
@@ -707,7 +665,7 @@
           "verified": true
         }
       },
-      "sales_basis": "sales_system_web_sku_seven_days",
+      "sales_basis": "erp_goods_warehouse_seven_days_reference",
       "sales_observed_at": "2026-11-05T03:33:10.203250Z"
     },
     {
@@ -726,12 +684,6 @@
       "marketing_price": "10",
       "current_margin": "0.03",
       "fee_scope": "normal",
-      "fee_model": {
-        "revenue_factor": "0.9",
-        "fixed_cost": "9.5",
-        "version": "demo-no-marketing-v1",
-        "verified": true
-      },
       "observed_at": "2026-11-05T03:33:10.203250Z",
       "sales_7d": 6,
       "sales_complete": true,
@@ -754,7 +706,7 @@
           "verified": true
         }
       },
-      "sales_basis": "sales_system_web_sku_seven_days",
+      "sales_basis": "erp_goods_warehouse_seven_days_reference",
       "sales_observed_at": "2026-11-05T03:33:10.203250Z"
     }
   ],

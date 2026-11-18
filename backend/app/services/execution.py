@@ -17,6 +17,7 @@ from app.domain.types import Decision, VariantKey
 from app.domain.engine import evaluate, allowed_error, snapshot_problem
 from app.domain.money import MoneyRatio
 from app.adapters.base import SourceUnavailable, SubmitResult
+from app.adapters.official_price_logs import capture_recent_price_changes, recent_price_log_for
 from app.adapters.normalization import money
 from app.services.store import utcnow, stamp, parse_stamp, BEIJING, settings_value, settings_for_submit, pause_site, enqueue, is_erp_reconciliation, write_decisions
 from app.services.coordination import automation_gate, authorization_snapshot, lock_authorization
@@ -28,44 +29,33 @@ class PricingService:
         self.factory, self.adapter, self.config = factory, adapter, settings
 
     def _enrich(self, snapshot):
-        """真实72小时保护仅依据本程序档案；demo/file保留各自隔离的合成/对账输入。"""
+        """真实近期调价由开放接口证明；本地档案只补充未知执行锁和人工保护。"""
         result = snapshot.model_copy(deep=True)
+        official = None
+        if self.adapter.mode == 'live':
+            official = capture_recent_price_changes(self.config,[row.key for row in result.online],now=utcnow())
+            result.source_versions['recent_price_history'] = official['source_id']
         with self.factory() as session:
             protections = session.scalars(select(Protection).where(Protection.active.is_(True))).all()
             for online in result.online:
                 guard = session.get(VariantGuard, online.key.target_identity())
                 if self.adapter.mode == 'live':
-                    # 2026-11-13用户明确暂不查询销售系统改价记录。空的自有档案可确证
-                    # 本程序尚未提价；外部传来的历史/未知提交字段不参与本程序保护。
-                    online.history_known, online.pending_submission, online.last_increase_at = True, False, None
-                    confirmed = set()
-                    executions = session.scalars(select(Execution).join(Item, Execution.item_id == Item.id)
-                        .join(Batch, Item.batch_id == Batch.id).where(Batch.mode == 'live',
-                            Execution.variant_id == online.key.target_identity())).all()
-                    for execution in executions:
-                        if execution.state == 'failed':
-                            continue
-                        if execution.state != 'verified':
-                            online.pending_submission = True
-                            continue
-                        try:
-                            evidence = execution.evidence
-                            effective = parse_stamp(evidence.get('effective_at'))
-                            if (evidence.get('mode') != 'live' or evidence.get('price_basis') != 'actual_including_vat'
-                                    or money(evidence['actual_price']) <= 0 or effective is None or effective > utcnow()):
-                                raise ValueError()
-                            confirmed.add(effective)
-                            online.last_increase_at = max(confirmed)
-                        except (ValueError, TypeError, KeyError, ArithmeticError):
-                            online.history_known = False
-                    if guard and guard.last_effective_at:
-                        effective = parse_stamp(guard.last_effective_at)
-                        if effective not in confirmed and utcnow() - effective < timedelta(hours=72):
-                            online.history_known = False
+                    online.history_known, online.pending_submission, online.last_increase_at = False, False, None
+                    online.recent_price_log = None
+                    try:
+                        online.recent_price_log = recent_price_log_for(official,online.key)
+                        online.history_known = True
+                    except (ValueError,TypeError,KeyError):
+                        pass  # 该目标保持历史未知，不影响其他有效计数。
+                    pending = session.scalar(select(Execution.id).join(Item,Execution.item_id==Item.id)
+                        .join(Batch,Item.batch_id==Batch.id).where(Batch.mode=='live',
+                            Execution.variant_id==online.key.target_identity(),
+                            Execution.state.not_in(['failed','verified'])).limit(1))
+                    online.pending_submission = pending is not None
                 if guard:
                     online.pending_submission = online.pending_submission or bool(guard.execution_id)
                     effective = parse_stamp(guard.last_effective_at)
-                    if effective and (online.last_increase_at is None or effective > online.last_increase_at):
+                    if self.adapter.mode != "live" and effective and (online.last_increase_at is None or effective > online.last_increase_at):
                         online.last_increase_at = effective
                 online.protected = online.protected or any(
                     p.shop_id == online.key.shop_id and p.site == online.key.site and p.main_sku == online.main_sku
@@ -276,10 +266,12 @@ class PricingService:
                 item.status, item.phase = "待处理", "blocked"
                 item.reason, item.updated_at = "已跨北京时间业务日，已排队重新取数计算", stamp()
 
-    def _hold(self, item_id, reason, status="待处理"):
+    def _hold(self, item_id, reason, status="待处理", *, decision=None):
         with transaction(self.factory) as session:
             item = session.get(Item, item_id)
             item.status, item.phase, item.reason, item.updated_at = status, "blocked", reason, stamp()
+            if decision is not None:
+                item.decision = decision.model_dump(mode="json")
         event('execution.blocked', item_id=item_id)
 
     def _claim(self, item_id, decision):
@@ -337,7 +329,7 @@ class PricingService:
                 return None
             cutoff = stamp(utcnow() - timedelta(hours=72))
             conditions = [VariantGuard.variant_id == identity, VariantGuard.execution_id.is_(None)]
-            if not decision.trace.get("correction_id"):
+            if self.adapter.mode != "live" and not decision.trace.get("correction_id"):
                 conditions.append(or_(VariantGuard.last_effective_at.is_(None), VariantGuard.last_effective_at <= cutoff))
             claimed = session.execute(update(VariantGuard).where(*conditions).values(execution_id=execution_id))
             if claimed.rowcount != 1:
@@ -366,6 +358,22 @@ class PricingService:
         if not allowed:
             self._hold(item_id, reason)
             return
+        if self.adapter.mode == 'live' and not manual:
+            # 批内可复用算价输入，但上传前重查该子SKU，捕获其他入口刚产生的日志。
+            official = capture_recent_price_changes(self.config,[decision.key],now=utcnow())
+            decision.trace['official_price_history_before_submit'] = official
+            try:
+                recent = recent_price_log_for(official,decision.key)
+            except (ValueError,TypeError,KeyError):
+                decision.ready, decision.status = False, '待处理'
+                decision.reason_code, decision.reason = 'unknown_history', '提交前开放调价日志未知，等待重新查询'
+                self._hold(item_id,decision.reason,decision.status,decision=decision)
+                return
+            if recent.count > 0:
+                decision.ready, decision.status = False, '本轮不调'
+                decision.reason_code, decision.reason = 'recent_price_change', '提交前查到近72小时调价日志，本轮不调'
+                self._hold(item_id,decision.reason,decision.status,decision=decision)
+                return
         execution_id = self._claim(item_id, decision)
         if not execution_id:
             return

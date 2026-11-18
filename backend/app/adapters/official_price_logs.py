@@ -1,10 +1,10 @@
-"""官方调价日志只读合同（2026-11-17实测），不提交价格、不参与72小时保护。
+"""官方调价日志只读合同（2026-11-17实测），不提交价格；近72小时保护使用官方计数。
 
 count按子商品ID/type=2/北京时间完成日期查询，不据此推断成功状态。
 latest接口只有金额，没有币种、任务ID和时间；只有和对应明细priceNew比对后，
 才能注明“本次金额与日志税前价一致”，不能把它直接当当前含税价或营销价。
 """
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
@@ -15,9 +15,9 @@ from app.adapters.base import SourceUnavailable
 from app.adapters.normalization import identity_text, money
 from app.adapters.sales_auth import SalesAuth, ORIGIN
 from app.adapters.transport_privacy import private_request
-from app.domain.engine import SITE_CURRENCIES
+from app.domain.engine import BEIJING, SITE_CURRENCIES
 from app.domain.money import MoneyRatio
-from app.domain.types import VariantKey
+from app.domain.types import VariantKey, RecentPriceLog
 from app.services.erp_capture_store import write_verified
 
 VERSION = 'official-price-log-20261117-v1'
@@ -143,3 +143,82 @@ observed_at是本次完成回读的时间，不是平台源更新时间或执行
         'operation_log_time_zone':'Asia/Shanghai', 'official_queries':official,'official_comparison':comparison,
         'official_comparison_limit':'金额相同不单独证明官方latest记录绑定本次执行；接口未返回任务ID及币种时间',
         'differences':{'actual_tax_inclusive_minus_uploaded':str((MoneyRatio(money(current['retail']))-MoneyRatio(uploaded_price)).decimal())}}
+
+
+def capture_recent_price_changes(settings, keys, *, now=None, client=None):
+    """11/17用户指定：滚动72小时内type=2日志大于0即保护，不限操作者或涨跌。
+
+    完成时间按北京时间秒精度传入；不臆造成功状态过滤或最近生效时间。
+    批量按子商品ID查询，缺行/重复/异常不等于0；独立SKU结果分别保留。
+    """
+    end = now or datetime.now(timezone.utc)
+    if end.tzinfo is None:
+        raise ValueError('调价日志查询时间缺少时区')
+    end = end.astimezone(BEIJING).replace(microsecond=0)
+    start = end - timedelta(hours=72)
+    ids = sorted({identity_text(key.item_id) for key in keys})
+    source_id = 'official-recent-price-' + uuid4().hex
+    path = Path(settings.runtime_dir) / 'official-price-history' / (source_id + '.json')
+    result = {'schema_version':'official-recent-price-v1','source_id':source_id,
+        'window_start':start.isoformat(),'window_end':end.isoformat(),'queried_at':_now(),
+        'basis':'official_type_2_completion_time','synthetic':False,'success_status_filter_confirmed':False,
+        'records':{item:{'status':'unavailable','count':None} for item in ids},
+        'queries':[],'artifact_file':str(path.resolve())}
+    owned = client is None
+    client = client or httpx.Client(timeout=40,trust_env=False,follow_redirects=False)
+    auth = SalesAuth(settings,client)
+    context = private_request.set(True)
+    try:
+        for offset in range(0,len(ids),100):
+            batch = ids[offset:offset+100]
+            body = {'sellerSkuIds':batch,'type':2,'completeTimeStart':start.strftime('%Y-%m-%d %H:%M:%S'),
+                'completeTimeEnd':end.strftime('%Y-%m-%d %H:%M:%S')}
+            query = {'method':'POST','path':COUNT_PATH,'request':body,'status':'unavailable'}
+            try:
+                if settings.vendor_api_url.rstrip('/') != ORIGIN:
+                    raise SourceUnavailable('官方日志来源地址未确认')
+                response = client.post(ORIGIN+COUNT_PATH,json=body,
+                    headers={'Authorization':'Bearer '+auth.get_token()},timeout=40,follow_redirects=False)
+                query.update(http_status=response.status_code,response_sha256=sha256(response.content).hexdigest())
+                response.raise_for_status()
+                value = response.json()
+                if not isinstance(value,dict) or type(value.get('resp_code')) is not int:
+                    raise ValueError('官方日志响应无效')
+                query['response_code'] = value['resp_code']
+                if value['resp_code'] != 0:
+                    query['status'] = 'business_error'
+                else:
+                    rows = value.get('datas')
+                    if not isinstance(rows,list):raise ValueError('官方日志列表无效')
+                    query['status'] = 'ok'
+                    for item in batch:
+                        matches = [r for r in rows if isinstance(r,dict) and r.get('sellerSkuId')==item]
+                        valid = (len(matches)==1 and type(matches[0].get('count')) is int and matches[0]['count']>=0)
+                        result['records'][item] = {'status':'ok' if valid else 'invalid_response',
+                            'count':matches[0]['count'] if valid else None}
+            except (httpx.HTTPError,SourceUnavailable) as error:
+                query.update(status='transport_error',error_kind=type(error).__name__)
+            except (ValueError,TypeError,KeyError) as error:
+                query.update(status='invalid_response',error_kind=type(error).__name__)
+            if query['status']!='ok':
+                for item in batch:result['records'][item]={'status':query['status'],'count':None}
+            result['queries'].append(query)
+    finally:
+        private_request.reset(context)
+        if owned:client.close()
+    result['completed_at'] = _now()
+    result['acquisition_complete'] = all(r['status']=='ok' for r in result['records'].values())
+    write_verified(path,result)
+    return result
+
+
+def recent_price_log_for(source, key):
+    """只接受当前目标明确返回的计数，未知不返回零。"""
+    row = source['records'].get(key.item_id)
+    if not row or row.get('status')!='ok':
+        raise ValueError('近72小时开放调价日志查询失败或缺少本子SKU结果')
+    recent = RecentPriceLog(count=row['count'],window_start=source['window_start'],
+        window_end=source['window_end'],source_id=source['source_id'])
+    if not recent.source_id or recent.window_end-recent.window_start != timedelta(hours=72):
+        raise ValueError('开放调价日志来源窗口不是72小时')
+    return recent

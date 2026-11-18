@@ -36,14 +36,12 @@ class SyntheticAdapter:
                               currency="MYR", basis="unit"))
             online.append(dict(key=key, main_sku=f"MAIN{index}", currency="MYR", retail_price="20",
                                marketing_price="10", current_margin="-0.5", fee_scope="normal",
-                               fee_model=dict(revenue_factor="0.9", fixed_cost="9.5",
-                                              version="synthetic-fees-v1", verified=True),
                                profit_check=dict(overseas_stock="0", mode="direct", department="TEST",
                                                  inventory_observed_at=self.clock[0], source_ref="synthetic-inventory",
                                                  model=dict(revenue_factor="1", fixed_cost="0",
                                                             version="synthetic-online-v1", verified=True)),
                                observed_at=self.clock[0], sales_7d=6, history_known=True, sales_complete=True,
-                               sales_basis="sales_system_web_sku_seven_days", sales_observed_at=self.clock[0]))
+                               sales_basis="erp_goods_warehouse_seven_days_reference", sales_observed_at=self.clock[0]))
         return Snapshot.model_validate(dict(
             as_of=self.clock[0], business_date=day, fx_date=day, fx_rates={"CNY": "1", "MYR": "0.6"},
             lines=lines, online=online,
@@ -368,6 +366,8 @@ def test_live_price_can_expire_while_waiting_for_final_authorization(safety_cont
     factory, cfg, adapter, clock = safety_context
     cfg.live_submit_enabled = True
     adapter.mode = "live"
+    from test_user_pricing_policy import mock_official_zero
+    mock_official_zero(monkeypatch,clock)
     adapter.readiness = lambda: {"contract_ready": True, "verified_sites": ["MY"]}
     read_settings = execution_service.settings_for_submit
     first = True
@@ -409,6 +409,8 @@ def test_live_first_incomplete_snapshot_requeues_daily_job(safety_context, monke
 
     factory, cfg, adapter, clock = safety_context
     adapter.mode = "live"
+    from test_user_pricing_policy import mock_official_zero
+    mock_official_zero(monkeypatch,clock)
     collect = adapter.collect
 
     def incomplete_first_read(day):

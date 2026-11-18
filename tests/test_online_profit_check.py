@@ -78,7 +78,7 @@ def test_missing_profit_evidence_only_blocks_the_affected_variant():
 def test_zero_price_after_rounding_is_rejected_without_dividing_by_zero():
     result=single(line_fields={"loss_amount":"-0.001"},
         online_fields={"retail_price":"0.001", "profit_check":check(factor="1",cost="0"),
-            "fee_model":FeeModel(revenue_factor="1",fixed_cost="0",version="synthetic",verified=True)},
+            },
         snapshot_fields={"contracts":{"MY":contract(rounding="ROUND_DOWN")}})
     assert not result.ready and result.reason_code=="rounding_error"
     assert result.trace["online_profit"]["rounded_margin"] is None

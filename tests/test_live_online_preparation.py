@@ -27,8 +27,8 @@ def sources():
         'company_activity_locked':True,'current_variants':[variant],
         'data':{'id':'P1','product_status':'ACTIVATE','status':'ACTIVATE','is_not_for_sale':False,'skus':[{
             'id':'I1','seller_sku':'S1','price':{'sale_price':'61.49','currency':'PHP'},'status_info':{'status':'NORMAL'}}]}}]}
-    window={'schema_version':'sales-web-sku-seven-days-v2','source_id':'WINDOW',**flags,
-        'basis':'sales_system_web_sku_seven_days','volumes':[{'erp_shop':'SHOPPH','main_sku':'M1','quantity':0,'complete':True,'observed_at':flags['completed_at']}]}
+    window={'schema_version':'erp-goods-sales-reference-v1','source_id':'WINDOW',**flags,
+        'basis':'erp_goods_warehouse_seven_days_reference','records':{'S1':{'sku':'S1','status':'ok','observed_at':flags['completed_at'],'warehouses':[{'storage_name':'WH-PH','quantity':0,'status':'ok'}]}}}
     local={'schema_version':'local-live-price-history-v1','source_id':'LOCAL',**flags,
         'acquisition_complete':True,'archive_binding':'injected_synthetic_test','executions':[],'guards':[],'protections':[]}
     rate['vatRate']='0'
@@ -37,7 +37,11 @@ def sources():
           'product_inputs':[{'shop_name':'SHOPPH','product_id':'P1','item_id':'I1','local_sku':'S1',
             'public_commission_rate':'0','direct_vat_rate':None,'source_cells':'synthetic!A1'}]}}
     return capture,[target],{'sales':sales,'platform':platform,'window':window,
-        'local_history':local,'fixed_fees':fixed}
+        'local_history':local,'fixed_fees':fixed,'official_history':{
+            'schema_version':'official-recent-price-v1','basis':'official_type_2_completion_time','synthetic':True,
+            'source_id':'OFFICIAL','artifact_file':'synthetic.json','completed_at':flags['completed_at'],
+            'window_start':'2026-11-08T02:00:30+00:00','window_end':'2026-11-11T02:00:30+00:00',
+            'records':{'I1':{'status':'ok','count':0},'I2':{'status':'ok','count':0}}}}
 
 
 def test_live_online_uses_actual_platform_price_explicit_activity_exact_fee_and_verified_zero_window():
@@ -48,19 +52,18 @@ def test_live_online_uses_actual_platform_price_explicit_activity_exact_fee_and_
     assert state['activity_locked'] is True and state['sellable'] is True
     assert state['history_known'] and state['sales_complete'] and state['sales_7d']==0
     assert state['protected'] is False and state['pending_submission'] is False
-    assert Decimal(state['current_margin'])<0 and state['fee_model']['fixed_cost_divisor']=='0.1042'
+    assert Decimal(state['current_margin'])<0 and state['profit_check']['model']['fixed_cost_divisor']=='0.1042'
     assert r['contracts'][0]['contract']['rounding']=='ROUND_UP'
     assert r['contracts'][0]['contract']['price_step']=='0.01'
     assert r['contracts'][0]['contract']['upload_column']=='税后价格'
     assert r['pricing_ready'] is False
 
 
-@pytest.mark.parametrize('case',['price_changed','missing_volume','wrong_main','fee_override','missing_protection_archive'])
+@pytest.mark.parametrize('case',['price_changed','wrong_main','fee_override','missing_protection_archive'])
 def test_unknown_live_input_never_becomes_optimistic_online_state(case):
     from app.adapters.live_online_preparation import prepare_online_states
     c,t,s=sources()
     if case=='price_changed':s['platform']['records'][0]['data']['skus'][0]['price']['sale_price']='62'
-    elif case=='missing_volume':s['window']['volumes']=[]
     elif case=='wrong_main':s['platform']['records'][0]['company_parent']['localMainSku']='OTHER'
     elif case=='fee_override':s['fixed_fees']['config']['product_inputs'].append({**s['fixed_fees']['config']['product_inputs'][0],'public_commission_rate':'10'})
     else:s['local_history']['acquisition_complete']=False
@@ -76,14 +79,12 @@ def test_foreign_sample_source_cannot_be_joined_to_live_bundle():
     with pytest.raises(ValueError):prepare_online_states(c,t,**s)
 
 
-def test_reference_sales_without_full_main_coverage_do_not_allow_pricing():
+def test_missing_reference_sales_does_not_block_pricing_preparation():
     from app.adapters.live_online_preparation import prepare_online_states
-    c,t,s=sources()
-    s['window']['volumes'][0].update(quantity=2,complete=False,discovered_scope_complete=True)
-    s['window']['erp_main_catalog_exhaustive']=False
+    c,t,s=sources();s['window']['records']={}
     r=prepare_online_states(c,t,**s)
-    assert not r['online']
-    assert any('七日销量窗口不完整' in issue['reason'] for issue in r['issues'])
+    assert len(r['online'])==1 and not r['issues']
+    assert r['online'][0]['state']['sales_7d'] is None
 
 
 def test_released_verified_guard_after_72_hours_is_not_a_permanent_submission_lock():
@@ -97,17 +98,19 @@ def test_released_verified_guard_after_72_hours_is_not_a_permanent_submission_lo
     state=prepare_online_states(c,t,**s)['online'][0]['state']
     assert state['history_known'] and not state['pending_submission']
     from app.adapters.normalization import source_time
-    assert source_time(state['last_increase_at'])==source_time(effective)
+    assert state['last_increase_at'] is None
+    assert state['recent_price_log']['count']==0
 
 
-def test_unlinked_recent_guard_requires_history_proof_instead_of_inventing_effective_price():
+def test_released_local_guard_does_not_replace_official_history():
     from app.adapters.live_online_preparation import prepare_online_states
     from app.domain.types import VariantKey
     c,t,s=sources();key=VariantKey.model_validate(t[0]['key'])
     s['local_history']['guards']=[{'variant_id':key.target_identity(),'execution_id':None,
         'last_effective_at':'2026-11-11T01:30:00+00:00','linked_mode':None}]
     state=prepare_online_states(c,t,**s)['online'][0]['state']
-    assert state['history_known'] is False and state['last_increase_at'] is None
+    assert state['history_known'] is True and state['last_increase_at'] is None
+    assert state['recent_price_log']['count']==0
 
 
 

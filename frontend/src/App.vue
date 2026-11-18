@@ -421,7 +421,7 @@ onUnmounted(() => {
   <RecordsPage v-if="page === 'records'" :mode="mode" />
   <main v-else-if="!initialized" class="login-shell"><p class="startup">正在连接运营工作台…</p></main>
   <main v-else-if="!username" class="login-shell">
-    <div class="login-card">
+    <div class="login-card motion-page">
       <div class="brand-mark"><el-icon><DataAnalysis /></el-icon></div>
       <p class="eyebrow">电商运营 · 销售协作入口</p>
       <h1>亏损补亏工作台</h1>
@@ -462,7 +462,7 @@ onUnmounted(() => {
           <el-button text :icon="SwitchButton" :loading="logoutBusy" @click="logout">退出</el-button>
         </div>
       </header>
-      <main class="workspace-body">
+      <main :key="page" class="workspace-body motion-page">
         <div class="page-heading">
           <div><h1>{{ currentPage.label }}</h1><p class="muted">{{ currentPage.description }}</p></div>
           <el-button :icon="RefreshRight" :loading="loading" @click="activeBatch ? openBatch(activeBatch.id) : loadPage()">刷新</el-button>
@@ -536,7 +536,7 @@ onUnmounted(() => {
         </div>
 
         <div v-else-if="page === 'batches'" v-loading="loading" class="page-content">
-          <section v-if="activeBatch" class="panel table-panel">
+          <section v-if="activeBatch" :key="activeBatch.id" class="panel table-panel motion-reveal">
             <div class="table-toolbar">
               <div><el-button type="primary" link @click="closeBatch">返回批次列表</el-button><h2>批次 #{{ activeBatch.id }}</h2><p class="muted">{{ activeBatch.business_date }} · {{ modeLabel(activeBatch.mode) }} · {{ stateLabel(activeBatch.status) }}</p></div>
             </div>
@@ -552,7 +552,7 @@ onUnmounted(() => {
               :batch-id="activeBatch.id" :total="activeBatch.source_issue_count" />
             <ItemTable :items="activeBatch.items" empty-text="该批次没有商品记录" @select="openItem" />
           </section>
-          <section v-else class="panel table-panel">
+          <section v-else class="panel table-panel motion-reveal">
             <div class="table-toolbar"><div><h2>批次记录</h2><p class="muted">业务日期与创建时间以北京时间显示</p></div></div>
             <el-table :data="batches" row-key="id" empty-text="暂无运行批次">
               <el-table-column prop="id" label="批次 ID" min-width="110" />

@@ -92,7 +92,7 @@ def test_direct_formula_uses_weight_tiers_currency_cost_and_full_commission():
     # 21g => 首10g 5PHP + 两档4.5PHP = 14PHP；2+.3+1.3+1.4=5CNY。
     assert Decimal(result['proof']['freight_station'])==Decimal('14')
     assert result['online_model'].profit(Decimal('100'))==Decimal('16.259')
-    assert result['model'].profit(Decimal('100'))==Decimal('31.259')
+    assert 'model' not in result  # 不再输出独立的一次毛利算价模型。
 
 
 @pytest.mark.parametrize('weight,freight',[('10','5'),('10.01','9.5'),('20','9.5'),('20.01','14')])

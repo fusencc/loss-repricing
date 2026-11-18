@@ -16,7 +16,7 @@
 
 ManualLiveAdapter的成功核验生成记录，LookupResult传回服务层，随Execution.evidence
 持久化；原判定字段actual_price仍指营销实际价。官方查询失败单独留证，不推翻已有
-独立平台成功和实际价证据。官方记录不参与自有72小时历史筛选。
+独立平台成功和实际价证据。11/17用户后续已指定官方计数作为近72小时保护来源，见[当前保护规则](2026-11-17-official-history-protection-design.md)。
 
 为已核验执行提供只读补档CLI：只调用lookup，核对mode/执行ID/目标后追加price_record
 与审计记录，保留原confirmed_at/effective_at、状态和目标锁。原档案不覆盖，新增版本

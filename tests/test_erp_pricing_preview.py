@@ -48,14 +48,14 @@ def test_replay_deduplicates_by_detail_and_uses_the_existing_price_formula(sourc
     assert Decimal(decision["current_actual"]) == Decimal("18")
     assert Decimal(decision["target_actual"]) == Decimal("18.72")
     assert Decimal(decision["upload_price"]) == Decimal("20.80")
-    assert decision["trace"]["formula_version"] == "loss-local-history-web-sales-20261113-v3"
+    assert decision["trace"]["formula_version"] == "loss-optional-sales-reference-20261117-v6"
     assert json.loads(decision["selected_row_id"]) == ["000001", "01"]
     assert {tuple(json.loads(row_id)) for row_id in decision["source_row_ids"]} == {
         ("000001", "01"), ("000002", "01"), ("000002", "03")
     }
     first_line = [row for row in decision["trace"]["source_rows"] if row["order_id"] == "000001"]
     assert [row["source"] for row in first_line] == ["loss_allocatable", "blocked_allocatable"]
-    assert decisions["0001002"]["reason_code"] == "sales_protection"
+    assert decisions["0001002"]["reason_code"] == "ready"
     issue = next(issue for issue in report["issues"] if issue["code"] == "missing_line_loss")
     assert issue["order_id"] == "000003"
     assert issue["target"]["item_id"] == "0001003"
@@ -170,7 +170,7 @@ def test_admin_can_replay_and_reopen_a_saved_capture_without_creating_execution(
         response = client.post(path, json=evidence)
         assert response.status_code == 201, response.text
         report = response.json()
-        assert report["capture_id"] == capture_id and report["summary"]["ready_prices"] == 1
+        assert report["capture_id"] == capture_id and report["summary"]["ready_prices"] == 2
         report_path = f"{path}/{report['preview_id']}"
         assert client.get(report_path).json() == report
         assert client.get(f"{path}/bad-id").status_code == 422
@@ -195,7 +195,7 @@ def test_incomplete_snapshot_dates_and_online_states_fail_without_inventing_valu
     report = preview_pricing(capture, evidence)
     decisions = {item["key"]["item_id"]: item for item in report["decisions"]}
     assert decisions["0001001"]["reason_code"] == "missing_mapping"
-    assert decisions["0001002"]["reason_code"] == "sales_protection"
+    assert decisions["0001002"]["reason_code"] == "ready"
 
 
 def test_online_price_cannot_be_observed_before_its_change(source_files):
@@ -278,7 +278,7 @@ def test_duplicate_finance_rows_hold_identified_target_without_masking_source_co
     assert any(issue["order_id"] == "000003" and issue["code"] == "duplicate_finance_rows"
                for issue in report["issues"])
     assert [row["key"]["item_id"] for row in report["decisions"] if row["ready"]] == (
-        ["0001001"] if target_known else []
+        ["0001001", "0001002"] if target_known else []
     )
 
 
@@ -346,17 +346,14 @@ def test_finance_timestamps_must_follow_batch_observation_order(source_files, de
     assert "财务导出跨业务日或时点次序异常" in report["global_issues"]
 
 
-def test_same_main_sku_with_conflicting_complete_sales_blocks_siblings(source_files):
+def test_same_main_sku_with_different_reference_sales_does_not_block_siblings(source_files):
     capture, evidence = source_files
     main_sku = evidence["online"][0]["state"]["main_sku"]
     evidence["orders"][1]["lines"][1]["mapping"]["main_sku"] = main_sku
     evidence["online"][1]["state"]["main_sku"] = main_sku
     report = preview_pricing(capture, evidence)
-    assert report["decisions"] == []
-    assert {issue["target"]["item_id"] for issue in report["issues"] if issue["code"] == "conflicting_main_sku_sales"} == {
-        "0001001", "0001002",
-    }
-
+    assert len(report['decisions']) == 2
+    assert all(d['ready'] for d in report['decisions'])
 
 def test_known_erp_shop_is_required_to_bind_the_online_mapping(source_files):
     capture, evidence = source_files

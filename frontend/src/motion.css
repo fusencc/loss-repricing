@@ -1,0 +1,120 @@
+:root {
+  --motion-quick: 150ms;
+  --motion-content: 220ms;
+  --motion-surface: 260ms;
+  --motion-ease: cubic-bezier(.22, 1, .36, 1);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  /* Stable navigation and loading indicators stay outside the content motion. */
+  .motion-page {
+    animation: motion-entrance var(--motion-surface) var(--motion-ease);
+  }
+
+  .motion-reveal,
+  .alerts .el-alert,
+  .workspace-body .preview-meta,
+  .drawer-heading,
+  :is(.evidence, .source-issue-panel)[open] > :not(summary) {
+    animation: motion-reveal var(--motion-content) var(--motion-ease);
+  }
+
+  .sidebar nav a,
+  .records-departments button {
+    transition: background-color var(--motion-quick), border-color var(--motion-quick), color var(--motion-quick);
+  }
+
+  .stat-card {
+    transition: border-color var(--motion-quick), transform var(--motion-quick) var(--motion-ease);
+  }
+
+  @media (hover: hover) {
+    .stat-card:hover { transform: translateY(-2px); }
+  }
+
+  .stat-card:active { transform: translateY(0); }
+
+  .records-loading::after {
+    content: '';
+    display: block;
+    width: 26px;
+    height: 2px;
+    margin: 12px auto 0;
+    border-radius: 2px;
+    background: var(--r-mint);
+    opacity: 0;
+    animation: motion-loading 950ms ease-in-out 130ms infinite;
+  }
+
+  /* Element Plus continues to manage modal lifecycle, focus and Escape. */
+  .dialog-fade-enter-active,
+  .dialog-fade-leave-active {
+    animation: motion-overlay-in var(--motion-surface) ease-out;
+  }
+
+  .dialog-fade-leave-active {
+    animation-direction: reverse;
+  }
+
+  :is(.dialog-fade-enter-active, .dialog-fade-leave-active) .el-overlay-dialog {
+    animation: none;
+  }
+
+  .dialog-fade-enter-active .el-dialog {
+    animation: motion-dialog-in var(--motion-surface) var(--motion-ease);
+  }
+
+  .dialog-fade-leave-active .el-dialog {
+    animation: motion-dialog-in var(--motion-surface) ease-in reverse;
+  }
+
+  :is(.el-drawer-fade-enter-active, .el-drawer-fade-leave-active) {
+    transition: background-color var(--motion-surface) ease;
+  }
+
+  .el-drawer {
+    transition: transform var(--motion-surface) var(--motion-ease);
+  }
+
+  .el-loading-mask {
+    transition-duration: var(--motion-quick);
+  }
+}
+
+@keyframes motion-entrance {
+  from { opacity: .35; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes motion-reveal {
+  from { opacity: .4; }
+  to { opacity: 1; }
+}
+
+@keyframes motion-overlay-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes motion-dialog-in {
+  from { transform: translateY(12px) scale(.985); }
+  to { transform: none; }
+}
+
+@keyframes motion-loading {
+  0%, 100% { opacity: .32; transform: translateX(-12px); }
+  50% { opacity: .85; transform: translateX(12px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Dialogs, drawers, menus and toasts can be teleported outside #app. */
+  #app *,
+  .el-overlay, .el-overlay *,
+  .el-popper, .el-popper *,
+  .el-message, .el-message *,
+  .el-loading-mask, .el-loading-mask * {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}

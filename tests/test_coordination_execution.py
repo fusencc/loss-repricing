@@ -97,10 +97,12 @@ def test_takeover_does_not_release_unknown_or_stop_reconciliation(world):
         assert s.scalar(select(Execution)).state == "verified"
         assert s.get(TargetControl,key.target_identity()).mode == "manual"
 
-def test_live_without_exclusive_writer_contract_remains_closed(world):
+def test_live_without_exclusive_writer_contract_remains_closed(world,monkeypatch):
     factory,cfg,adapter,key=world
     ensure_demo_ownership(factory,[key])
     adapter.mode="live"
+    from test_user_pricing_policy import mock_official_zero
+    mock_official_zero(monkeypatch,[utcnow()])
     adapter.readiness=lambda: {"contract_ready":True,"verified_sites":["MY"]}
     cfg.live_submit_enabled=True
     PricingService(factory,adapter,cfg).run_batch("live")
@@ -140,7 +142,7 @@ def test_manual_price_requires_valid_online_sales_scope(world, identity_changes,
 
 
 
-def test_manual_correction_rejects_conflicting_complete_main_sku_sales(world):
+def test_manual_correction_ignores_reference_sales_differences(world):
     from app.services.corrections import manual_decision
 
     _, _, adapter, key = world
@@ -150,8 +152,7 @@ def test_manual_correction_rejects_conflicting_complete_main_sku_sales(world):
     sibling = key.model_copy(update={"item_id": "SIBLING"})
     snapshot.online.append(online.model_copy(update={"key": sibling, "sales_7d": 21}))
 
-    with pytest.raises(ValueError, match="销量.*冲突"):
-        manual_decision(snapshot, online, Decimal("11"), "reason", "c1", utcnow())
+    assert manual_decision(snapshot, online, Decimal("11"), "reason", "c1", utcnow()).ready
 
 
 def queued_correction(world):
@@ -403,3 +404,24 @@ def test_correction_uses_locked_current_user_and_scope(world, monkeypatch):
         decision=SimpleNamespace(key=key,trace={'correction_id':'c1'})
         allowed,reason=correction_gate(s,decision,control,locked=locked)
         assert not allowed and '权限已撤销' in reason
+
+
+@pytest.mark.parametrize('pending',[False,True])
+def test_live_manual_correction_exempts_positive_official_count_but_keeps_pending_lock(world,monkeypatch,pending):
+    from datetime import timedelta
+    from app.services.corrections import run_correction
+    factory,cfg,adapter,key=world
+    adapter.mode='live'
+    cfg.live_submit_enabled=True
+    adapter.readiness=lambda:{'contract_ready':True,'verified_sites':['MY'],'manual_targets':[key.target_identity()]}
+    def official(settings,keys,**kwargs):
+        now=utcnow()
+        return {'source_id':'synthetic-official','window_start':(now-timedelta(hours=72)).isoformat(),
+            'window_end':now.isoformat(),'records':{k.item_id:{'status':'ok','count':3} for k in keys}}
+    monkeypatch.setattr('app.services.execution.capture_recent_price_changes',official)
+    service=queued_correction(world)
+    if pending:
+        with transaction(factory) as session:
+            session.add(VariantGuard(variant_id=key.target_identity(),execution_id='pending-other'))
+    run_correction(service,'c1')
+    assert adapter.calls==(0 if pending else 1)

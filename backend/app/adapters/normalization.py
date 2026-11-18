@@ -17,10 +17,11 @@ LINE_FIELDS = KEY_FIELDS | {
 }
 ONLINE_FIELDS = KEY_FIELDS | {
     "main_sku", "currency", "retail_price", "marketing_price", "current_margin", "fee_scope",
-    "observed_at", "sales_7d", "sales_basis", "sales_observed_at", "sales_complete",
+    "observed_at",
     "protected", "activity_locked", "sellable",
-    "fee_model.revenue_factor", "fee_model.fixed_cost", "fee_model.version", "fee_model.verified", "profit_check",
+    "profit_check",
 }
+ONLINE_OPTIONAL = frozenset({"sales_7d", "sales_basis", "sales_observed_at", "sales_complete"})
 FX_FIELDS = frozenset({"fx_date", "rates"})
 LOOKUP_FIELDS = KEY_FIELDS | {"actual_price", "currency", "observed_at", "price_basis"}
 LOOKUP_OPTIONAL = frozenset({"effective_at", "row_status", "task_id", "execution_id"})
@@ -179,34 +180,30 @@ def source_line(record, spec, source):
     )
 
 
-def online_state(record, spec, fee_versions, profit_versions):
-    values = mapped(record, spec["field_map"], spec.get("constants"))
+def online_state(record, spec, profit_versions):
+    values = mapped(record, {k:v for k,v in spec["field_map"].items() if k not in ONLINE_OPTIONAL}, spec.get("constants"))
+    # 2026-11-17：销量仅作参考，缺字段/坏数量不能升级为在线身份异常并挂起其他商品。
+    reference = {}
+    try:
+        for name,path in spec["field_map"].items():
+            if name in ONLINE_OPTIONAL:reference[name]=read_path(record,path)
+        if reference:
+            if (type(reference.get('sales_7d')) is not int or reference['sales_7d']<0
+                    or reference.get('sales_basis')!='erp_goods_warehouse_seven_days_reference'
+                    or type(reference.get('sales_complete')) is not bool):
+                raise ValueError('参考销量无效')
+            reference['sales_observed_at']=source_time(reference.get('sales_observed_at'))
+    except (KeyError,IndexError,TypeError,ValueError):
+        reference={'sales_7d':None,'sales_basis':None,'sales_observed_at':None,'sales_complete':False}
+    values.update(reference)
     _validate_common(values)
-    # live来源不映射公司/平台改价历史。待PricingService读取本程序权威库后才能确认历史。
+    # 通用live来源不证明近期调价；待PricingService查询官方计数及本地未完成任务锁。
     values.update(history_known=False, last_increase_at=None, pending_submission=False)
     values["observed_at"] = source_time(values["observed_at"])
-    if values["sales_observed_at"] is not None:
-        values["sales_observed_at"] = source_time(values["sales_observed_at"])
     for name in ("retail_price", "marketing_price", "current_margin"):
         if name != "marketing_price" or values[name] is not None:
             values[name] = money(values[name])
 
-    fee_values = values["fee_model"]
-    if all(value is None for value in fee_values.values()):
-        values["fee_model"] = None
-    else:
-        version = fee_values["version"]
-        if not isinstance(version, str) or not SAFE_LABEL.fullmatch(version):
-            raise ValueError("一次毛利模型版本无效")
-        if type(fee_values["verified"]) is not bool:
-            raise ValueError("一次毛利模型审核标记无效")
-        # 系数无量纲，固定成本为站点币。经核对的站点版本才可参与利润复核。
-        values["fee_model"] = FeeModel(
-            revenue_factor=money(fee_values["revenue_factor"]),
-            fixed_cost=money(fee_values["fixed_cost"]),
-            version=version,
-            verified=fee_values["verified"] and fee_versions.get(values["key"].site) == version,
-        )
     check = values["profit_check"]
     if check is not None:
         if not isinstance(check, dict) or not isinstance(check.get("model"), dict):

@@ -11,7 +11,7 @@
 | 操作日志数量 | `/Api/tiktok-schedule-server/aibp/getOperationLogCountBySellerSkuIdsAndTypeAndCompleteTime` | sellerSkuIds使用具体子商品ID，type=2；按明确北京时间完成日期查询 |
 | 最近成功价 | `/Api/tiktok-schedule-server/aibp/getLatestSuccessPrice` | shopName、productId、sellerSkuId |
 
-当前函数一次查一个目标；不进行全店扫描、日志导出或调价。统计接口的成功状态过滤尚未
+日归档函数一次查一个目标；近期保护函数按候选子商品ID批量查询，不进行全店扫描、日志导出或调价。统计接口的成功状态过滤尚未
 确认；最新成功价只有金额，没有币种、任务ID或生效时间。不能用count>0或单个金额替代
 任务成功回执与当前价核验。两个查询独立留证，一个失败不把另一个有效结果抹掉。
 
@@ -44,8 +44,7 @@
 真实人工执行的ManualLiveAdapter.lookup在取得成功任务及当前价证据后调用官方查询，
 通过LookupResult.price_record交给PricingService，写入Execution.evidence.price_record。
 四价JSON同时存入本次执行目录。原actual_price继续表示营销实际价，公式和核验容限不变。
-官方接口失败会独立记录状态；不会把这次查询失败当成原任务失败，也不会以官方历史
-替代“本程序确认生效记录”的72小时保护规则。
+官方接口失败会独立记录状态；不会把这次查询失败当成原任务失败，也近期保护已按11/17用户指令独立改用官方日志计数，见下节。
 
 已经核验的执行可通过以下只读入口补充当前观察，不再走提交流程：
 
@@ -67,3 +66,13 @@ original-verification.json、中文价格日志存档及sha256-manifest.json。�
 
 该接入当前覆盖后端和既有人工真实执行核验链路。通用HttpAdapter未提供四价来源时保持
 原有核验行为，不伪造价格记录；前端专项展示和全店批量查询留待后续明确需求。
+
+## 近三天调价保护（2026-11-17）
+
+近72小时保护使用开放接口`getOperationLogCountBySellerSkuIdsAndTypeAndCompleteTime`，按子商品ID、type=2及北京时间完成时间查询滚动72小时。明确count>0本轮不调，明确count=0才通过；缺失、重复、异常或失败为未知，阻断对应目标。接口未确认只统计成功记录，故按存在调价日志判断，不限定操作者或涨跌，不伪造最近生效时间。本地档案保留人工保护和未完成提交锁，不再充当真实近期调价来源。
+
+`capture_recent_price_changes`按唯一子商品ID每组最多100个查询，保存请求窗口、逐SKU状态/计数、响应哈希和来源编号。参数精度为秒，范围为查询时刻减72小时至查询时刻，不扩大到四个自然日。接口起止时刻包含性未单独验收，精确落在边界秒的记录以官方返回为准，不宣称已证明恰好72小时的排除行为。
+
+ERP只读准备、人工真实适配器的输入准备和PricingService真实模式均读取这一来源。正式自动提价前再查当前目标，捕获批内缓存期间新增的外部调价日志。有记录标记“本轮不调”，查询未知标记“待处理”，保存对应判定及查询证据。独立有效SKU继续处理。经明确授权的人工修正沿用既有跳过自动72小时筛选的规则，未完成提交锁仍有效。
+
+`OnlineState.recent_price_log`保存count、window_start、window_end、source_id，计数不能转成last_increase_at。真实模式移除本地生效时间的冷却判断；demo/file仍消费各自隔离的合成/文件生效历史，不访问真实账号。原历史批次不倒填新证据。

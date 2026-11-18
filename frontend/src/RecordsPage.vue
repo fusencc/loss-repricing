@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { Download } from '@element-plus/icons-vue'
 import { api, errorMessage, timeLabel, type ItemStatus } from './api'
 import { groupBySeller, recordTone, recordStatusLabel, recordDepartments, type RecordData, type SellerGroup } from './records-model'
 import SellerRecordLogs from './SellerRecordLogs.vue'
+import RecordsDots from './RecordsDots.vue'
 import './records.css'
 
 defineProps<{ mode: string }>()
@@ -64,6 +66,25 @@ function openSeller(group: SellerGroup, event: MouseEvent) {
   dialogOpen.value = true
 }
 
+function downloadSeller(group: SellerGroup) {
+  const records = group.items.map(item => ({
+    sku: item.key.sku, shop: item.shop_name || item.key.shop_id,
+    site: item.key.site, platform: item.key.platform,
+    first_margin: item.first_margin, currency: item.decision?.trace.station_currency ?? null,
+    current_price: item.decision?.current_actual ?? null,
+    target_price: item.decision?.target_actual ?? null,
+    uploaded_price: item.execution?.uploaded_price ?? null,
+    status: item.status, updated_at: item.updated_at, synthetic: item.synthetic,
+  }))
+  const file = new Blob([JSON.stringify({ seller: group.name, department: departmentName.value, records }, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(file)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `${group.name.replace(/[\\/:*?"<>|]/g, '_')}-提价记录.json`
+  link.click()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
 function restoreFocus() {
   void nextTick(() => { if (opener?.isConnected) opener.focus() })
 }
@@ -80,10 +101,11 @@ onUnmounted(() => { ++request; controller?.abort(); window.clearInterval(timer) 
 <template>
   <div class="records-page">
     <div class="records-aura" aria-hidden="true"></div>
+    <RecordsDots />
     <main class="records-shell">
-      <header class="records-header">
+      <header class="records-header motion-page">
         <div>
-          <div class="records-title"><span class="records-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 18h16M5 14l5-5 4 3 5-7M14 5h5v5" stroke-linecap="round" stroke-linejoin="round"/></svg></span><h1>提价日志</h1></div>
+          <div class="records-title"><img class="records-mark" src="/repricing-logo.png" alt="" aria-hidden="true" /><h1>提价日志</h1></div>
         </div>
         <div class="records-header-end">
           <nav class="records-departments" aria-label="切换部门"><button v-for="entry in departments" :key="entry.id" type="button" :aria-pressed="department === entry.id" :class="{ active: department === entry.id }" aria-controls="records-list" @click="changeDepartment(entry.id)">{{ entry.name }}</button></nav>
@@ -92,24 +114,27 @@ onUnmounted(() => { ++request; controller?.abort(); window.clearInterval(timer) 
 
       <div class="records-overview" aria-live="polite">
         <div><strong>{{ departmentName }}</strong><span v-if="data">{{ sellerCount }} 位销售员，全部 {{ data.total }} 条记录<span v-if="groups.some(group => !group.assigned)">，含待分配记录</span></span></div>
-        <div v-if="data" class="records-counts"><span v-for="state in states.filter(state => state !== '本轮不调')" :key="state"><i :class="recordTone(state)"></i>{{ recordStatusLabel(state) }} <b>{{ data.counts[state] ?? 0 }}</b></span></div>
+        <div v-if="data" class="records-counts"><span v-for="state in states" :key="state"><i :class="recordTone(state)"></i>{{ state === '本轮不调' ? '不调价' : recordStatusLabel(state) }} <b>{{ data.counts[state] ?? 0 }}</b></span></div>
       </div>
-      <p v-if="error" class="records-error" role="alert"><strong>{{ data ? '更新未成功，以下保留最近读取的数据。' : '暂时无法读取记录。' }}</strong>{{ error }}。可切换部门或刷新页面，系统也会自动重试。</p>
+      <p v-if="error" class="records-error motion-reveal" role="alert"><strong>{{ data ? '更新未成功，以下保留最近读取的数据。' : '暂时无法读取记录。' }}</strong>{{ error }}。可切换部门或刷新页面，系统也会自动重试。</p>
 
       <section id="records-list" class="records-glass" :aria-busy="loading">
         <div class="records-panel-heading"><h2>销售员提价记录</h2></div>
-        <div v-if="loading" class="records-empty" role="status"><h3>正在读取部门日志</h3><p>记录读取后会在这里完整展示。</p></div>
-        <div v-else-if="!data || !groups.length" class="records-empty"><h3>{{ error ? '记录暂未加载' : '暂无提价记录' }}</h3><p>{{ error ? '恢复连接后会自动重试。' : '部门产生提价处理记录后，会按销售员展示在这里。' }}</p></div>
-        <table v-else class="records-table">
+        <div v-if="loading" class="records-empty records-loading" role="status"><h3>正在读取部门日志</h3><p>记录读取后会在这里完整展示。</p></div>
+        <div v-else-if="!data || !groups.length" class="records-empty motion-reveal"><h3>{{ error ? '记录暂未加载' : '暂无提价记录' }}</h3><p>{{ error ? '恢复连接后会自动重试。' : '部门产生提价处理记录后，会按销售员展示在这里。' }}</p></div>
+        <table v-else class="records-table motion-reveal">
           <caption class="records-sr">{{ departmentName }}全部销售员提价记录，点击姓名查看本人详细日志</caption>
-          <thead><tr><th scope="col">销售员 / 全部记录</th><th scope="col">最近商品 / SKU</th><th scope="col">店铺 / 站点</th><th scope="col">最近原实际价 → 目标价</th><th scope="col">全部处理进度</th><th scope="col">最近更新</th></tr></thead>
+          <thead><tr><th scope="col">销售员 / 全部记录</th><th scope="col">最近商品 / SKU</th><th scope="col">店铺 / 站点</th><th scope="col" title="算价选中的订单修正一次毛利，按原币展示">一次毛利</th><th scope="col">最近原实际价 → 目标价</th><th scope="col">上传价</th><th scope="col">处理状态</th><th scope="col">最近更新</th></tr></thead>
           <tbody><tr v-for="(group, index) in groups" :key="group.id" class="records-person-row" :data-seller="group.id" @click="openSeller(group, $event)">
             <td class="records-person-cell"><button class="records-person-button" :aria-label="`查看${group.name}的全部${group.items.length}条提价日志`" aria-haspopup="dialog" @click.stop="openSeller(group, $event)"><span class="records-avatar" :class="`tone-${index % 4}`" aria-hidden="true">{{ group.assigned ? group.name.slice(-1) : '?' }}</span><span><strong>{{ group.name }}</strong><small>共计{{ group.items.length }}条</small></span></button></td>
             <td class="records-product-cell"><strong>{{ group.latest.key.sku || 'SKU 未记录' }}</strong><small>商品 {{ group.latest.key.product_id || group.latest.key.item_id || '未记录' }}</small></td>
             <td class="records-shop-cell"><strong>{{ group.latest.shop_name || group.latest.key.shop_id || '店铺未记录' }}</strong><small>{{ group.latest.key.site }} / {{ group.latest.key.platform }}</small></td>
+            <td class="records-margin-cell"><span class="records-mobile-label">一次毛利</span><strong>{{ group.latest.first_margin?.amount ?? '未记录' }}</strong><small v-if="group.latest.first_margin">{{ group.latest.first_margin.currency }}</small></td>
             <td class="records-price-cell"><span class="records-mobile-label">最近原实际价 → 目标价</span><div class="records-price-change"><span>{{ group.latest.decision?.current_actual ?? '未记录' }}</span><i aria-hidden="true">→</i><strong>{{ group.latest.decision?.target_actual ?? '未记录' }}</strong></div><small>{{ group.latest.decision?.trace.station_currency || '币种未记录' }}</small></td>
+            <!-- 上传价取最近记录的持久提交意图，保持后端十进制文本；不以建议价或回读价代替，也不表示已经生效。 -->
+            <td class="records-upload-cell"><span class="records-mobile-label">上传价</span><strong>{{ group.latest.execution?.uploaded_price ?? (group.latest.execution ? '未记录' : '未提交') }}</strong><small v-if="group.latest.execution?.uploaded_price != null">{{ group.latest.decision?.trace.station_currency || '币种未记录' }}</small></td>
             <td class="records-progress-cell"><div class="records-status-list"><template v-for="state in states" :key="state"><span v-if="group.counts[state]" class="records-status" :class="recordTone(state)"><i></i>{{ recordStatusLabel(state) }} {{ group.counts[state] }}</span></template></div></td>
-            <td class="records-time-cell"><time :datetime="group.latest.updated_at">{{ timeLabel(group.latest.updated_at) }}</time></td>
+            <td class="records-time-cell"><div class="records-row-end"><time :datetime="group.latest.updated_at">{{ timeLabel(group.latest.updated_at) }}</time><button type="button" class="records-download" title="下载个人数据" aria-label="下载个人数据" @click.stop="downloadSeller(group)"><Download aria-hidden="true" /></button></div></td>
           </tr></tbody>
         </table>
       </section>

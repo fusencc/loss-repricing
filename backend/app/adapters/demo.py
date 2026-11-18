@@ -52,13 +52,12 @@ class DemoAdapter:
                     basis="unit", source_ref=f"synthetic-v1/row-{index}-{repeat}"))
             online.append(OnlineState(key=key, main_sku=f"MAIN-{index}", currency=currency,
                 retail_price=price * 2, marketing_price=price, current_margin=Decimal("0.03") if scenario == "no_loss" else Decimal("-0.05"),
-                fee_scope="normal", fee_model=FeeModel(revenue_factor=Decimal("0.9"), fixed_cost=fixed,
-                                                      version="demo-no-marketing-v1", verified=True),
+                fee_scope="normal",
                 profit_check=OnlineProfitCheck(overseas_stock="0",mode="direct",department="DEMO",
                     inventory_observed_at=now,source_ref="synthetic-online-profit-v1",
                     model=FeeModel(revenue_factor="0.9",fixed_cost=fixed,version="demo-online-v1",verified=True)),
                 observed_at=now, sales_7d=21 if scenario == "protected" else 6, sales_complete=True,
-                sales_basis="sales_system_web_sku_seven_days", sales_observed_at=now,
+                sales_basis="erp_goods_warehouse_seven_days_reference", sales_observed_at=now,
                 history_known=scenario != "history", activity_locked=scenario == "activity"))
         # 模拟来源也反映自己已生效的价格，避免下一轮把固定样本旧价误判为人工修改。
         for row in online:
@@ -68,7 +67,7 @@ class DemoAdapter:
                 actual = Decimal(receipt["actual_price"])
                 if row.marketing_price is not None:
                     row.marketing_price = actual
-                row.current_margin = (row.fee_model.profit_exact(MoneyRatio(actual)) / MoneyRatio(actual)).decimal()
+                row.current_margin = (row.profit_check.model.profit_exact(MoneyRatio(actual)) / MoneyRatio(actual)).decimal()
                 row.last_increase_at = datetime.fromisoformat(receipt["effective_at"])
         return Snapshot(as_of=now, business_date=business_date, fx_date=business_date,
             fx_rates={"CNY": "1", "MYR": "0.6", "PHP": "8", "SGD": "0.2", "THB": "5", "VND": "3500"},

@@ -18,19 +18,20 @@ def source():
     return variant,rate
 
 
-def test_overseas_model_reconciles_reported_margin_then_excludes_marketing():
+def test_overseas_full_model_includes_marketing_and_retains_prefilter_margin():
     from app.adapters.sales_fee_model import compile_overseas_fee
     from app.domain.money import MoneyRatio
     v,r=source();result=compile_overseas_fee(v,r,site='PH',warehouse='WH-PH',company_cny_per_currency='0.1042')
-    model=result['model']
-    assert model.verified and model.revenue_factor==Decimal('0.749589')
+    model=result['online_model']
+    assert model.verified and model.revenue_factor==Decimal('0.649589')
     assert model.fixed_cost==Decimal('2.5592') and model.fixed_cost_divisor==Decimal('0.1042')
     assert result['current_margin']<0
     assert result['proof']['reported_margin_percent']=='-14.93'
     assert result['proof']['fixed_cost_currency']=='CNY'
     current=MoneyRatio(Decimal('30.745'))
     target=current+MoneyRatio(Decimal('0.2949'),Decimal('0.1049'))
-    assert model.profit_exact(target)>MoneyRatio(Decimal(0))
+    assert model.profit_exact(target)<MoneyRatio(Decimal(0))
+    assert "model" not in result
 
 
 @pytest.mark.parametrize('change', ['missing_cost','wrong_warehouse','stock_ambiguous','wrong_total'])

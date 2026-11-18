@@ -7,6 +7,7 @@ import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import 'element-plus/dist/index.css'
 import App from './App.vue'
 import './style.css'
+import './motion.css'
 
 const app = createApp({ render: () => h(ElConfigProvider, { locale: zhCn }, () => h(App)) })
 for (const component of [

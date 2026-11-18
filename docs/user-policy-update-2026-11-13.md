@@ -1,33 +1,27 @@
 # 2026-11-13 筛选来源、固定费用和库存接口
 
-本项目规则版本为 `loss-local-history-web-sales-20261113-v3`；固定表内容版本独立保存。依据用户本轮五条批注及指定的 `D:\钉钉\BD项目流程跟进表V2.xlsx`。本次在WSL主仓库修改，默认仍为demo，真实提交关闭。
+本项目规则版本为 `loss-optional-sales-reference-20261117-v6`；固定表内容版本独立保存。依据用户本轮五条批注及指定的 `D:\钉钉\BD项目流程跟进表V2.xlsx`。本次在WSL主仓库修改，默认仍为demo，真实提交关闭。
 
 ## 当前执行顺序
 
 1. 当前一次毛利非负，本轮不调；保留现行一毛口径。
-2. 查询本程序真实执行档案：确认生效未满72小时不调；未知提交持续锁定。
-3. 销售网页七日销量：同店按ERP真实主SKU汇总变体七日销量，>=21件不调。
+2. 查询官方开放调价日志：滚动72小时内type=2记录数大于0不调，明确0通过，未知待处理；本程序未知提交持续锁定。
+3. 销量参考（2026-11-17用户更新）：先按子商品ID查询近72小时官方调价日志；明确零记录的候选再批量调用ERP `POST /goods/queryGoodsSales`。逐子SKU、逐仓库保存 `storageSalesList.sevenDays`，不做全店扫描，不冒充同店主SKU销量。销量仅作参考，缺失、异常或高销量均不作为保护或算价阻断条件；未知不填0。
 4. 同一具体在线子SKU选最小有效单件亏损，换成对应站点币，得到 `T0=P+Δ`。
-5. 依据本次读取的海外库存选择固定表公式，`T=max(T0,完整利润保本价,一次毛利保本价)`；0%可以通过。
-6. `d=P/R`，`Uraw=T/d`；向上进上传档位，再用 `U×d` 复核实际价和两类利润。
+5. 依据本次读取的海外库存选择固定表公式，`T=max(T0,完整利润保本价)`；0%可以通过。
+6. `d=P/R`，`Uraw=T/d`；向上进上传档位，再用 `U×d` 复核实际价和所选仓配完整在线利润。
 
 这里P是当前实际营销售价、R是当前含VAT零售价。除以d是把目标实际价反推到上传字段。例如P=50、R=100，补亏后T=55，d=.5，上传110后预期实际价55。不是把55再加一次VAT。费率公式中的VAT只按固定BD表的位置计算，不重复加到上传结果。
 
-## 自有成功档案
+## 开放日志保护与本地执行档案
 
-`services/local_price_history.py`只读权威库中的live Batch/Item/Execution、VariantGuard及人工保护；`PricingService._enrich`的真实执行保护也只查本程序数据库。通用HTTP合同移除外部history_known/last_increase_at/pending_submission映射，采集后先保留历史未确认，再由服务读取本地库。成功需包含实际含税价格、实际生效时间或首次成功确认时间及live证据。受理不算生效，失败终态不占用未知锁。
+11/17用户指定`getOperationLogCountBySellerSkuIdsAndTypeAndCompleteTime`为近三天判断来源。按子商品ID查询北京时间完成时间范围，覆盖官方日志中的其他操作者调价；未确认成功状态过滤，不把记录数量当成生效证据。真实服务刷新、ERP准备及自动提交前核对均使用该接口。详细字段、异常处理及秒级边界限制见[官方调价日志](official-price-log-integration.md)。
 
-当前本地权威库为 `runtime/live-history.db`。真实执行为0条是首次未曾运行的现状，不是构造成功样本；旧公司观察数据仍在数据库，但ORM及抓取/合并路径已删除，不参与判断。不清理用户历史原件。
+`services/local_price_history.py`只读权威库中的live Batch/Item/Execution、VariantGuard及人工保护，用于未完成执行防重和人工保护。真实模式不再以本地生效时间做72小时冷却，也不回退到本地库证明没有外部记录。实际生效核验与价格存档继续独立留证；不修改旧批次或清理用户历史原件。
 
-## 销售网页七日来源
+## ERP开放接口参考销量
 
-11/17更新：父商品列表只用于发现链接，销量取 `POST /Api/api-tiktok-sales/online/findProductVariants/{shopName}/{productId}` 的子SKU `sevenDays`。ERP官方 `queryGoodsSales` 的 `sku/mainSku` 只确认归属，不消费仓库销量。混挂其他主SKU的件数排除；同店同产品同sellerSkuId只计一次，同一子SKU不同链接正常相加。
-
-从候选子SKU和主标签链接出发，批量确认ERP归属后，通过已实测的 `localSellerSkuStr` 反查同店其他链接，迭代发现关联规格。此范围不能证明穷尽ERP目录中完全未关联的其他规格。默认销售请求串行间隔2秒；缺页、重复、归属未知、空变体和限流不填0，能确认归属的坏销量只阻止相应主SKU。每个销量保留变体原件和ERP映射引用。
-
-11/17只读样本：Tiktok-22236TH 的混挂链接总量246件，其中XXHG667为243件、GQHG18223为3件；反查后分别归入真实主SKU。
-
-`sevenDays`没有返回精确窗口起止。规范输入为 `sales_basis=sales_system_web_sku_seven_days`、`sales_observed_at`，采集schema为 `sales-web-sku-seven-days-v2`；按北京时间要求本业务日数据，跨日分页不合并。此指标不声称是前七个完整自然日。旧父商品总量快照不能直接用于新口径判断，必须重新采集，不能只改版本标识。
+2026-11-17用户因全店扫描耗时明确改用 `POST /goods/queryGoodsSales`，取消销量保护。先查近72小时调价日志，再将明确零记录的候选子SKU去重批量查询。每个子SKU按仓库保存 `storageSalesList.sevenDays`，不转换为店铺或主SKU总销量；取不到时保持未知，继续独立算价流程。原全店扫描实现已删除。
 
 ## 固定表和公式
 
@@ -86,5 +80,3 @@ G(P) = a×P - b_CNY / 报价
 本次固定配置导入和接口只读抽样均已执行；当前实际全量提价仍未运行。最终全量后端751项通过（452.55秒）；前端生产构建、compileall与git diff --check通过。仅1条Starlette/AnyIO既有依赖弃用警告。独立复查发现的两项异常隔离/HTTP历史依赖问题均以失败测试复现并修复，152项相关回归通过。完整结果见runtime/user-policy-20261113/final-tests.log及实施计划；不以测试通过替代真实平台上传、折扣保持及实际价格生效验收。
 
 公开计划佣金10%目前只绑定表内7条商品；是否扩展为全商品统一固定值，已向用户询问，尚未收到范围确认。本轮未作该扩展。
-
-11/17完整性边界：当前发现范围查询成功标记为 `discovered_scope_complete`，汇总件数仅作参考；因未证明全ERP主SKU规格覆盖，`complete=false`，下游保留待处理，不自动放行调价。不能只将完整性标记改为true。

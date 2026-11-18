@@ -1,4 +1,4 @@
-"""单次调用自主运行 ERP 只读六步链路，非完整结果返回非零退出码。"""
+"""按部门串行运行 ERP 只读链路，非完整结果返回非零退出码。"""
 import argparse
 import json
 from pathlib import Path
@@ -12,7 +12,7 @@ from app.services.erp_workflow import run_workflow
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--capture-id', help='显式离线回放该采集；省略则实时抓取四类')
+    parser.add_argument('--capture-id', help='显式离线回放该采集；省略则依次处理四个 TikTok 部门')
     parser.add_argument('--evidence', type=Path, help='离线回放的绑定算价证据 JSON')
     parser.add_argument('--erp-details', type=Path)
     parser.add_argument('--sales-variants', type=Path)

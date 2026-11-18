@@ -47,6 +47,16 @@ def public_record(item, batch, execution, department, seller):
     currency = display_text(trace.get('station_currency'))
     if currency is None and len(currencies) == 1 and None not in currencies:
         currency = next(iter(currencies))
+    # 只展示算价选中的 ERP 订单级修正一次毛利，保留原币、原金额和符号；不使用单件亏损或在线利润。
+    selected_id = decision.get('selected_row_id')
+    selected = [row for row in trace.get('source_rows', []) if selected_id and row.get('row_id') == selected_id]
+    first_margin = None
+    if len(selected) == 1:
+        row = selected[0]
+        if row.get('basis') == 'order' and row.get('fee_scope') == 'erp-corrected-first-margin-v1':
+            amount, original_currency = display_text(row.get('loss_amount')), display_text(row.get('currency'))
+            if amount is not None and original_currency is not None:
+                first_margin = {'amount': amount, 'currency': original_currency}
     evidence = execution.evidence or {} if execution else {}
     archive = evidence.get('price_record') or {}
     # 金额始终为保存时的十进制文本。目标/建议上传与原提交意图/实际回读严格分开。
@@ -55,16 +65,28 @@ def public_record(item, batch, execution, department, seller):
                         for field in ('amount', 'currency', 'observed_at')}
               for name in PRICE_FIELDS
               if isinstance(value := (archive.get('prices') or {}).get(name), dict)}
+    # 只展示算价选中的 ERP 订单修正一次毛利：保留原币、订单总额及负号，不用换汇或单件亏损替代。
+    selected = display_text(decision.get('selected_row_id'))
+    margin_rows = [row for row in trace.get('source_rows', []) if selected and row.get('row_id') == selected]
+    margin = None
+    if len(margin_rows) == 1:
+        row = margin_rows[0]
+        if row.get('fee_scope') == 'erp-corrected-first-margin-v1' and row.get('basis') == 'order':
+            amount = display_text(row.get('loss_amount'))
+            if amount is not None:
+                margin = {'amount': amount, 'currency': display_text(row.get('currency'))}
     reconciliation = (batch.snapshot or {}).get('erp_reconciliation') or {}
     return {
         'id': item.id, 'batch_id': item.batch_id,
         'key': {field: item.key.get(field, '') for field in KEY_FIELDS},
         'seller': seller, 'department': department, 'shop_name': display_text(archive.get('shop_name')),
+        'first_margin': first_margin,
         'status': item.status, 'reason': item.reason, 'updated_at': item.updated_at,
         'decision': {field: display_text(decision.get(field))
                      for field in ('current_actual', 'target_actual', 'upload_price')} | {
             'trace': {'station_currency': currency}
         } if decision else None,
+        'corrected_first_margin': margin,
         'execution': {
             'state': execution.state, 'task_id': execution.task_id,
             'uploaded_price': display_text((execution.request or {}).get('upload_price')),

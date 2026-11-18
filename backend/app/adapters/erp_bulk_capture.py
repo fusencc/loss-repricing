@@ -35,6 +35,7 @@ SOURCES = {
     'blocked_allocatable': ('blocked', 4),
     'blocked_pending': ('blocked', 3),
 }
+ERP_DEPARTMENTS = ('Tiktok一部', 'Tiktok五部', 'Tiktok十二部', 'Tiktok二十二部')
 BLOCKED_LIST = '/Api/order/list'
 STATUS_LABELS = {4: '可配货', 3: '待处理'}
 LOSS_EXPORT = '/Api/deficit/dowDeficitOrder'
@@ -111,10 +112,16 @@ def _workbook(content, fields):
         raise SourceUnavailable('ERP下载文件损坏或XLSX结构无效') from None
 
 
-def _scope(records, bloc, *, expected_status=None):
+def _scope(records, bloc, *, expected_status=None, department=None):
     if any(not isinstance(r.get('平台'), str) or r['平台'].casefold() != 'tiktok'
            or (expected_status is not None and r.get('订单状态') != expected_status) or r.get('集团') != bloc for r in records):
         raise SourceUnavailable('ERP导出范围与TikTok/订单状态/集团筛选不一致')
+    # 禁止发货列表的部门列为空，按明确订单号下载后用财务表「部门」逐行复核。
+    if department is not None and any(
+        not isinstance(row.get('部门'), str) or row['部门'].casefold() != department.casefold()
+        for row in records
+    ):
+        raise SourceUnavailable('ERP导出包含部门缺失或与指定部门不一致的订单')
 
 
 @contextmanager
@@ -276,8 +283,11 @@ def _blocked_ids(post, group):
                     or str(row.get('platform')).casefold() != 'tiktok'
                     or str(row.get('jzfh')) != '1' or str(row.get('status')) != str(group['status'])):
                 raise SourceUnavailable('ERP禁止发货名单存在重复订单、无效订单号或范围不符')
-            ids[order] = None
+            ids[order] = {key: row[key] for key in ('shopid', 'shopname')
+                          if isinstance(row.get(key), str) and row[key].strip()}
         if len(ids) == total:
+            if 'departments' in group['filters']:
+                group['blocked_shops'] = ids
             return list(ids)
         page += 1
 
@@ -296,11 +306,22 @@ def finance_batch_scope(order_ids, downloaded_ids):
     }
 
 
+def _finance_batches(group, ids, batch_size):
+    batches = [
+        {'number': number, 'order_ids': ids[start:start + batch_size], 'status': 'not_attempted', 'polls': []}
+        for number, start in enumerate(range(0, len(ids), batch_size), start=len(group['batches']) + 1)
+    ]
+    group['batches'].extend(batches)
+    return batches
+
+
 def capture_erp_bulk(settings, *, source=None, client=None, max_polls=EXPORT_POLL_LIMIT, export_batch_size=1000,
-                     max_orders=None, progress=None, salesperson=None, event_callback=None):
+                     max_orders=None, progress=None, salesperson=None, department=None, event_callback=None):
     """默认核对四类候选。显式试抓按每组限额，保留完整候选名单。"""
     if source is not None and source not in SOURCES:
         raise ValueError('未知的ERP候选来源')
+    if department is not None and department not in ERP_DEPARTMENTS:
+        raise ValueError('未知的ERP采集部门')
     if salesperson is not None and source is not None and SOURCES[source][0] == 'blocked':
         raise ValueError('禁止发货来源尚无已验证的销售员筛选')
     sources = [source] if source else [name for name, (kind, _) in SOURCES.items()
@@ -351,9 +372,13 @@ def capture_erp_bulk(settings, *, source=None, client=None, max_polls=EXPORT_POL
                        'status':status, 'financecheck':'3'}
             if salesperson is not None:
                 filters['username'] = salesperson
+            if department is not None:
+                filters['department'] = department
         else:
             filters = {'ptid':settings.erp_capture_platform_id, 'blocs':settings.erp_capture_bloc,
                        'status':status, 'jzfh':'1'}
+            if department is not None:
+                filters['departments'] = department
         groups.append({'source':name,'kind':kind,'status':status,'filters':filters,
                        'endpoint':LOSS_EXPORT if kind == 'loss' else BLOCKED_LIST,
                        'rows':[],'loss_rows':[],'candidate_order_ids':[],'selected_orders':0,
@@ -365,6 +390,147 @@ def capture_erp_bulk(settings, *, source=None, client=None, max_polls=EXPORT_POL
               'acquisition_mode':'bulk_download','queried_at':now.isoformat(),'groups':groups,
               'details':[],'capture_complete':False,'pricing_ready':False,'stopped_by_rate_limit':False,
               'finance_calculation':{'status':'not_recomputed','reason':'本轮保存ERP导出费用及毛利；文件不包含全部前端公式输入，不逐单补查或补零'}}
+    if department is not None:
+        result['department'] = department
+
+    def collect_candidates(post, group):
+        name = group['source']
+        group['stage'] = 'candidate_list'
+        log_event('erp.stage', stage='pool')
+        if group['kind'] == 'loss':
+            raw = post(LOSS_EXPORT, group['filters'], binary=True)
+            group['files'].append(_save_xlsx(folder, f'{name}-loss-orders.xlsx', raw))
+            losses, count = _workbook(raw, LOSS_FIELDS)
+            _scope(losses, settings.erp_capture_bloc, expected_status=STATUS_LABELS[group['status']],
+                   department=department)
+            if salesperson is not None and any(r.get('销售员') != salesperson for r in losses):
+                raise SourceUnavailable('ERP亏损池销售员字段缺失或与指定销售员不一致')
+            group.update(loss_rows=losses, total=len(losses), loss_column_count=count)
+            ids = list(dict.fromkeys(r['订单编号'] for r in losses))
+        else:
+            ids = _blocked_ids(post, group)
+        group.update(candidate_order_ids=ids, list_complete=True)
+
+    def download_finance(post, download, group, batch):
+        name = group['source']
+        selected_count = group['selected_orders']
+        emit(f"提交 {name} 第 {batch['number']}/{len(group['batches'])} 批，共 {len(batch['order_ids'])} 笔…")
+        group['stage'] = 'submit_order_export'
+        log_event('erp.stage', stage='export', count=len(batch['order_ids']), total=selected_count)
+        batch['status'] = 'submitting'
+        response = post(ORDER_EXPORT, {'orderIdList':batch['order_ids']})
+        match = re.search(r'下载任务【([^】]+)】', response) if isinstance(response,str) else None
+        if not match:
+            raise SourceUnavailable('ERP未返回可绑定的下载任务名，未按最新任务猜测')
+        batch['task_name'] = match[1]
+        batch['status'] = 'polling'
+        group['stage'] = 'poll_order_export'
+        for attempt in range(max_polls):
+            emit(f'等待本批下载任务：第 {attempt+1}/{max_polls} 次查询…')
+            # 只查询任务列表第一页100条，按本批返回名精确匹配并校验后续ID。
+            # 未出现在这一页就继续有限轮询，不翻页、不选最新任务，也不重提导出。
+            log_event('erp.stage', stage='poll', count=attempt + 1, total=max_polls)
+            data = post(TASKS, {'pageNum':1,'pageSize':100,'source':'orderList'})
+            tasks = data.get('records') if isinstance(data, dict) else data
+            if not isinstance(tasks, list) or any(not isinstance(task, dict) for task in tasks):
+                raise SourceUnavailable('ERP下载任务列表格式无效')
+            tasks = [t for t in tasks if t.get('source') == 'orderList' and t.get('fileName') == batch['task_name']]
+            if len(tasks) > 1:
+                raise SourceUnavailable('ERP下载任务名存在多条匹配')
+            task = tasks[0] if tasks else None
+            batch['polls'].append({'attempt':attempt+1,'queried_at':datetime.now(timezone.utc).isoformat(),
+                                  'status':task.get('status') if task else 'not_found'})
+            if task:
+                if task.get('id') is None or ('task_id' in batch and task['id'] != batch['task_id']):
+                    raise SourceUnavailable('ERP下载任务编号发生变化')
+                batch['task_id'] = task.get('id')
+                group['task_id'] = task.get('id')
+                if task.get('status') in ('failure','failed','interrupted'):
+                    raise SourceUnavailable('ERP后台导出任务失败')
+                if task.get('status') == 'success':
+                    group['stage'] = 'download_order_export'
+                    raw = download(task.get('downloadUrl'))
+                    # 这是原件字节接收完成的观察时间，区别于 ERP 任务状态时间。
+                    batch['downloaded_at'] = datetime.now(timezone.utc).isoformat()
+                    group['files'].append(_save_xlsx(folder, f"{name}-order-finance-{batch['number']:03d}.xlsx", raw))
+                    orders, count = _workbook(raw, BUSINESS_FIELDS)
+                    _scope(orders, settings.erp_capture_bloc, department=department)
+                    scope = finance_batch_scope(batch['order_ids'], [row['订单编号'] for row in orders])
+                    batch['scope_check'] = scope
+                    missing = scope['missing']
+                    duplicates = scope['duplicate_rows']
+                    if scope['unexpected']:
+                        raise SourceUnavailable('ERP批量订单导出包含未请求的订单号')
+                    group['missing_order_ids'].extend(missing)
+                    # 亏损池状态可能滞后于订单主表（本轮已见已完成/作废）；
+                    # 保留两个时点的证据而非丢数据，也不把历史池记录当可直接调价。
+                    mismatches = [{'orderid':r['订单编号'],'candidate_status':STATUS_LABELS[group['status']],
+                                   'order_status':r.get('订单状态')} for r in orders
+                                  if r.get('订单状态') != STATUS_LABELS[group['status']]]
+                    group['status_discrepancies'].extend(mismatches)
+                    batch['status_discrepancy_count'] = len(mismatches)
+                    group['rows'].extend({'orderid':r['订单编号'],'platform':r['平台'],
+                        'source_status':group['status'],'current_status_matches_source':r.get('订单状态') == STATUS_LABELS[group['status']],
+                        'fields':r} for r in orders)
+                    group['order_column_count'] = count
+                    batch['status'] = 'partial' if missing or duplicates else 'complete'
+                    if duplicates:
+                        batch.update(error='ERP订单财务导出包含同订单重复行',
+                                     error_kind='duplicate_finance_rows')
+                    elif missing:
+                        batch['error'] = '部分候选订单未由完整订单批量导出返回'
+                        batch['error_kind'] = 'not_returned_by_bulk_export'
+                    emit(f"本批返回 {scope['downloaded_unique']} 笔，缺失 {len(missing)} 笔。")
+                    break
+        if batch['status'] not in ('complete','partial'):
+            raise SourceUnavailable('ERP后台下载任务在查询次数内未完成；未重新提交')
+
+    def finish_group(group):
+        if group['error'] or not group['list_complete']:
+            return
+        if group['selected_orders'] != len(group['candidate_order_ids'][:max_orders]) or any(
+            batch['status'] not in ('complete', 'partial') for batch in group['batches']
+        ):
+            return
+        name = group['source']
+        missing = group['missing_order_ids']
+        # 财务表按订单导出。重复行保留供回查，但不能证明订单财务已唯一对齐。
+        duplicate_rows = sum(batch['scope_check']['duplicate_rows'] for batch in group['batches'])
+        if duplicate_rows:
+            group.update(stage='finance_conflict', error=f'ERP订单财务导出存在{duplicate_rows}条重复行',
+                         error_kind='duplicate_finance_rows')
+        elif missing:
+            group.update(stage='complete_with_missing',
+                         error=f'完整订单批量导出未返回{len(missing)}笔候选订单，已保留缺失清单',
+                         error_kind='not_returned_by_bulk_export')
+        else:
+            group['stage'] = 'complete'
+        finance_paths = [Path(item['file']) for item in group['files']
+                         if '-order-finance-' in Path(item['file']).name]
+        if finance_paths and group['kind'] == 'loss':
+            group['comparison_file'] = write_comparison_workbook(
+                folder, finance_paths, folder / f'{name}-loss-orders.xlsx',
+                filename=f'{name}-订单核对表.xlsx')
+
+    @contextmanager
+    def record_group_errors(group, batch=None):
+        try:
+            yield
+        except (SourceUnavailable, httpx.HTTPError, ValueError, TypeError, KeyError, OSError) as error:
+            stage = {'submit_order_export':'export', 'poll_order_export':'poll',
+                     'download_order_export':'download'}.get(group['stage'], 'pool')
+            log_event('erp.failed', exception=error, stage=stage,
+                      error_code='rate_limited' if isinstance(error, ErpAccountRateLimited) else 'source_unavailable')
+            evidence = error_evidence(error)
+            group.update(evidence)
+            if batch is not None:
+                batch.update(status='failed', **evidence)
+            if isinstance(error, ErpAccountRateLimited):
+                raise
+        finally:
+            # 每批落盘，后续批次失败也可查看已成功部分，不重复生成任务。
+            write_verified(folder / 'result.json', result)
+
     emit('正在登录ERP，按来源读取候选名单…')
     try:
         with _session(settings, client) as (post, download):
@@ -377,142 +543,41 @@ def capture_erp_bulk(settings, *, source=None, client=None, max_polls=EXPORT_POL
                     raise SourceUnavailable('销售员不存在或同名选项不唯一，请核实ERP下拉选项')
                 result['salesperson'] = {'name':salesperson, 'id':matches[0].get('userID')}
                 emit(f'已确认销售员：{salesperson}；按销售员条件下载亏损池。')
-            for group in groups:
-                name = group['source']
-                stage = 'pool'
-                group['stage'] = 'candidate_list'
-                try:
-                    log_event('erp.stage', stage='pool')
-                    if group['kind'] == 'loss':
-                        raw = post(LOSS_EXPORT, group['filters'], binary=True)
-                        group['files'].append(_save_xlsx(folder, f'{name}-loss-orders.xlsx', raw))
-                        losses, count = _workbook(raw, LOSS_FIELDS)
-                        _scope(losses, settings.erp_capture_bloc, expected_status=STATUS_LABELS[group['status']])
-                        if salesperson is not None and any(r.get('销售员') != salesperson for r in losses):
-                            raise SourceUnavailable('ERP亏损池销售员字段缺失或与指定销售员不一致')
-                        group.update(loss_rows=losses, total=len(losses), loss_column_count=count)
-                        ids = list(dict.fromkeys(r['订单编号'] for r in losses))
-                    else:
-                        ids = _blocked_ids(post, group)
-                    group.update(candidate_order_ids=ids, list_complete=True)
-                    ids = ids[:max_orders] if max_orders is not None else ids
-                    selected_count = len(ids)
-                    group['selected_orders'] = selected_count
-                    emit(f"{name} 候选 {len(group['candidate_order_ids'])} 笔，本轮导出 {selected_count} 笔。")
-                    # 5343笔一次提交实测业务码500，100/1000笔受理成功；1000为本地受控批大小，
-                    # 不是已确认的ERP官方上限。每批仍为批量导出，不逐单补查或自动重试失败批。
-                    group['batches'] = [{'number':n//export_batch_size+1,
-                        'order_ids':ids[n:n+export_batch_size], 'status':'not_attempted', 'polls':[]}
-                        for n in range(0,len(ids),export_batch_size)]
-                    for batch in group['batches']:
-                        emit(f"提交第 {batch['number']}/{len(group['batches'])} 批，共 {len(batch['order_ids'])} 笔…")
-                        group['stage'] = 'submit_order_export'
-                        log_event('erp.stage', stage='export', count=len(batch['order_ids']), total=selected_count)
-                        batch['status'] = 'submitting'
-                        response = post(ORDER_EXPORT, {'orderIdList':batch['order_ids']})
-                        match = re.search(r'下载任务【([^】]+)】', response) if isinstance(response,str) else None
-                        if not match:
-                            raise SourceUnavailable('ERP未返回可绑定的下载任务名，未按最新任务猜测')
-                        batch['task_name'] = match[1]
-                        batch['status'] = 'polling'
-                        group['stage'] = 'poll_order_export'
-                        for attempt in range(max_polls):
-                            emit(f'等待本批下载任务：第 {attempt+1}/{max_polls} 次查询…')
-                            # 只查询任务列表第一页100条，按本批返回名精确匹配并校验后续ID。
-                            # 未出现在这一页就继续有限轮询，不翻页、不选最新任务，也不重提导出。
-                            log_event('erp.stage', stage='poll', count=attempt + 1, total=max_polls)
-                            data = post(TASKS, {'pageNum':1,'pageSize':100,'source':'orderList'})
-                            tasks = data.get('records') if isinstance(data, dict) else data
-                            if not isinstance(tasks, list):
-                                raise SourceUnavailable('ERP下载任务列表格式无效')
-                            tasks = [t for t in tasks if t.get('source') == 'orderList' and t.get('fileName') == batch['task_name']]
-                            if len(tasks) > 1:
-                                raise SourceUnavailable('ERP下载任务名存在多条匹配')
-                            task = tasks[0] if tasks else None
-                            batch['polls'].append({'attempt':attempt+1,'queried_at':datetime.now(timezone.utc).isoformat(),
-                                                  'status':task.get('status') if task else 'not_found'})
-                            if task:
-                                if task.get('id') is None or ('task_id' in batch and task['id'] != batch['task_id']):
-                                    raise SourceUnavailable('ERP下载任务编号发生变化')
-                                batch['task_id'] = task.get('id')
-                                group['task_id'] = task.get('id')
-                                if task.get('status') in ('failure','failed','interrupted'):
-                                    raise SourceUnavailable('ERP后台导出任务失败')
-                                if task.get('status') == 'success':
-                                    group['stage'] = 'download_order_export'
-                                    raw = download(task.get('downloadUrl'))
-                                    # 这是原件字节接收完成的观察时间，区别于 ERP 任务状态时间。
-                                    batch['downloaded_at'] = datetime.now(timezone.utc).isoformat()
-                                    group['files'].append(_save_xlsx(folder, f"{name}-order-finance-{batch['number']:03d}.xlsx", raw))
-                                    orders, count = _workbook(raw, BUSINESS_FIELDS)
-                                    _scope(orders, settings.erp_capture_bloc, expected_status=None)
-                                    scope = finance_batch_scope(batch['order_ids'], [row['订单编号'] for row in orders])
-                                    batch['scope_check'] = scope
-                                    missing = scope['missing']
-                                    duplicates = scope['duplicate_rows']
-                                    if scope['unexpected']:
-                                        raise SourceUnavailable('ERP批量订单导出包含未请求的订单号')
-                                    group['missing_order_ids'].extend(missing)
-                                    # 亏损池状态可能滞后于订单主表（本轮已见已完成/作废）；
-                                    # 保留两个时点的证据而非丢数据，也不把历史池记录当可直接调价。
-                                    mismatches = [{'orderid':r['订单编号'],'candidate_status':STATUS_LABELS[group['status']],
-                                                   'order_status':r.get('订单状态')} for r in orders
-                                                  if r.get('订单状态') != STATUS_LABELS[group['status']]]
-                                    group['status_discrepancies'].extend(mismatches)
-                                    batch['status_discrepancy_count'] = len(mismatches)
-                                    group['rows'].extend({'orderid':r['订单编号'],'platform':r['平台'],
-                                        'source_status':group['status'],'current_status_matches_source':r.get('订单状态') == STATUS_LABELS[group['status']],
-                                        'fields':r} for r in orders)
-                                    group['order_column_count'] = count
-                                    batch['status'] = 'partial' if missing or duplicates else 'complete'
-                                    if duplicates:
-                                        batch.update(error='ERP订单财务导出包含同订单重复行',
-                                                     error_kind='duplicate_finance_rows')
-                                    elif missing:
-                                        batch['error'] = '部分候选订单未由完整订单批量导出返回'
-                                        batch['error_kind'] = 'not_returned_by_bulk_export'
-                                    emit(f"本批返回 {scope['downloaded_unique']} 笔，缺失 {len(missing)} 笔。")
-                                    # 每批落盘，后续批次失败也可查看已成功部分，不重复生成任务。
-                                    write_verified(folder / 'result.json', result)
-                                    break
-                        if batch['status'] not in ('complete','partial'):
-                            raise SourceUnavailable('ERP后台下载任务在查询次数内未完成；未重新提交')
-                    missing = group['missing_order_ids']
-                    # 财务表按订单导出。重复行保留供回查，但不能证明订单财务已唯一对齐。
-                    duplicate_rows = sum(batch['scope_check']['duplicate_rows'] for batch in group['batches'])
-                    if duplicate_rows:
-                        group.update(stage='finance_conflict', error=f'ERP订单财务导出存在{duplicate_rows}条重复行',
-                                     error_kind='duplicate_finance_rows')
-                    elif missing:
-                        group.update(stage='complete_with_missing',
-                                     error=f'完整订单批量导出未返回{len(missing)}笔候选订单，已保留缺失清单',
-                                     error_kind='not_returned_by_bulk_export')
-                    else:
-                        group['stage'] = 'complete'
-                    finance_paths = [Path(item['file']) for item in group['files']
-                                     if '-order-finance-' in Path(item['file']).name]
-                    if finance_paths and group['kind'] == 'loss':
-                        group['comparison_file'] = write_comparison_workbook(
-                            folder, finance_paths, folder / f'{name}-loss-orders.xlsx',
-                            filename=f'{name}-订单核对表.xlsx')
-                except (SourceUnavailable, httpx.HTTPError, ValueError, TypeError, KeyError, OSError) as error:
-                    stage = {'submit_order_export':'export', 'poll_order_export':'poll',
-                             'download_order_export':'download'}.get(group['stage'], 'pool')
-                    log_event('erp.failed', exception=error, stage=stage,
-                              error_code='rate_limited' if isinstance(error, ErpAccountRateLimited) else 'source_unavailable')
-                    group.update(error_evidence(error))
-                    for batch in group['batches']:
-                        if batch['status'] in ('submitting', 'polling'):
-                            batch.update(status='failed', **error_evidence(error))
-                    if isinstance(error, ErpAccountRateLimited):
-                        raise
-                finally:
-                    write_verified(folder / 'result.json', result)
+            if department is None:
+                for group in groups:
+                    with record_group_errors(group):
+                        collect_candidates(post, group)
+                        ids = group['candidate_order_ids'][:max_orders]
+                        group['selected_orders'] = len(ids)
+                        batches = _finance_batches(group, ids, export_batch_size)
+                        for batch in batches:
+                            # Record the current task failure before moving to the next source.
+                            with record_group_errors(group, batch):
+                                download_finance(post, download, group, batch)
+                            if batch['status'] == 'failed':
+                                break
+                        finish_group(group)
+            else:
+                for group in groups:
+                    with record_group_errors(group):
+                        collect_candidates(post, group)
+                for group in groups:
+                    if not group['list_complete']:
+                        continue
+                    ids = group['candidate_order_ids'][:max_orders]
+                    group['selected_orders'] = len(ids)
+                    for batch in _finance_batches(group, ids, export_batch_size):
+                        with record_group_errors(group, batch):
+                            download_finance(post, download, group, batch)
     except (SourceUnavailable, httpx.HTTPError, ValueError, TypeError, KeyError, OSError) as error:
         result.update(error_evidence(error))
         result['stopped_by_rate_limit'] = isinstance(error, ErpAccountRateLimited)
         if not any(group['error'] for group in groups):
             groups[0].update(error_evidence(error))
+    if department is not None:
+        for group in groups:
+            with record_group_errors(group):
+                finish_group(group)
     result['not_read_groups'] = [group['source'] for group in groups if group['stage'] == 'not_attempted']
     result['selection_complete'] = all(group['stage'] == 'complete' and not group['error'] for group in groups)
     result['capture_complete'] = result['selection_complete'] and max_orders is None

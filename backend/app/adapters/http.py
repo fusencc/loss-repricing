@@ -18,7 +18,7 @@ from app.adapters.base import LookupResult, SourceUnavailable, SubmitResult
 from app.adapters.excel import VAT_UPLOAD_COLUMNS, XLSX_MIME, price_upload_workbook
 from app.adapters.normalization import (
     FX_FIELDS, LINE_CONSTANTS, LINE_FIELDS, LOOKUP_FIELDS, LOOKUP_OPTIONAL, ONLINE_CONSTANTS,
-    ONLINE_FIELDS, SAFE_LABEL, fx_rates, identity_text, mapped, money, online_state, read_path, source_line,
+    ONLINE_FIELDS, ONLINE_OPTIONAL, SAFE_LABEL, fx_rates, identity_text, mapped, money, online_state, read_path, source_line,
     source_record_issue, source_stamp, source_time, valid_path, variant_key,
 )
 from app.adapters.sales_auth import SalesAuth
@@ -167,7 +167,7 @@ def _check_collection(name, spec, services):
         if not valid_path(spec.get("records_path")):
             raise ValueError("缺少记录列表路径")
         if name == "online":
-            _fields(spec, ONLINE_FIELDS, static=ONLINE_CONSTANTS)
+            _fields(spec, ONLINE_FIELDS, ONLINE_OPTIONAL, static=ONLINE_CONSTANTS)
         else:
             _fields(spec, LINE_FIELDS, static=LINE_CONSTANTS)
         _check_pagination(spec)
@@ -245,7 +245,6 @@ class HttpAdapter:
         self._services = {}
         self._collections = {}
         self._sites = {}
-        self._fee_versions = {}
         self._profit_versions = {}
         self._submit = None
         self._lookup = None
@@ -298,7 +297,7 @@ class HttpAdapter:
                     if (
                         spec.get("verified") is not True or contract.price_step <= 0
                         or contract.upload_column not in VAT_UPLOAD_COLUMNS or not _label(contract.version)
-                        or not _label(spec.get("fee_model_version")) or not _label(spec.get("online_profit_model_version")) or not contract.warehouses
+                        or not _label(spec.get("online_profit_model_version")) or not contract.warehouses
                     ):
                         continue
                     for warehouse in contract.warehouses:
@@ -306,13 +305,11 @@ class HttpAdapter:
                 except BAD_DATA:
                     continue
                 self._sites[site] = contract
-                self._fee_versions[site] = spec["fee_model_version"]
                 self._profit_versions[site] = spec["online_profit_model_version"]
                 self._versions[f"online_profit_model.{site}"] = spec["online_profit_model_version"]
                 self._versions[f"site.{site}"] = contract.version
-                self._versions[f"fee_model.{site}"] = spec["fee_model_version"]
         if not self._sites:
-            self._execution_missing.append("缺少已审计站点的上传列、一次毛利及完整在线利润模型版本")
+            self._execution_missing.append("缺少已审计站点的上传列及完整在线利润模型版本")
 
         submit = config.get("submit")
         try:
@@ -429,7 +426,7 @@ class HttpAdapter:
         normalized, issues, seen = [], [], set()
         for number, record in enumerate(records, start=1):
             try:
-                row = online_state(record, spec, self._fee_versions, self._profit_versions) if online else source_line(record, spec, name)
+                row = online_state(record, spec, self._profit_versions) if online else source_line(record, spec, name)
                 normalized.append(row)
             except BAD_DATA:
                 try:

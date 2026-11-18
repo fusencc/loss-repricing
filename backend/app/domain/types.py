@@ -124,6 +124,15 @@ class OnlineProfitCheck(BaseModel):
         return MoneyRatio(self.model.fixed_cost, self.model.fixed_cost_divisor) / MoneyRatio(self.model.revenue_factor)
 
 
+class RecentPriceLog(BaseModel):
+    """开放接口按子商品ID返回的72小时日志数量；不伪造最近生效时间。"""
+
+    count: Annotated[StrictInt, Field(ge=0)]
+    window_start: AwareDatetime
+    window_end: AwareDatetime
+    source_id: StrictStr
+
+
 class OnlineState(BaseModel):
     """在线子 SKU 的当前快照。含 VAT 零售价和营销实际售价均为站点币。"""
 
@@ -135,17 +144,17 @@ class OnlineState(BaseModel):
     marketing_price: FiniteDecimal | None = None
     current_margin: FiniteDecimal
     fee_scope: StrictStr
-    fee_model: FeeModel | None = None
-    # 缺少新证据仅能展示/排除，不能生成可提交价格；禁止回退到一次毛利模型。
+    # 费率模型仅属于完整在线利润；当前一次毛利只用于前置筛选。
     profit_check: OnlineProfitCheck | None = None
     observed_at: AwareDatetime
     sales_7d: StrictInt | None = None
-    # 网页七日指标无明确起止日期；保存实际来源口径与采集时点，不编造自然日窗口。
-    sales_basis: Literal['sales_system_web_sku_seven_days'] | None = None
+    # 开放接口为子SKU＋仓库参考销量；无明确日期边界，不参与保护或定价。
+    sales_basis: Literal['erp_goods_warehouse_seven_days_reference'] | None = None
     sales_observed_at: AwareDatetime | None = None
-    # 完整销量与确证历史必须由来源明示；文件缺字段不能获得乐观放行。
+    # 参考销量缺失保持未知；调价历史仍须明确核实。
     sales_complete: bool = False
     history_known: bool = False
+    recent_price_log: RecentPriceLog | None = None
     # 只接受已确认生效的时间戳。提交结果未知由 pending_submission 独立锁定。
     last_increase_at: AwareDatetime | None = None
     pending_submission: bool = False
@@ -231,6 +240,7 @@ class Decision(BaseModel):
     discount: FiniteDecimal | None = None
     target_actual: FiniteDecimal | None = None
     upload_price: FiniteDecimal | None = None
+    # 当前公式版本：档位后库存对应完整在线利润额，站点币/件。历史值按原公式版本解释。
     predicted_profit: FiniteDecimal | None = None
     upload_column: str | None = None
     trace: dict[str, Any] = Field(default_factory=dict)

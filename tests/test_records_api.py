@@ -42,6 +42,18 @@ def client(tmp_path):
         yield client
 
 
+def test_first_margin_exposes_only_selected_erp_order_amount(client):
+    with client.app.state.factory.begin() as session:
+        item = session.get(Item, 'i3')
+        row = {'row_id': 'selected', 'basis': 'order', 'fee_scope': 'erp-corrected-first-margin-v1',
+               'loss_amount': '-12.3000', 'currency': 'CNY', 'order_id': 'private-order'}
+        item.decision = dict(item.decision, selected_row_id='selected', unit_loss='4.10',
+                             trace=dict(item.decision['trace'], source_rows=[dict(row, row_id='other'), row]))
+    rows = {row['id']: row for row in client.get('/api/records').json()['items']}
+    assert rows['i3']['first_margin'] == {'amount': '-12.3000', 'currency': 'CNY'}
+    assert rows['i0']['first_margin'] is None
+
+
 def test_department_records_are_public_but_management_remains_protected(client):
     response = client.get('/api/records')
     assert response.status_code == 200

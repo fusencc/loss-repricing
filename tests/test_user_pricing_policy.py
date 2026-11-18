@@ -4,14 +4,14 @@ import pytest
 from test_execution_safety import safety_context
 
 
-def test_web_seven_day_observation_must_be_from_current_business_day():
+def test_stale_optional_sales_do_not_block():
     from test_pricing import single, NOW
-    result = single(online_fields={'sales_basis': 'sales_system_web_sku_seven_days',
+    result = single(online_fields={'sales_basis': 'erp_goods_warehouse_seven_days_reference',
                                    'sales_observed_at': NOW - timedelta(days=1)})
-    assert result.reason_code == 'invalid_sales'
+    assert result.ready
 
 
-def test_local_history_does_not_depend_on_external_company_log():
+def test_legacy_company_observations_are_not_the_official_count_source():
     from test_live_online_preparation import sources
     from app.adapters.live_online_preparation import prepare_online_states
     capture, targets, sources_ = sources()
@@ -30,14 +30,15 @@ def test_fixed_overseas_formula_includes_vat_and_public_commission():
     result = compile_overseas_fee(variant, rate, site='PH', warehouse='WH-PH', company_cny_per_currency='0.1')
     # 2.5592 CNY × 1.1 / 0.1 = 28.1512 PHP；a = 1 - 35.0411% - 5%。
     assert result['online_model'].profit(Decimal('100')) == Decimal('31.8077')
-    # 前置一次毛利仍沿用排除营销费用的已有口径。
-    assert result['model'].revenue_factor == Decimal('0.749589')
+    assert 'model' not in result
+    assert result['current_margin'] < 0  # 现价筛选仍保留。
 
 
-def test_live_enrichment_uses_own_database_even_if_external_snapshot_claims_increase(safety_context):
+def test_live_enrichment_uses_official_count_even_if_external_snapshot_claims_increase(safety_context,monkeypatch):
     from app.services.execution import PricingService
     factory,cfg,adapter,clock=safety_context
     adapter.mode='live'
+    mock_official_zero(monkeypatch,clock)
     snapshot=adapter.collect(clock[0].date())
     for row in snapshot.online:
         row.history_known=False
@@ -50,11 +51,12 @@ def test_live_enrichment_uses_own_database_even_if_external_snapshot_claims_incr
 @pytest.mark.parametrize('state,mode,actual,known,pending',[
     ('verified','live','11',True,False),('unknown','live','11',True,True),
     ('verified','demo','11',True,False),('failed','live','11',True,False),
-    ('verified','live','Infinity',False,False),('verified','live','NaN',False,False)])
-def test_only_verified_live_effect_is_a_local_increase(safety_context,state,mode,actual,known,pending):
+    ('verified','live','Infinity',True,False),('verified','live','NaN',True,False)])
+def test_local_execution_only_controls_pending_lock(safety_context,monkeypatch,state,mode,actual,known,pending):
     from app.models import Batch,Item,Execution
     from app.services.execution import PricingService
     factory,cfg,adapter,clock=safety_context;adapter.mode='live'
+    mock_official_zero(monkeypatch,clock)
     snapshot=adapter.collect(clock[0].date());key=snapshot.online[0].key
     effective=clock[0]-timedelta(hours=1);stamp=effective.isoformat()
     with factory.begin() as session:
@@ -69,4 +71,12 @@ def test_only_verified_live_effect_is_a_local_increase(safety_context,state,mode
             created_at=stamp,updated_at=stamp))
     result=PricingService(factory,adapter,cfg)._enrich(snapshot).online[0]
     assert result.history_known is known and result.pending_submission is pending
-    assert result.last_increase_at == (effective if mode=='live' and state=='verified' and known else None)
+    assert result.last_increase_at is None
+    assert result.recent_price_log.count == 0
+
+
+def mock_official_zero(monkeypatch,clock):
+    def capture(settings,keys,**kwargs):
+        return {'source_id':'synthetic-official','window_start':(clock[0]-timedelta(hours=72)).isoformat(),
+            'window_end':clock[0].isoformat(),'records':{k.item_id:{'status':'ok','count':0} for k in keys}}
+    monkeypatch.setattr('app.services.execution.capture_recent_price_changes',capture)

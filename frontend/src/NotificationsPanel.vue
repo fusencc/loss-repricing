@@ -101,7 +101,7 @@ onUnmounted(() => { ++requestVersion })
 </script>
 
 <template>
-  <section v-if="noticeId" class="panel table-panel" v-loading="busy">
+  <section v-if="noticeId" :key="noticeId" class="panel table-panel motion-reveal" v-loading="busy">
     <div class="table-toolbar">
       <div>
         <h2>通知涉及商品</h2>
@@ -137,7 +137,7 @@ onUnmounted(() => { ++requestVersion })
     </template>
   </section>
 
-  <section v-else class="panel table-panel" v-loading="busy">
+  <section v-else class="panel table-panel motion-reveal" v-loading="busy">
     <div class="table-toolbar">
       <div>
         <h2>通知收件箱</h2>

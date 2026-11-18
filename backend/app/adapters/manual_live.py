@@ -20,7 +20,7 @@ from app.adapters.normalization import money
 from app.adapters.sales_auth import ORIGIN, SalesAuth
 from app.adapters.sales_capture import capture_sales_sources, _json_values
 from app.adapters.sales_platform_capture import capture_platform_controls
-from app.adapters.sales_sales_window import capture_sales_window
+from app.adapters.erp_goods_sales import capture_goods_sales
 from app.adapters.fixed_pricing_fees import capture_fixed_fees
 from app.adapters.live_online_preparation import prepare_online_states
 from app.adapters.erp_rates import query_current_erp_fx
@@ -28,6 +28,7 @@ from app.adapters.transport_privacy import private_request
 from app.domain.money import MoneyRatio
 from app.domain.types import OnlineState, SiteContract, Snapshot, VariantKey, FeeModel
 from app.services.local_price_history import capture_local_price_history
+from app.adapters.official_price_logs import capture_recent_price_changes
 from app.services.erp_capture_store import write_verified
 from app.services.store import BEIJING, utcnow
 
@@ -169,7 +170,10 @@ class ManualLiveAdapter:
         target = {'key': k.model_dump(mode='json'), 'erp_shop': a['shop_name'], 'main_sku': a['main_sku'], 'erp_sku': k.sku}
         sales = capture_sales_sources(self.settings, capture, client=self.client)
         platform = capture_platform_controls(self.settings, capture, [{'erp_shop': a['shop_name'], 'product_id': k.product_id, 'item_id': k.item_id}], client=self.client)
-        window = capture_sales_window(self.settings, capture, [{'erp_shop': a['shop_name'], 'shop_id': k.shop_id, 'main_sku': a['main_sku']}], client=self.client)
+        official_history = capture_recent_price_changes(self.settings,[k],client=self.client)
+        from app.adapters.official_price_logs import recent_price_log_for
+        eligible = [target] if recent_price_log_for(official_history,k).count == 0 else []
+        window = capture_goods_sales(self.settings, capture, eligible, client=self.client)
         history = capture_local_price_history(self.settings, capture)
         fixed = capture_fixed_fees(self.settings, capture)
         fx = query_current_erp_fx(self.settings)
@@ -190,7 +194,7 @@ class ManualLiveAdapter:
             'item_id': k.item_id, 'local_sku': k.sku, 'public_commission_rate': '0',
             'source_cells': 'user-policy:excluded_by_user;不是实际佣金为零'})
         prepared = prepare_online_states(capture, [target], sales=sales, platform=prepared_platform,
-            window=window, local_history=history, fixed_fees=policy_fees)
+            window=window, local_history=history, fixed_fees=policy_fees, official_history=official_history)
         write_verified(self.directory / (capture['capture_id']+'-preparation.json'), {'preparation': prepared, 'activity': activity, 'authorization': a})
         if prepared['issues'] or len(prepared['online']) != 1: raise ValueError(str(prepared['issues']))
         state = dict(prepared['online'][0]['state'], fee_scope='normal')

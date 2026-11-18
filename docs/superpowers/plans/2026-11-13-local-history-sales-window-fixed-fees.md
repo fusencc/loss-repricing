@@ -25,7 +25,7 @@
 
 ### Task 1: 本地历史与网页七日来源
 - [x] 写失败测试：外部观察不再参与保护；多链接0+21按21保护；缺页保持未知。
-- [x] 实现 `capture_sales_window(settings,capture,targets,...)` 于sales_sales_window.py，替换ERP窗口采集；在线模型改为sales_observed_at及sales_basis。
+当前销量实现已替换为 `erp_goods_sales.capture_goods_sales`；先官方近72小时历史，再查询可选仓库参考值，取消销量保护。
 - [x] 精简local_price_history、live_online_preparation、erp_workflow与preview引用，删除未使用外部历史路径。
 - [x] 运行相关测试并记录结果。
 

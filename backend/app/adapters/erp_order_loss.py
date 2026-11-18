@@ -118,11 +118,15 @@ def prepare_order_losses(capture, native, sales=None, *, order_headers=None):
         details[row['order_id']].append(row)
     known_orders = {order for batch in native['batches'] if batch['status'] in ('complete', 'partial')
                     for order in batch['order_ids']}
+    batch_export = sales is not None and sales.get('source_mode') == 'online_sku_batch_export'
     parents, catalog = defaultdict(set), defaultdict(list)
     if sales is not None:
         for index, row in enumerate(sales['products']):
+            site = site_from_shop_name(row.get('shopName'))
+            if batch_export and row.get('exportSite') != site:
+                continue
             parents[row.get('shopName'), row.get('productId'), row.get('bloc')].add((
-                site_from_shop_name(row.get('shopName')), _text(row.get('localMainSku')),
+                site, _text(row.get('localMainSku')),
                 _text(row.get('shopId')), index))
         for index, row in enumerate(sales['variants']):
             catalog[row.get('shopName'), row.get('productId'), row.get('localSellerSku')].append((index, row))
@@ -226,7 +230,8 @@ def prepare_order_losses(capture, native, sales=None, *, order_headers=None):
                 if (variant.get('shopId') != shop_id or (variant.get('localMainSku') is not None
                         and variant.get('localMainSku') != main_sku)):
                     continue
-                if not warehouse or not _warehouse_matches(variant, warehouse):
+                # 批量文件先确认子商品身份以查询官方保护，实际算价前另核对动态仓配。
+                if not warehouse or (not batch_export and not _warehouse_matches(variant, warehouse)):
                     continue
                 try:
                     key = MappedKey(platform='TikTok', shop_id=variant.get('shopId'), site=site,
@@ -235,9 +240,10 @@ def prepare_order_losses(capture, native, sales=None, *, order_headers=None):
                     continue
                 identity = (key.identity(), main_sku)
                 mappings.setdefault(identity, {'erp_shop':shop, 'key':key.model_dump(mode='json'),
-                    'main_sku':main_sku, 'ref':f'{sales["source_id"]}/products/{parent_index}/variants/{index}'})
+                    'main_sku':main_sku, 'ref':variant['export_ref'] if batch_export else
+                    f'{sales["source_id"]}/products/{parent_index}/variants/{index}'})
         mapping = next(iter(mappings.values())) if len(mappings) == 1 else None
-        if mapping is None:
+        if mapping is None and amount < 0:
             issue(order, 'ambiguous_online_mapping' if len(mappings) > 1 else 'missing_same_warehouse_online_mapping')
         record_ref = f'{native["source_id"]}/same-sku-order/{order}'
         entry = OrderEvidence.model_validate({'order_id':order, 'details_complete':True, 'lines':[{

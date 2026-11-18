@@ -1,7 +1,7 @@
 """人工修正沿用同一执行意图、防重锁和回读；批准不等于已改价。
 
 与自动补亏不同，目标实际售价由有权销售员/主管明确提出。仍必须确认当前在线
-身份、仓配、币种、保护、活动和费用模型，校验档位前后正常一次毛利不为负。
+身份、仓配、币种、保护、活动和费用模型，校验档位前后库存对应完整在线利润不为负。
 只跳过自动补亏的当前不亏/72小时筛选，不把人工修正伪造成历史亏损订单。
 """
 from decimal import Decimal, DecimalException
@@ -13,7 +13,7 @@ from app.models.coordination import Correction, UserAccount
 from app.services.coordination import Principal, principal, can_access, lock_authorization
 from app.services.price_control import price_baseline, same_price, lock_control
 from app.services.store import utcnow, stamp, BEIJING, is_erp_reconciliation
-from app.domain.engine import allowed_error, conflicting_sales_scopes, SITE_CURRENCIES, valid_sales_observation
+from app.domain.engine import allowed_error, conflicting_main_sku_scopes, SITE_CURRENCIES
 from app.domain.money import MoneyRatio
 from app.domain.types import Decision, OnlineSourceIssue, VariantKey
 
@@ -39,7 +39,7 @@ def correction_gate(session, decision, control, locked=None):
     return True, ""
 
 def manual_decision(snapshot, online, desired, reason, correction_id, now):
-    key, contract, model = online.key, snapshot.contracts.get(online.key.site), online.fee_model
+    key, contract = online.key, snapshot.contracts.get(online.key.site)
     today = now.astimezone(BEIJING).date()
     if snapshot.business_date != today or snapshot.as_of > now:
         raise ValueError("修正须使用当日有效快照")
@@ -56,20 +56,16 @@ def manual_decision(snapshot, online, desired, reason, correction_id, now):
         for issue in snapshot.source_issues
     ):
         raise ValueError("目标或共享主 SKU 的在线数据异常，需核对后重新取数")
-    if scope in conflicting_sales_scopes(snapshot.online, now):
-        raise ValueError("共享主 SKU 的在线归属或七日销量存在冲突，需核对后重新取数")
+    if scope in conflicting_main_sku_scopes(snapshot.online, now):
+        raise ValueError("共享主 SKU 的在线归属存在冲突，需核对后重新取数")
     if not online.history_known or online.pending_submission:
         raise ValueError("调价历史不完整或仍有未知提交")
-    if (online.protected or not online.sales_complete or online.sales_7d is None
-            or online.sales_7d < 0 or online.sales_7d >= 21
-            or not valid_sales_observation(online, now)):
-        raise ValueError("人工修正仍需满足保护与完整销量依据")
+    if online.protected:
+        raise ValueError("命中人工保护名单")
     if online.activity_locked or not online.sellable:
         raise ValueError("活动锁价或不可售，先完成对应人工处理")
     if online.currency != SITE_CURRENCIES[key.site] or online.fee_scope != "normal":
         raise ValueError("币种或正常毛利口径不一致")
-    if not model or not model.verified or not model.version or model.revenue_factor <= 0 or model.fixed_cost < 0:
-        raise ValueError("缺少有效且已确认的正常毛利模型")
     if (not contract or not contract.verified or contract.site != key.site or not contract.version
             or not contract.upload_column or contract.price_step <= 0 or key.warehouse not in contract.warehouses):
         raise ValueError("站点仓配上传合同尚未确认")
@@ -90,15 +86,13 @@ def manual_decision(snapshot, online, desired, reason, correction_id, now):
     if (profit_check.model.profit_exact(target).numerator < 0
             or profit_check.model.profit_exact(actual).numerator < 0):
         raise ValueError("人工指定价的在线利润率仍为负，请修正价格")
-    profit = model.profit_exact(actual)
-    if model.profit_exact(target).numerator < 0 or profit.numerator < 0:
-        raise ValueError("修正目标或档位后的正常一次毛利仍为负")
+    profit = profit_check.model.profit_exact(actual)
     if upload <= 0 or (actual-target).absolute() > MoneyRatio(allowed_error(key.site)):
         raise ValueError("修正价按站点档位舍入后超出实际售价误差")
     return Decision(key=key,status="待处理",ready=True,reason_code="manual_correction",
         reason="已授权人工修正："+reason,source_row_ids=[],current_actual=current,discount=discount.decimal(),
         target_actual=desired,upload_price=upload,predicted_profit=profit.decimal(),upload_column=contract.upload_column,
-        trace={"formula_version":"manual-correction-v1","correction_id":correction_id,
+        trace={"formula_version":"manual-online-profit-only-v2","correction_id":correction_id,
                "business_date":today.isoformat(),"evaluated_at":now.isoformat(),
                "online_rows":[online.model_dump(mode="json")],"site_contract":contract.model_dump(mode="json"),
                "source_versions":dict(snapshot.source_versions),"rounded_actual":str(actual.decimal()),

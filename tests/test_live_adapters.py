@@ -39,7 +39,7 @@ ROW = {
 ONLINE = {
     "product": PRODUCT, "main": "0003", "ccy": "MYR", "r": "20", "m": "10",
     "margin": "-0.04", "seen": OBSERVED, "qty": 10,
-    "sales_basis": "sales_system_web_sku_seven_days", "sales_seen": OBSERVED, "full": True, "history": True,
+    "sales_basis": "erp_goods_warehouse_seven_days_reference", "sales_seen": OBSERVED, "full": True, "history": True,
     "last": None, "pending": False, "protected": False, "locked": False, "sellable": True,
     "profit": {"overseas_stock":"0","mode":"direct","department":"TEST",
         "inventory_observed_at":OBSERVED,"source_ref":"synthetic/profit",
@@ -58,9 +58,7 @@ def contract():
         "main_sku": "main", "currency": "ccy", "retail_price": "r", "marketing_price": "m",
         "current_margin": "margin", "observed_at": "seen", "sales_7d": "qty", "sales_basis": "sales_basis",
         "sales_observed_at": "sales_seen", "sales_complete": "full", "protected": "protected",
-        "activity_locked": "locked", "sellable": "sellable", "fee_model.revenue_factor": "fee.factor",
-        "fee_model.fixed_cost": "fee.cost", "fee_model.version": "fee.rev",
-        "fee_model.verified": "fee.reviewed", "profit_check":"profit",
+        "activity_locked": "locked", "sellable": "sellable", "profit_check":"profit",
     }
     collection = {
         "version": "candidate-v1", "service": "erp", "method": "POST", "records_path": "payload.rows",
@@ -89,7 +87,7 @@ def contract():
         },
         "sites": {
             "MY": {"verified": True, "price_step": "0.01", "rounding": "ROUND_HALF_UP",
-                   "upload_column": "直发仓税后价格", "version": "my-v1", "fee_model_version": "fees-v1", "online_profit_model_version":"synthetic-online-v1",
+                   "upload_column": "直发仓税后价格", "version": "my-v1", "online_profit_model_version":"synthetic-online-v1",
                    "warehouses": ["direct"]},
         },
         "submit": {
@@ -222,10 +220,8 @@ def test_collect_maps_four_sources_online_and_fx(contract, make_adapter):
     assert line.key == VariantKey(**IDENTITY)
     assert line.loss_amount == Decimal("-0.9999999999999999")
     assert json.loads(line.row_id) == ["0002", "0001"] and line.row_id in line.source_ref
-    assert snapshot.online[0].fee_model.revenue_factor == Decimal("0.91")
-    assert snapshot.online[0].fee_model.verified
+    assert snapshot.online[0].profit_check.model.verified
     assert snapshot.source_versions["fx"] == "rates-v1"
-    assert snapshot.source_versions["fee_model.MY"] == "fees-v1"
 
 
 def test_live_http_does_not_require_or_trust_external_price_history(contract, make_adapter):
@@ -234,7 +230,7 @@ def test_live_http_does_not_require_or_trust_external_price_history(contract, ma
     adapter=make_adapter(contract,collection_response)
     assert adapter.readiness()['contract_ready']
     state=adapter.collect(DAY).online[0]
-    # 原始来源中的history/last/pending不参与；只能等服务读取本地权威库。
+    # 原始来源中的history/last/pending不参与；等待官方计数与本地未完成任务核对。
     assert state.history_known is False
     assert state.last_increase_at is None and state.pending_submission is False
 
@@ -253,15 +249,21 @@ def with_source_rows(**sources):
 
 
 
-def with_own_history(snapshot):
-    """HTTP只提供外部事实，规则测试也通过真实服务读取空的临时权威库。"""
+def with_official_history(snapshot):
+    """通过真实服务读取临时执行库，并注入明确的官方零计数。"""
     from types import SimpleNamespace
+    from unittest.mock import patch
     from app.db import Base, create_database
     from app.services.execution import PricingService
     engine,factory=create_database('sqlite://')
     try:
         Base.metadata.create_all(engine)
-        return PricingService(factory,SimpleNamespace(mode='live'),Settings(_env_file=None))._enrich(snapshot)
+        from datetime import timedelta
+        def official(settings,keys,**kwargs):
+            return {'source_id':'synthetic-official','window_start':(snapshot.as_of-timedelta(hours=72)).isoformat(),
+                'window_end':snapshot.as_of.isoformat(),'records':{k.item_id:{'status':'ok','count':0} for k in keys}}
+        with patch('app.services.execution.capture_recent_price_changes',official):
+            return PricingService(factory,SimpleNamespace(mode='live'),Settings(_env_file=None))._enrich(snapshot)
     finally:
         engine.dispose()
 
@@ -281,7 +283,7 @@ def test_candidate_field_failure_holds_only_locatable_targets(contract, make_ada
     )
 
     snapshot = make_adapter(contract, handler, enabled=False).collect(DAY)
-    results = {decision.key.item_id: decision for decision in evaluate(with_own_history(snapshot), datetime.fromisoformat(OBSERVED))}
+    results = {decision.key.item_id: decision for decision in evaluate(with_official_history(snapshot), datetime.fromisoformat(OBSERVED))}
 
     assert snapshot.complete_sources == SOURCES
     assert results["003"].reason_code == "source_record_invalid"
@@ -323,7 +325,7 @@ def test_invalid_candidate_still_counts_as_a_separate_order_line(contract, make_
     )
 
     snapshot = make_adapter(contract, handler).collect(DAY)
-    results = {decision.key.item_id: decision for decision in evaluate(with_own_history(snapshot), datetime.fromisoformat(OBSERVED))}
+    results = {decision.key.item_id: decision for decision in evaluate(with_official_history(snapshot), datetime.fromisoformat(OBSERVED))}
 
     assert results["003"].reason_code == "no_valid_loss"
     assert results["003"].trace["excluded_source_rows"] == {
@@ -356,7 +358,7 @@ def test_bad_online_state_holds_its_target_and_shared_main_sku(contract, make_ad
     )
 
     snapshot = make_adapter(contract, handler).collect(DAY)
-    results = {decision.key.item_id: decision for decision in evaluate(with_own_history(snapshot), datetime.fromisoformat(OBSERVED))}
+    results = {decision.key.item_id: decision for decision in evaluate(with_official_history(snapshot), datetime.fromisoformat(OBSERVED))}
 
     assert {state.key.item_id for state in snapshot.online} == {"008", "009"}
     assert results["003"].reason_code == "source_record_invalid"
@@ -385,7 +387,7 @@ def test_shared_sales_issue_evidence_is_bounded_per_candidate(contract, make_ada
                                blocked_pending=[], online=online)
 
     snapshot = make_adapter(contract, handler, enabled=False).collect(DAY)
-    results = evaluate(with_own_history(snapshot), datetime.fromisoformat(OBSERVED))
+    results = evaluate(with_official_history(snapshot), datetime.fromisoformat(OBSERVED))
 
     assert len(snapshot.source_issues) == 25 and len(results) == 10
     for result in results:
@@ -419,6 +421,8 @@ def test_worker_persists_bad_source_and_prices_independent_target(contract, make
     adapter = make_adapter(contract, record, enabled=False)
     now = datetime.fromisoformat(OBSERVED)
     monkeypatch.setattr(execution, "utcnow", lambda: now)
+    from test_user_pricing_policy import mock_official_zero
+    mock_official_zero(monkeypatch,[now])
     monkeypatch.setattr(store, "utcnow", lambda: now)
     monkeypatch.setattr("app.main.build_adapter", lambda config: adapter)
     settings = Settings(
@@ -478,12 +482,14 @@ def test_well_formed_sales_conflict_cannot_price_affected_main_skus(contract, ma
         loss_pending=[], blocked_allocatable=[], blocked_pending=[], online=online,
     )
     snapshot = make_adapter(contract, respond).collect(DAY)
-    results = {result.key.item_id: result for result in evaluate(with_own_history(snapshot), datetime.fromisoformat(OBSERVED))}
+    results = {result.key.item_id: result for result in evaluate(with_official_history(snapshot), datetime.fromisoformat(OBSERVED))}
 
     assert not snapshot.source_issues  # 字段均合规；问题来自有效记录之间的证据冲突。
     assert results["009"].ready
     if shape == "stale_count":
         assert results["003"].ready and not results["008"].ready
+    elif shape == "same_scope_count":
+        assert results["003"].ready and results["008"].ready
     else:
         assert results["003"].reason_code == results["008"].reason_code == "conflicting_main_sku_sales"
 
@@ -529,7 +535,7 @@ def test_missing_candidate_warehouse_retains_scope_without_guessing(contract, ma
     )
     snapshot = make_adapter(contract, respond).collect(DAY)
     snapshot = Snapshot.model_validate_json(snapshot.model_dump_json())
-    results = {decision.key.item_id: decision for decision in evaluate(with_own_history(snapshot), datetime.fromisoformat(OBSERVED))}
+    results = {decision.key.item_id: decision for decision in evaluate(with_official_history(snapshot), datetime.fromisoformat(OBSERVED))}
 
     assert snapshot.complete_sources == SOURCES
     assert len(snapshot.source_issues) == 2
@@ -584,7 +590,7 @@ def test_paginated_detail_ids_are_scoped_to_orders(contract, make_adapter, secon
             adapter.collect(DAY)
         return
     snapshot = adapter.collect(DAY)
-    result = evaluate(with_own_history(snapshot), datetime.fromisoformat(OBSERVED))[0]
+    result = evaluate(with_official_history(snapshot), datetime.fromisoformat(OBSERVED))[0]
     assert result.unit_loss == Decimal("0.2")
     assert json.loads(result.selected_row_id) == [second_order, ROW["detail"]]
 
@@ -823,8 +829,15 @@ def test_online_profit_http_contract_rejects_unapproved_or_coerced_proof(contrac
     elif change=="string_verified":raw["profit"]["model"]["verified"]="true"
     else:raw["profit"]["model"]["fixed_cost"]=9.8
     if change=="unapproved_version":
-        state=online_state(raw,contract["collections"]["online"],{"MY":"fees-v1"},{"MY":"synthetic-online-v1"})
+        state=online_state(raw,contract["collections"]["online"],{"MY":"synthetic-online-v1"})
         assert state.profit_check.model.verified is False
     else:
         with pytest.raises(ValueError):
-            online_state(raw,contract["collections"]["online"],{"MY":"fees-v1"},{"MY":"synthetic-online-v1"})
+            online_state(raw,contract["collections"]["online"],{"MY":"synthetic-online-v1"})
+
+
+def test_missing_optional_sales_field_does_not_invalidate_http_online_record(contract, make_adapter):
+    row=dict(ONLINE);row.pop('qty')
+    snapshot=make_adapter(contract,with_source_rows(online=[row])).collect(DAY)
+    assert not snapshot.source_issues
+    assert len(snapshot.online)==1 and snapshot.online[0].sales_7d is None
