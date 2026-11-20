@@ -18,7 +18,7 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
     write_verified(args.output, config)
     print(json.dumps({'version': config['version'], 'sites': sorted(config['overseas']),
-                     'departments': len(config['departments']), 'product_inputs': len(config['product_inputs'])}))
+                     'departments': len(config['departments'])}))
 
 
 if __name__ == '__main__':

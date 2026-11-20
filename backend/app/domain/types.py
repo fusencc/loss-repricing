@@ -16,6 +16,9 @@ PriceRounding = Literal["ROUND_HALF_UP", "ROUND_DOWN", "ROUND_UP"]
 DecisionStatus = Literal["本轮不调", "待处理", "待核验", "已核验"]
 FiniteDecimal = Annotated[Decimal, Field(allow_inf_nan=False)]
 
+# 2026-11-20 用户确认：完整在线利润率统一最低 1%，直发与海外仓共用。
+ONLINE_PROFIT_MINIMUM_MARGIN = Decimal("0.01")
+
 
 class VariantReference(BaseModel):
     """已定位的来源变体。字段异常记录可以保留仓配缺失的原状。"""
@@ -91,6 +94,10 @@ class FeeModel(BaseModel):
         """G(P)=P×a-b；循环小数价格延迟除法，零毛利不能由近似尾差变成负值。"""
         return price * MoneyRatio(self.revenue_factor) - MoneyRatio(self.fixed_cost, self.fixed_cost_divisor)
 
+    def meets_minimum_online_margin(self, price: MoneyRatio) -> bool:
+        """按精确比值比较 G(P) >= P×1%，不以显示取整或价格容差放行。"""
+        return price.numerator > 0 and self.profit_exact(price) >= price * MoneyRatio(ONLINE_PROFIT_MINIMUM_MARGIN)
+
 
 class OnlineProfitCheck(BaseModel):
     """11/12新增的完整在线利润校验，与排除广告营销的一次毛利分开。
@@ -116,12 +123,13 @@ class OnlineProfitCheck(BaseModel):
                 or self.inventory_observed_at.astimezone(BEIJING).date() != business_date):
             return "库存日期、部门或利润公式来源未确认"
         if (not self.model.verified or not self.model.version.strip()
-                or self.model.revenue_factor <= 0 or self.model.fixed_cost < 0):
-            return "在线利润模型未确认或不能求得保本价"
+                or self.model.revenue_factor <= ONLINE_PROFIT_MINIMUM_MARGIN or self.model.fixed_cost < 0):
+            return "在线利润模型未确认或不能计算在线利润校正额"
         return None
 
-    def break_even(self):
-        return MoneyRatio(self.model.fixed_cost, self.model.fixed_cost_divisor) / MoneyRatio(self.model.revenue_factor)
+    def minimum_actual_price(self):
+        """完整在线利润率达到1%的最低实际价：b/(a-m)，用于求在线利润校正额。"""
+        return MoneyRatio(self.model.fixed_cost, self.model.fixed_cost_divisor) / (MoneyRatio(self.model.revenue_factor) - MoneyRatio(ONLINE_PROFIT_MINIMUM_MARGIN))
 
 
 class RecentPriceLog(BaseModel):

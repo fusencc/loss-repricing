@@ -1,11 +1,11 @@
 """销售记录页的只读投影；不调用采集、调价或通知，不返回原始证据。"""
 from collections import Counter
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from sqlalchemy import select
 from app.models import Batch, Item, Execution, Ownership, UserAccount
 from app.services.coordination import ownership_scopes
 
 KEY_FIELDS = ('platform', 'shop_id', 'site', 'product_id', 'item_id', 'sku', 'warehouse')
-PRICE_FIELDS = ('uploaded_tax_inclusive', 'tax_exclusive', 'actual_tax_inclusive', 'marketing')
 
 
 def display_text(value):
@@ -38,6 +38,104 @@ def record_seller(item, ownerships, names):
     return {'id': owner.owner_id, 'name': name} if name else {'id': None, 'name': '待分配'}
 
 
+# 展示名按用户口径：② 补亏损、③ 利润校验。③ 相对②的增加额即在线利润校正额，单列展示。
+STAGE_LABELS = (
+    ('original', '① 原实际营销价'),
+    ('loss', '② 补亏损'),
+    ('break_even', '③ 利润校验'),
+)
+DISPLAY_QUANT = Decimal('0.0001')
+PERCENT_QUANT = Decimal('0.01')
+
+
+def _decimal(value):
+    """读取已保存的十进制文本；空值或非法文本返回 None，不猜默认值。"""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return Decimal(value)
+    except InvalidOperation:
+        return None
+
+
+def _display(value, quantum=DISPLAY_QUANT):
+    # 展示层固定小数位；业务判定仍使用保存的原始精确值。
+    return str(value.quantize(quantum, rounding=ROUND_HALF_UP))
+
+
+def price_stages(decision, trace, snapshot, item_key):
+    """把价格拆成「原实际营销价→只补回订单亏损→提高到模型保本价」三环节。
+
+    只使用判定时保存的金额：① 为 decision.current_actual；② 优先取
+    trace.online_profit.initial_target，旧判定回退到 current_actual + station_loss；
+    ③ 为 decision.target_actual。折合人民币按快照汇率方向换算（cny_per_currency
+    直接相乘，旧 currency_per_cny 快照相除）。任一环节缺证据即保留空值，不用
+    目标价或当前价顶替，也不在前端重算。增量与涨幅均相对上一个有值的环节；
+    「在线利润率导致的变动」取 trace.online_profit.correction_amount（在线利润
+    校正额），仅在 ③ 利润校验行输出，缺证据时为 null 不显示。
+    """
+    current = _decimal(decision.get('current_actual'))
+    target = _decimal(decision.get('target_actual'))
+    if current is None or target is None:
+        return None
+    online_profit = trace.get('online_profit') or {}
+    initial = _decimal(online_profit.get('initial_target'))
+    station_loss = _decimal(decision.get('station_loss'))
+    loss_stage = initial if initial is not None else (
+        current + station_loss if station_loss is not None else None)
+
+    currency = display_text(trace.get('station_currency'))
+    if currency is None:
+        # 旧判定没有顶层币种时，仅在同商品在线行币种唯一时采用，不跨商品猜。
+        rows = [row for row in trace.get('online_rows') or [] if isinstance(row, dict)]
+        currencies = {display_text(row.get('currency')) for row in rows
+                      if all((row.get('key') or {}).get(k) == item_key.get(k) for k in KEY_FIELDS)}
+        if len(currencies) == 1 and None not in currencies:
+            currency = next(iter(currencies))
+    snapshot = snapshot or {}
+    rate = _decimal((snapshot.get('fx_rates') or {}).get(currency)) if currency else None
+    fx_unit = snapshot.get('fx_rate_unit')
+
+    def to_cny(amount):
+        if amount is None or rate is None or rate <= 0:
+            return None
+        # 快照未标注单位的历史数据是「每1CNY可兑换的站点币」，需要相除。
+        return amount * rate if fx_unit == 'cny_per_currency' else amount / rate
+
+    values = {'original': current, 'loss': loss_stage, 'break_even': target}
+    # 「在线利润率导致的变动」只在 ③ 利润校验行有值：在线利润校验要求目标价高于
+    # 初步补亏价时，其差额就是保存的在线利润校正额（correction_amount）；通过校验为 0，
+    # 缺证据为 None。与折合人民币列同汇率换算并同精度显示，不在前端重算。
+    profit_correction = _decimal((trace.get('online_profit') or {}).get('correction_amount'))
+    profit_change_cny = to_cny(profit_correction)
+    rows, previous = [], None
+    for key, label in STAGE_LABELS:
+        amount = values[key]
+        cny = to_cny(amount)
+        # 「比上一环节」严格相对表格上一行；上一环节缺失时为 —，不跨行比较制造环比。
+        change_cny = to_cny(amount - previous) if amount is not None and previous is not None else None
+        change_percent = (None if amount is None or previous is None or previous == 0
+                          else (amount - previous) / previous * Decimal(100))
+        rows.append({
+            'key': key, 'label': label,
+            'price': None if amount is None else _display(amount),
+            'cny': None if cny is None else _display(cny),
+            'change_cny': None if change_cny is None else _display(change_cny),
+            'change_percent': None if change_percent is None else _display(change_percent, PERCENT_QUANT),
+            # ③ 行展示在线利润校正额折合人民币；缺证据为 null，显示层不推断为 0。
+            'profit_change_cny': None if key != 'break_even' or profit_change_cny is None
+                                 else _display(profit_change_cny),
+        })
+        previous = amount
+
+    return {
+        'currency': currency,
+        'fx_rate': None if rate is None else str(rate),
+        'fx_date': display_text(snapshot.get('fx_date')),
+        'rows': rows,
+    }
+
+
 def public_record(item, batch, execution, department, seller):
     decision = item.decision or {}
     trace = decision.get('trace') or {}
@@ -59,15 +157,11 @@ def public_record(item, batch, execution, department, seller):
                 first_margin = {'amount': amount, 'currency': original_currency}
     evidence = execution.evidence or {} if execution else {}
     archive = evidence.get('price_record') or {}
-    # 金额始终为保存时的十进制文本。目标/建议上传与原提交意图/实际回读严格分开。
-    # 四价观察时间只描述该次回读，不冒充调价生效时间。
-    prices = {name: {field: display_text(value.get(field))
-                        for field in ('amount', 'currency', 'observed_at')}
-              for name in PRICE_FIELDS
-              if isinstance(value := (archive.get('prices') or {}).get(name), dict)}
+    # 用户要求记录页不展示四价存档（税前价、平台回读含税价、营销价观察等）；
+    # 这些证据仍完整保存在 Execution.evidence.price_record，只从页面投影移除，不删原始证据。
     # 只展示算价选中的 ERP 订单修正一次毛利：保留原币、订单总额及负号，不用换汇或单件亏损替代。
     selected = display_text(decision.get('selected_row_id'))
-    margin_rows = [row for row in trace.get('source_rows', []) if selected and row.get('row_id') == selected]
+    margin_rows = [row for row in (trace.get('source_rows') or []) if selected and row.get('row_id') == selected]
     margin = None
     if len(margin_rows) == 1:
         row = margin_rows[0]
@@ -75,6 +169,15 @@ def public_record(item, batch, execution, department, seller):
             amount = display_text(row.get('loss_amount'))
             if amount is not None:
                 margin = {'amount': amount, 'currency': display_text(row.get('currency'))}
+    # 价格变动 = 目标实际价 - 调整前实际价，与 decision 两价同币种（站点币）；
+    # 任一价缺失或无效则不显示，不猜测。用 Decimal 保持与保存金额同精度，正数带 + 号由前端展示。
+    price_change = None
+    current, target = decision.get('current_actual'), decision.get('target_actual')
+    if isinstance(current, str) and current.strip() and isinstance(target, str) and target.strip():
+        try:
+            price_change = str(Decimal(target) - Decimal(current))
+        except InvalidOperation:
+            price_change = None
     reconciliation = (batch.snapshot or {}).get('erp_reconciliation') or {}
     return {
         'id': item.id, 'batch_id': item.batch_id,
@@ -84,7 +187,9 @@ def public_record(item, batch, execution, department, seller):
         'status': item.status, 'reason': item.reason, 'updated_at': item.updated_at,
         'decision': {field: display_text(decision.get(field))
                      for field in ('current_actual', 'target_actual', 'upload_price')} | {
-            'trace': {'station_currency': currency}
+            'trace': {'station_currency': currency}, 'price_change': price_change,
+            # 三环节价格表由后端用保存金额与当日汇率算出，前端只按行展示。
+            'stages': price_stages(decision, trace, batch.snapshot, item.key) if decision else None,
         } if decision else None,
         'corrected_first_margin': margin,
         'execution': {
@@ -94,7 +199,7 @@ def public_record(item, batch, execution, department, seller):
             'confirmed_at': display_text(evidence.get('confirmed_at')),
             'effective_at': display_text(evidence.get('effective_at')),
             'effective_time_source': display_text(evidence.get('effective_time_source')),
-            'updated_at': execution.updated_at, 'prices': prices,
+            'updated_at': execution.updated_at,
         } if execution else None,
         'business_date': batch.business_date, 'mode': batch.mode,
         'synthetic': batch.mode == 'demo' or bool(reconciliation.get('synthetic')),

@@ -14,7 +14,7 @@ def auth():
             'key': dict(platform='TikTok', shop_id='shop-1', site='PH', product_id='product-1', item_id='item-1', sku='SKU-1', warehouse='菲律宾海外仓'),
             'shop_name': 'testPH', 'upload_price': '87.18', 'currency': 'PHP',
             'discount_percent_off': '60',
-            'public_commission_policy': 'excluded_by_user', 'actor': 'user', 'approved': True}
+            'actor': 'user', 'approved': True}
 
 
 def test_authorization_exact_target_and_price():
@@ -100,7 +100,7 @@ def test_one_cent_native_conversion_requires_matching_net_price_and_logistics():
     a, log, detail, current = evidence()
     log['priceNew'] = '82.19'
     detail['requestBody']['skus'][0]['price']['amount'] = '82.19'
-    current.update(retail='87.19', actual='34.88', tax_exclusive='82.19', logistics='5.00')
+    current.update(retail='87.19', actual='34.88', tax_exclusive='82.19', logistics='5.00', vat_percent='0')
     assert verify_price_evidence(a, [], log, detail, current, Decimal('34.872')) == Decimal('34.88')
     with pytest.raises(ValueError):
         verify_price_evidence(a, [], log, detail, dict(current, tax_exclusive='82.18'), Decimal('34.872'))
@@ -125,3 +125,50 @@ def test_explicit_row_rejection_requires_unchanged_price_and_no_new_task(tmp_pat
     assert adapter.lookup('one',None,key).status == expected
     adapter._logs = lambda: [{'id':'new','type':2}]
     assert adapter.lookup('one',None,key).status == 'unknown'
+
+
+@pytest.mark.parametrize('site,currency',[('MY','MYR'),('TH','THB')])
+def test_exact_manual_target_authorization_supports_current_test_sites(site,currency):
+    a=auth();a['key']['site']=site;a['currency']=currency
+    validate_authorization(a,VariantKey.model_validate(a['key']),Decimal('87.18'))
+    with pytest.raises(ValueError):validate_authorization({**a,'currency':'PHP'},VariantKey.model_validate(a['key']),Decimal('87.18'))
+
+
+def test_product_percentage_promotion_is_verified_against_current_variant(tmp_path):
+    from app.adapters.manual_live import ManualLiveAdapter
+    a=auth();a['key']['site']='MY';a['currency']='MYR'
+    ad=ManualLiveAdapter(Settings(_env_file=None),a,tmp_path)
+    parent={'shopid':'shop-1','promotionId':'promo','promotionType':2,'productType':1,'status':2}
+    product={'shopid':'shop-1','productId':'product-1','promotionId':'promo','sellerSkuId':None,'promotionPrice':None,'discount':'60','priceIncludeVat':None,'marketPrice':None}
+    calls=[]
+    def request(method,path,**kwargs):
+        calls.append(kwargs['json'])
+        return {'code':0,'count':1,'data':[parent if path.endswith('findByPage') else product]}
+    ad._request=request
+    v={'promotionId':'promo','discount':'60','marketPrice':'4','priceIncludeVat':'10'}
+    assert ad._promotion(v)['kind']=='percentage_discount'
+    assert calls[-1]['productType']==1 and 'sellerSkuIds' not in calls[-1]
+    product['promotionPrice']='4'
+    with pytest.raises(ValueError):ad._promotion(v)
+    product['promotionPrice']=None;product['productId']='other'
+    with pytest.raises(ValueError):ad._promotion(v)
+
+
+def test_my_one_cent_readback_requires_exact_native_vat_and_logistics():
+    a,log,detail,current=evidence()
+    a['key']['site']='MY';a['currency']='MYR';a['upload_price']='6.45'
+    log.update(priceIncludeVat='6.45',priceNew='5.81')
+    detail['requestBody']['skus'][0]['price']={'currency':'MYR','amount':'5.81'}
+    current.update(retail='6.46',actual='2.584',currency='MYR',tax_exclusive='5.81',logistics='0.06',vat_percent='10')
+    assert verify_price_evidence(a,[],log,detail,current,Decimal('2.58'))==Decimal('2.584')
+    with pytest.raises(ValueError):verify_price_evidence(a,[],log,detail,dict(current,vat_percent='9'),Decimal('2.58'))
+    with pytest.raises(ValueError):verify_price_evidence(a,[],log,detail,dict(current,tax_exclusive='5.80'),Decimal('2.58'))
+
+
+def test_th_native_vat_price_uses_observed_upward_cent_rounding():
+    a,log,detail,current=evidence()
+    a['key']['site']='TH';a['currency']='THB';a['upload_price']='76.53'
+    log.update(priceIncludeVat='76.53',priceNew='61.26')
+    detail['requestBody']['skus'][0]['price']={'currency':'THB','amount':'61.26'}
+    current.update(retail='76.54',actual='30.616',currency='THB',tax_exclusive='61.26',logistics='0.40',vat_percent='24.12')
+    assert verify_price_evidence(a,[],log,detail,current,Decimal('30.612'))==Decimal('30.616')

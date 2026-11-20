@@ -143,11 +143,70 @@ def test_public_projection_keeps_price_evidence_but_no_private_payload(client):
     assert row['execution']['uploaded_price'] == '18.00'
     assert row['execution']['actual_price'] == '15.12'
     assert row['execution']['effective_time_source'] == 'confirmed_at'
-    assert row['execution']['prices']['tax_exclusive'] == {'amount': '16.50', 'currency': 'MYR',
-        'observed_at': '2026-11-17T03:00:00+00:00'}
+    # 用户已确认记录页不展示四价存档：投影不再返回 prices，原始证据仍在数据库。
+    assert 'prices' not in row['execution']
     assert row['synthetic'] is True
     assert 'private' not in response.text
     assert 'internal_token' not in row['key']
+
+
+def test_price_change_is_target_minus_current_with_decimal_precision(client):
+    """价格变动 = 目标实际价 − 调整前实际价，Decimal 保存精度；任一价缺失则不显示。"""
+    rows = {row['id']: row for row in client.get('/api/records').json()['items']}
+    # i3 保存的 12.00 → 15.123456789123456789；十进制差值完整保留，不截断不四舍五入。
+    assert rows['i3']['decision']['price_change'] == '3.123456789123456789'
+    with client.app.state.factory.begin() as session:
+        item = session.get(Item, 'i0')
+        item.decision = {**item.decision, 'current_actual': '12.5', 'target_actual': '11.25'}
+        missing = session.get(Item, 'i1')
+        missing.decision = {**missing.decision, 'current_actual': None, 'target_actual': '15.00'}
+    rows = {row['id']: row for row in client.get('/api/records').json()['items']}
+    assert rows['i0']['decision']['price_change'] == '-1.25'
+    # i1 属于 Tiktok五部；缺调整前实际价时不显示价格变动，不猜测。
+    rows_wu = {row['id']: row for row in client.get('/api/records', params={'department': 'department:Tiktok五部'}).json()['items']}
+    assert rows_wu['i1']['decision']['price_change'] is None
+
+
+def test_price_stages_split_loss_and_profit_check_steps(client):
+    """三环节：① 原实际营销价 ② 补亏损 ③ 利润校验，折合人民币与环比都由后端算好。"""
+    with client.app.state.factory.begin() as session:
+        batch = session.get(Batch, 'b3')
+        batch.snapshot = {'fx_rates': {'MYR': '0.65', 'CNY': '1'}, 'fx_rate_unit': 'cny_per_currency',
+                          'fx_date': '2026-11-17'}
+        item = session.get(Item, 'i3')
+        item.decision = dict(item.decision, current_actual='14', target_actual='34.868', station_loss='11.9602',
+                             trace=dict(item.decision['trace'], online_profit={
+                                 'initial_target': '25.9602', 'correction_amount': '8.9078'}))
+    rows = {row['id']: row for row in client.get('/api/records').json()['items']}
+    stages = rows['i3']['decision']['stages']
+    assert stages['currency'] == 'MYR' and stages['fx_rate'] == '0.65'
+    assert [(row['label'], row['price']) for row in stages['rows']] == [
+        ('① 原实际营销价', '14.0000'), ('② 补亏损', '25.9602'), ('③ 利润校验', '34.8680')]
+    # 每1MYR折0.65元；增量与涨幅相对上一环节，正数由前端补 + 号。
+    assert [row['cny'] for row in stages['rows']] == ['9.1000', '16.8741', '22.6642']
+    assert [row['change_cny'] for row in stages['rows']] == [None, '7.7741', '5.7901']
+    assert [row['change_percent'] for row in stages['rows']] == [None, '85.43', '34.31']
+    # 在线利润率导致的变动只出现在 ③ 利润校验行：校正额 8.9078 MYR × 0.65 = 5.7901 元。
+    assert [row['profit_change_cny'] for row in stages['rows']] == [None, None, '5.7901']
+
+
+def test_price_stages_never_invent_the_loss_step_or_fx_rate(client):
+    """没有保存补亏环节或汇率的记录：该行留空，不用目标价顶替。"""
+    rows = {row['id']: row for row in client.get('/api/records').json()['items']}
+    stages = rows['i3']['decision']['stages']
+    assert stages['rows'][1]['price'] is None and stages['rows'][1]['change_cny'] is None
+    # 上一环节缺失时「比上一环节」留空，不跨行比较制造环比。
+    assert stages['rows'][2]['change_cny'] is None and stages['rows'][2]['change_percent'] is None
+    # 没有保存在线利润校正额时该列留空，不把缺证据当 0。
+    assert stages['rows'][2]['profit_change_cny'] is None
+    assert stages['rows'][0]['cny'] is None
+    with client.app.state.factory.begin() as session:
+        batch = session.get(Batch, 'b3')
+        # 旧快照未标注单位时是「每1CNY可兑换的站点币」，折人民币要相除。
+        batch.snapshot = {'fx_rates': {'MYR': '1.5385', 'CNY': '1'}, 'fx_date': '2026-11-17'}
+    stages = {row['id']: row for row in client.get('/api/records').json()['items']}['i3']['decision']['stages']
+    # 该记录原始价 12.00 MYR；12 ÷ 1.5385 = 7.7998 元。
+    assert stages['rows'][0]['cny'] == '7.7998'
 
 
 def test_empty_database_is_a_valid_empty_page(client):

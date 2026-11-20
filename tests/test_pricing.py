@@ -77,9 +77,9 @@ def test_cny_fixed_cost_preserves_exact_break_even_and_returns_station_currency(
         online_fields={'retail_price':'1','current_margin':'-1','profit_check':online(key()).profit_check.model_copy(update={'model':model})},
         snapshot_fields={'fx_rates':{'CNY':'1','MYR':'3'},'fx_rate_unit':'cny_per_currency',
                          'contracts':{'MY':contract(rounding='ROUND_UP')}})
-    assert result.ready and result.upload_price==Decimal('1.34')
-    assert Decimal(result.trace['target_profit'])==0
-    assert result.predicted_profit==MoneyRatio(Decimal('0.02'),Decimal(3)).decimal()
+    assert result.ready and result.upload_price==Decimal('1.35')
+    assert Decimal(result.trace['online_profit']['target_margin'])==Decimal('.01')
+    assert result.predicted_profit==MoneyRatio(Decimal('0.05'),Decimal(3)).decimal()
 
 
 @pytest.mark.parametrize('divisor',['0','-1','NaN','Infinity'])
@@ -336,17 +336,18 @@ def test_invalid_current_prices_are_pending(online_fields):
     assert not result.ready
 
 
-def test_online_profit_shortfall_is_raised_to_break_even_without_extra_profit():
+def test_online_profit_shortfall_is_raised_to_one_percent():
     result = single(online_fields={
         "profit_check": online(key()).profit_check.model_copy(update={"model": FeeModel(revenue_factor="1", fixed_cost="11.21", version="f1", verified=True)}),
     })
     assert result.status == "待处理"
     assert result.ready
-    assert result.target_actual == Decimal("11.21")
-    assert result.predicted_profit == Decimal("0")
+    assert result.upload_price == Decimal("11.33")
+    assert Decimal(result.trace["online_profit"]["target_margin"]) == Decimal(".01")
+    assert result.predicted_profit == Decimal("0.12")
 
 
-def test_rounding_shortfall_is_corrected_to_first_nonnegative_tick():
+def test_rounding_shortfall_is_corrected_to_first_one_percent_tick():
     result = single(
         line_fields={"loss_amount": "-1.209"},
         online_fields={
@@ -355,8 +356,8 @@ def test_rounding_shortfall_is_corrected_to_first_nonnegative_tick():
         snapshot_fields={"contracts": {"MY": contract(rounding="ROUND_DOWN")}},
     )
     assert result.ready
-    assert result.upload_price == Decimal("11.21")
-    assert result.predicted_profit == Decimal("0.005")
+    assert result.upload_price == Decimal("11.32")
+    assert result.predicted_profit == Decimal("0.115")
 
 
 @pytest.mark.parametrize(

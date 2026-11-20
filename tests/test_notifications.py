@@ -43,14 +43,19 @@ def test_dingtalk_fixed_endpoint_and_recipient_result():
             return httpx.Response(200,json={'accessToken':'token','expireIn':7200})
         if req.url.path.endswith('/getuserinfo'):
             return httpx.Response(200,json={'errcode':0,'result':{'userid':'u','name':'N'}})
-        if req.url.path.endswith('/asyncsend_v2'):
-            return httpx.Response(200,json={'errcode':0,'task_id':1234,'request_id':'r'})
-        return httpx.Response(200,json={'errcode':0,'send_result':{'failed_user_id_list':['u'], 'read_user_id_list':['other']}})
+        if req.url.path.endswith('/batchSend'):
+            return httpx.Response(200,json={'processQueryKey':'1234'})
+        return httpx.Response(200,json={'messageReadInfoList':[{'userId':'other','readStatus':'READ'}]})
     c=DingTalkClient(cfg,transport=httpx.MockTransport(handler))
     assert c.user_from_code('one-use') == {'userid':'u','name':'N'}
     result=c.send_notice('u','Title','Summary','https://example.com/#notifications')
     assert result['state'] == 'accepted'
-    assert c.query_notice('1234','u')['state'] == 'failed'
+    assert c.query_notice('1234','u')['state'] == 'accepted'
+    import json
+    sent=next(r for r in requests if r.url.path.endswith('/batchSend'))
+    assert json.loads(sent.content)['userIds']==['u']
+    assert json.loads(sent.content)['robotCode']=='client'
+    assert sent.headers['x-acs-dingtalk-access-token']=='token'
     assert sum(r.url.path.endswith('/accessToken') for r in requests)==1
     assert all(r.url.scheme=='https' for r in requests)
 
@@ -297,7 +302,7 @@ def test_partial_transfer_rebuilds_recipient_summary_before_send(notices_context
         s.add(Ownership(id='specific',scope_key=scope_key('tiktok','shop','MY',target),platform='tiktok',shop_id='shop',site='MY',target_id=target,owner_id='other'))
     cfg.notification_mode='live';cfg.ding_enabled=True
     def send(self,userid,title,markdown,url):
-        assert '共1条' in markdown
+        assert '共处理**1**条' in markdown
         with factory() as s:
             assert s.scalar(select(Notice)).item_ids==['i']
         return {'state':'accepted','task_id':'t'}
@@ -459,42 +464,40 @@ def test_notice_detail_pages_current_results_and_rechecks_recipient(notices_cont
         assert client.get(path).status_code == 404
 
 
-@pytest.mark.parametrize("base, expected_path", [
-    ("https://example.com", "https://example.com"),
-    ("https://example.com/workbench/#overview", "https://example.com/workbench"),
-])
-def test_dingtalk_card_opens_specific_notice_with_scoped_statuses(notices_context, monkeypatch, base, expected_path):
+def test_robot_result_template_uses_authorized_details_and_download_link(notices_context, monkeypatch):
     from app.adapters.dingtalk import DingTalkClient
     from app.models import Item
     from app.models.notifications import Notice
     from app.services.notifications import dispatch_notices, enqueue_batch_notices
-
-    factory, cfg = notices_context
-    with factory.begin() as session:
-        item = session.get(Item, "i")
-        item.key = dict(item.key, sku="SYNTHETIC-SKU-NOT-IN-CARD")
-        item.reason = "SYNTHETIC-PRIVATE-REASON"
-    enqueue_batch_notices(factory, "b")
-    cfg.notification_mode, cfg.ding_enabled = "live", True
-    cfg.public_base_url = base
-    outbound = []
-
-    def send(self, userid, title, markdown, url):
-        with factory() as session:
-            saved = session.scalar(select(Notice))
-            assert saved.delivery_state == "sending"
-            assert url == f"{expected_path}/#notifications/{saved.id}"
-        outbound.append((userid, markdown))
-        return {"state": "accepted", "task_id": "task"}
-
-    monkeypatch.setattr(DingTalkClient, "send_notice", send)
-    dispatch_notices(factory, cfg)
-    assert len(outbound) == 1
-    userid, markdown = outbound[0]
-    assert userid == "ding-seller"
-    assert "演示批次" in markdown
-    assert "待处理 1 · 待核验 0 · 已核验 0 · 本轮不调 0" in markdown
-    assert "SYNTHETIC-" not in markdown
+    factory,cfg=notices_context
+    with factory.begin() as s:
+        item=s.get(Item,'i')
+        item.reason='缺少费用数据'
+        item.updated_at='2026-11-19T02:30:00+00:00'
+    enqueue_batch_notices(factory,'b')
+    cfg.notification_mode='live';cfg.ding_enabled=True
+    outbound=[]
+    def send(self,userid,title,markdown,url):
+        with factory() as s:
+            saved=s.scalar(select(Notice))
+            assert saved.delivery_state=='sending'
+            intent=next(e for e in saved.delivery_evidence if e['operation']=='send_intent')
+            assert intent['markdown']==markdown
+            assert intent['title']==title
+        outbound.append((userid,title,markdown,url))
+        return {'state':'accepted','task_id':'task'}
+    monkeypatch.setattr(DingTalkClient,'send_notice',send)
+    dispatch_notices(factory,cfg)
+    assert len(outbound)==1
+    userid,title,text,url=outbound[0]
+    assert userid=='ding-seller' and url==''
+    assert title=='亏损提价处理结果'
+    assert '**2026-11-19 10:30:00** · 共处理**1**条' in text
+    assert '待处理 1 · 活动中 0 · 已提价 0 · 本轮不调 0' in text
+    assert '待处理的明细：' in text
+    assert 'sku' in text and 'MY' in text and 'shop' in text and '缺少费用数据' in text
+    assert '查询提价数据下载[http://8.133.252.166:50003](http://8.133.252.166:50003)' in text
+    assert '演示批次' in text
 
 
 @pytest.mark.parametrize("changed_account, change", [
@@ -596,3 +599,83 @@ def test_batch_completion_and_outbox_roll_back_together(notices_context, monkeyp
     with factory() as session:
         assert session.get(Batch, "b").status == "completed"
         assert session.scalars(select(Notice)).one().delivery_state == "pending"
+
+
+def test_robot_notice_without_public_website():
+    from app.adapters.dingtalk import DingTalkClient
+    import json
+    cfg=SimpleNamespace(ding_client_id='robot',ding_client_secret='secret')
+    def handler(req):
+        if req.url.path.endswith('/accessToken'):
+            return httpx.Response(200,json={'accessToken':'token','expireIn':7200})
+        body=json.loads(req.content)
+        assert body['msgKey']=='sampleMarkdown'
+        assert body['userIds']==['seller']
+        assert json.loads(body['msgParam'])['text']=='summary'
+        return httpx.Response(200,json={'processQueryKey':'opaque-task'})
+    c=DingTalkClient(cfg,transport=httpx.MockTransport(handler))
+    assert c.send_notice('seller','title','summary','')=={'state':'accepted','task_id':'opaque-task'}
+
+
+def test_robot_read_receipt_requires_exact_recipient():
+    from app.adapters.dingtalk import DingTalkClient
+    cfg=SimpleNamespace(ding_client_id='robot',ding_client_secret='secret')
+    def handler(req):
+        if req.url.path.endswith('/accessToken'):
+            return httpx.Response(200,json={'accessToken':'token','expireIn':7200})
+        assert req.method=='GET'
+        assert req.url.params['processQueryKey']=='opaque'
+        return httpx.Response(200,json={'messageReadInfoList':[{'userId':'seller','readStatus':'READ'}]})
+    c=DingTalkClient(cfg,transport=httpx.MockTransport(handler))
+    assert c.query_notice('opaque','seller')['state']=='read'
+
+
+def test_notification_only_tick_never_enqueues_demo_batches(notices_context,monkeypatch):
+    from app.notification_worker import notification_tick
+    from app.models import Batch
+    from app.models.notifications import Notice
+    factory,cfg=notices_context
+    notification_tick(factory,cfg)
+    with factory.begin() as s:
+        assert s.query(Notice).count()==0
+        s.get(Batch,'b').mode='live'
+    notification_tick(factory,cfg)
+    with factory() as s:
+        assert s.query(Notice).count()==1
+
+
+def test_receipt_polling_backs_off_without_resending(notices_context,monkeypatch):
+    from app.adapters.dingtalk import DingTalkClient
+    from app.models.notifications import Notice
+    from app.services.notifications import enqueue_batch_notices,dispatch_notices
+    factory,cfg=notices_context
+    cfg.notification_mode='live';cfg.ding_enabled=True
+    enqueue_batch_notices(factory,'b')
+    monkeypatch.setattr(DingTalkClient,'send_notice',lambda *a:{'state':'accepted','task_id':'task'})
+    query=Mock(return_value={'state':'accepted'})
+    monkeypatch.setattr(DingTalkClient,'query_notice',query)
+    dispatch_notices(factory,cfg)
+    dispatch_notices(factory,cfg)
+    dispatch_notices(factory,cfg)
+    assert query.call_count==1
+
+
+def test_result_template_activity_excluded_from_manual_and_verified_is_increased():
+    from app.services.notifications import _card_text, _summary
+    def item(status,code,sku):
+        return SimpleNamespace(status=status,decision={'reason_code':code},key={'sku':sku,'site':'PH','shop_id':'s'},reason='原因',updated_at='2026-11-19T02:30:00+00:00')
+    items=[item('待处理','activity_locked','active-sku'),item('待核验','pending_submission','manual-sku'),item('已核验','ready','done-sku'),item('本轮不调','recent_price_change','skip-sku')]
+    text=_card_text(_summary(items),'live',items)
+    assert '待处理 1 · 活动中 1 · 已提价 1 · 本轮不调 1' in text
+    assert 'manual-sku' in text
+    assert 'active-sku' not in text and 'done-sku' not in text and 'skip-sku' not in text
+
+
+def test_result_template_empty_manual_list_and_markdown_escape():
+    from app.services.notifications import _card_text,_summary
+    done=SimpleNamespace(status='已核验',decision={},key={},reason='done',updated_at='2026-11-19T02:30:00+00:00')
+    assert '待处理的明细：\n\n无' in _card_text(_summary([done]),'live',[done])
+    pending=SimpleNamespace(status='待处理',decision={},key={'sku':'[bad](https://wrong.test)','shop_id':'s','site':'PH'},reason='*reason*\nnext',updated_at=done.updated_at)
+    text=_card_text(_summary([pending]),'live',[pending])
+    assert '[bad](https://wrong.test)' not in text
+    assert '*reason*\nnext' not in text

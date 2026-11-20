@@ -8,7 +8,7 @@ from .money import MoneyRatio, PRICE_CONTEXT
 
 from .types import (
     CandidateSourceIssue, Decision, DecisionStatus, OnlineState, Site, Snapshot,
-    SourceIssue, SourceLine, VariantKey,
+    SourceIssue, SourceLine, VariantKey, ONLINE_PROFIT_MINIMUM_MARGIN,
 )
 
 
@@ -18,7 +18,7 @@ REQUIRED_SOURCES = frozenset({"loss_allocatable", "loss_pending", "blocked_alloc
 # 依据：已确认设计“数据与算价说明”；完整变量/单位见 docs/calculation-and-sources.md。
 # 11/17近72小时保护用官方计数；用户确认删去独立一次毛利保本门槛，费用仅在完整在线利润校验。
 # 规则版本不是公司费率或接口验收标志，固定表另存内容版本。
-FORMULA_VERSION = "loss-optional-sales-reference-20261117-v6"
+FORMULA_VERSION = "loss-online-margin-1pct-20261120-v7"
 # 保存/展示为50位有效数字；档位、容限、毛利正负以 Decimal 精确比值判定。
 # 不能先把循环小数近似为50位，再用其决定整档/半档或毛利是否为零。
 SITE_CURRENCIES: dict[Site, str] = {"MY": "MYR", "PH": "PHP", "SG": "SGD", "TH": "THB", "VN": "VND"}
@@ -376,17 +376,18 @@ def _decide(
         station_ratio = (unit_ratio if loss_currency == station_currency
                          else unit_ratio * MoneyRatio(rate_numerator, rate_denominator))
         # 11/12会议后段：先直接补亏，再只复算库存选定仓配的完整在线利润。
-        # 对已核实仿射公式一次求保本下限，等价于继续提价到不亏；不设1%目标。
+        # 在线利润校正额是通过该公式校验所需的实际价增量；通过时为0；2026-11-20统一要求完整在线利润率至少1%。
         initial_target = MoneyRatio(current) + station_ratio
-        online_floor = profit_check.break_even()
-        target_ratio = max(initial_target, online_floor)
+        minimum_actual = profit_check.minimum_actual_price()
+        target_ratio = max(initial_target, minimum_actual)
+        online_profit_correction = target_ratio - initial_target
         discount = MoneyRatio(current, retail).decimal()
         # 含 VAT 上传价 = T×R/P；按精确商余数舍入，可支持0.025档位及半档边界。
         raw_ratio = target_ratio * MoneyRatio(retail) / MoneyRatio(current)
         upload_price = raw_ratio.round_to_step(contract.price_step, contract.rounding)
 
-        # 原合同舍入不得把已达到的保本价再次舍入到负利润；最低可用上传档位向上取整。
-        floor_upload = (online_floor * MoneyRatio(retail) / MoneyRatio(current)).round_to_step(
+        # 在线利润校正后，合同进档不能让利润再次为负；校验下限对应上传档位向上取整。
+        floor_upload = (minimum_actual * MoneyRatio(retail) / MoneyRatio(current)).round_to_step(
             contract.price_step, "ROUND_UP")
         upload_price = max(upload_price, floor_upload)
         rounded_ratio = MoneyRatio(upload_price) * MoneyRatio(current) / MoneyRatio(retail)
@@ -416,8 +417,9 @@ def _decide(
             "overseas_stock": str(profit_check.overseas_stock),
             "inventory_observed_at": profit_check.inventory_observed_at.isoformat(),
             "source_ref": profit_check.source_ref, "model": profit_check.model.model_dump(mode="json"),
-            "initial_target": str(initial_target.decimal()), "break_even": str(online_floor.decimal()),
-            "adjusted": target_ratio > initial_target, "minimum_margin": "0",
+            "initial_target": str(initial_target.decimal()), "break_even": str(minimum_actual.decimal()),
+            "correction_amount": str(online_profit_correction.decimal()),
+            "adjusted": target_ratio > initial_target, "minimum_margin": str(ONLINE_PROFIT_MINIMUM_MARGIN),
             "target_margin": str((online_target_profit / target_ratio).decimal()),
             "rounded_margin": (str((online_rounded_profit / rounded_ratio).decimal())
                                if rounded_ratio.numerator > 0 else None),
@@ -431,6 +433,7 @@ def _decide(
     }
     if upload_price <= 0 or error_ratio > MoneyRatio(tolerance):
         return finish("rounding_error", "站点价格档位导致实际价无效或超出误差容限", **prices)
-    if online_target_profit.numerator < 0 or online_rounded_profit.numerator < 0:
-        return finish("online_profit_shortfall", "目标价或档位后在线利润率仍为负", **prices)
+    if (not profit_check.model.meets_minimum_online_margin(target_ratio)
+            or not profit_check.model.meets_minimum_online_margin(rounded_ratio)):
+        return finish("online_profit_shortfall", "目标价或档位后在线利润率未达到1%", **prices)
     return finish("ready", "补亏价格通过站点精度、库存对应完整在线利润率核验", ready=True, **prices)

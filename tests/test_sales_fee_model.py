@@ -10,7 +10,7 @@ def source():
         'currentOverseasProfitMargin':'-14.93',
         'overseasStockWarehouseInfo':json.dumps([{'overseasWarehouses':['WH-PH'],'quantity':114,
             'jqCostpriceList':['1.0557'],'jqFreightList':['0.0532']}])}
-    rate={'vatRate':'0','publicCommissionRate':'0','version':'fixed-test-v1','siteCode':'PH','totalRate':'35.0411','totalCost':'1.4503',
+    rate={'vatRate':'0','version':'fixed-test-v1','siteCode':'PH','totalRate':'35.0411','totalCost':'1.4503',
         'costOfCapital':'2','procedureRate':'2.24','platformRate':'12.8','returnRate':'8',
         'warehouseStorageRate':'0.0001','marketingRate':'10','otherRate':'0.001',
         'packageFee':'0.0001','warehouseCost':'0.7','warehouseCostDomestic':'0.0001',
@@ -48,3 +48,12 @@ def test_unknown_or_conflicting_fee_input_is_not_approved(change):
     else:r['totalCost']='1.45'
     with pytest.raises(ValueError):
         compile_overseas_fee(v,r,site='PH',warehouse='WH-PH',company_cny_per_currency='0.1042')
+
+
+def test_overseas_extra_public_commission_is_not_a_formula_input():
+    from app.adapters.sales_fee_model import compile_overseas_fee
+    v,r=source();r['publicCommissionRate']='10'
+    result=compile_overseas_fee(v,r,site='PH',warehouse='WH-PH',company_cny_per_currency='0.1042')
+    assert result['online_model'].revenue_factor==Decimal('0.649589')
+    r.pop('publicCommissionRate')
+    assert compile_overseas_fee(v,r,site='PH',warehouse='WH-PH',company_cny_per_currency='0.1042')['online_model']==result['online_model']

@@ -1,4 +1,4 @@
-"""11/12 在线利润保本校验，手算预期，不访问真实系统。"""
+"""完整在线利润率1%校验，手算预期，不访问真实系统。"""
 from datetime import timedelta
 from decimal import Decimal
 import pytest
@@ -13,12 +13,12 @@ def check(stock="0", mode="direct", factor="0.8", cost="10", **changes):
         **changes)
 
 
-def test_negative_online_profit_raises_original_compensation_to_break_even():
+def test_negative_online_profit_raises_original_compensation_to_one_percent():
     result=single(online_fields={"profit_check":check()},
         snapshot_fields={"contracts":{"MY":contract(rounding="ROUND_UP")}})
     assert result.ready
-    assert result.upload_price==Decimal("12.50")  # 原补亏11.2，0.8P-10=0 => 12.5
-    assert Decimal(result.trace["online_profit"]["rounded_margin"])==0
+    assert result.upload_price==Decimal("12.66")  # 1%最低价10/(0.8-0.01)，向上进档12.66
+    assert Decimal(result.trace["online_profit"]["rounded_margin"])>=Decimal(".01")
     assert result.trace["online_profit"]["initial_target"]=="11.2"
     assert result.trace["online_profit"]["adjusted"] is True
 
@@ -27,7 +27,7 @@ def test_discount_and_tick_are_applied_after_selected_profit_floor():
     result=single(online_fields={"retail_price":"20","marketing_price":"10",
         "profit_check":check(cost="10.001")},
         snapshot_fields={"contracts":{"MY":contract(rounding="ROUND_UP")}})
-    assert result.ready and result.upload_price==Decimal("25.01")
+    assert result.ready and result.upload_price==Decimal("25.32")
     assert Decimal(result.trace["online_profit"]["rounded_margin"])>0
 
 
@@ -47,10 +47,10 @@ def test_overseas_stock_uses_only_overseas_formula():
     assert result.trace["online_profit"]["mode"]=="overseas"
 
 
-def test_rounding_down_cannot_make_profit_negative_again():
+def test_rounding_down_cannot_drop_margin_below_one_percent():
     result=single(online_fields={"profit_check":check(factor="1",cost="11.205")},
         snapshot_fields={"contracts":{"MY":contract(rounding="ROUND_DOWN")}})
-    assert result.ready and result.upload_price==Decimal("11.21")
+    assert result.ready and result.upload_price==Decimal("11.32")
 
 
 
@@ -61,8 +61,8 @@ def test_manual_correction_cannot_use_normal_margin_to_bypass_online_loss():
     snap=snapshot([line(k)],[o])
     with pytest.raises(ValueError,match="在线利润率"):
         manual_decision(snap,o,Decimal("11.2"),"synthetic","C1",NOW)
-    result=manual_decision(snap,o,Decimal("12.5"),"synthetic","C1",NOW)
-    assert result.ready and result.target_actual==Decimal("12.5")
+    result=manual_decision(snap,o,Decimal("12.66"),"synthetic","C1",NOW)
+    assert result.ready and result.target_actual==Decimal("12.66")
 
 
 def test_missing_profit_evidence_only_blocks_the_affected_variant():
@@ -82,3 +82,20 @@ def test_zero_price_after_rounding_is_rejected_without_dividing_by_zero():
         snapshot_fields={"contracts":{"MY":contract(rounding="ROUND_DOWN")}})
     assert not result.ready and result.reason_code=="rounding_error"
     assert result.trace["online_profit"]["rounded_margin"] is None
+
+
+@pytest.mark.parametrize("cost, expected_target, expected_correction", [
+    ("10", "12.658227848101265822784810126582278481012658227848", "1.4582278481012658227848101265822784810126582278481"),
+    ("8", "11.2", "0"),
+])
+def test_online_profit_correction_amount_is_actual_price_increment_before_discount(
+    cost, expected_target, expected_correction,
+):
+    # 初步补亏价11.2；五折只影响上传价，不能把实际价校正额翻倍。
+    result = single(online_fields={"retail_price": "20", "marketing_price": "10",
+        "profit_check": check(cost=cost)},
+        snapshot_fields={"contracts": {"MY": contract(rounding="ROUND_UP")}})
+    assert result.ready
+    assert result.target_actual == Decimal(expected_target)
+    assert result.upload_price == (Decimal("25.32") if cost == "10" else Decimal("22.40"))
+    assert Decimal(result.trace["online_profit"]["correction_amount"]) == Decimal(expected_correction)

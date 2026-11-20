@@ -22,14 +22,14 @@ def test_legacy_company_observations_are_not_the_official_count_source():
     assert state['pending_submission'] is False
 
 
-def test_fixed_overseas_formula_includes_vat_and_public_commission():
+def test_fixed_overseas_formula_retains_vat_without_product_commission():
     from test_sales_fee_model import source
     from app.adapters.sales_fee_model import compile_overseas_fee
     variant, rate = source()
-    rate.update(vatRate='10', publicCommissionRate='5', version='fixed-test-v1')
+    rate.update(vatRate='10', version='fixed-test-v1')
     result = compile_overseas_fee(variant, rate, site='PH', warehouse='WH-PH', company_cny_per_currency='0.1')
-    # 2.5592 CNY × 1.1 / 0.1 = 28.1512 PHP；a = 1 - 35.0411% - 5%。
-    assert result['online_model'].profit(Decimal('100')) == Decimal('31.8077')
+    # 2.5592 CNY × 1.1 / 0.1 = 28.1512 PHP；a = 1 - 35.0411%。
+    assert result['online_model'].profit(Decimal('100')) == Decimal('36.8077')
     assert 'model' not in result
     assert result['current_margin'] < 0  # 现价筛选仍保留。
 

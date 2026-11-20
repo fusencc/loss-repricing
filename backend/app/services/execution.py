@@ -13,7 +13,7 @@ from sqlalchemy import func, select, update, or_
 from sqlalchemy.exc import IntegrityError
 from app.db import transaction
 from app.models import Batch, Item, Execution, VariantGuard, Protection, Job
-from app.domain.types import Decision, VariantKey
+from app.domain.types import Decision, VariantKey, FeeModel, ONLINE_PROFIT_MINIMUM_MARGIN
 from app.domain.engine import evaluate, allowed_error, snapshot_problem
 from app.domain.money import MoneyRatio
 from app.adapters.base import SourceUnavailable, SubmitResult
@@ -480,6 +480,12 @@ class PricingService:
                         raise ValueError("保存的精确目标价无效")
                     difference_ratio = (MoneyRatio(result.actual_price) - target).absolute()
                     difference = difference_ratio.decimal()
+                    # 实价即使在金额容限内，也须单独达到统一在线利润率阀门。
+                    rows = decision.trace["online_rows"]
+                    if len(rows) != 1:
+                        raise ValueError("保存的在线利润模型来源不唯一")
+                    model = FeeModel.model_validate(rows[0]["profit_check"]["model"])
+                    margin_passed = model.meets_minimum_online_margin(MoneyRatio(result.actual_price))
             except Exception as exc:
                 event('execution.lookup_failed', exception=exc, execution_id=execution.id,
                       item_id=execution.item_id, source=self.adapter.mode, synthetic=self.adapter.mode == 'demo')
@@ -509,10 +515,11 @@ class PricingService:
                     current.evidence = {"actual_price": str(result.actual_price), "target_actual": str(decision.target_actual),
                         "difference": str(difference), "tolerance": str(allowed_error(decision.key.site)),
                         "observed_at": stamp(result.observed_at), "price_basis": result.price_basis,
-                        "message": result.message, "mode": self.adapter.mode}
+                        "message": result.message, "mode": self.adapter.mode,
+                        "minimum_margin": str(ONLINE_PROFIT_MINIMUM_MARGIN), "online_margin_passed": margin_passed}
                     if result.price_record is not None:
                         current.evidence['price_record'] = result.price_record
-                    if difference_ratio <= MoneyRatio(allowed_error(decision.key.site)):
+                    if difference_ratio <= MoneyRatio(allowed_error(decision.key.site)) and margin_passed:
                         confirmed_at = utcnow()
                         effective = result.effective_at
                         effective_time_source = "effective_at"
@@ -535,7 +542,8 @@ class PricingService:
                             verified_baseline(control, decision, result.actual_price)
                     else:
                         current.state, item.phase, item.status = "mismatch", "mismatch", "待核验"
-                        item.reason = "实际售价与目标超出误差范围，已暂停本站点新提交"
+                        item.reason = ("实际售价与目标超出误差范围，已暂停本站点新提交" if margin_passed
+                                       else "回读在线利润率未达到1%，已暂停本站点新提交")
                 else:
                     # 未获得新业务证据，不刷新商品与执行的更新时间，也不重复生成批次摘要。
                     if current.state == "mismatch":

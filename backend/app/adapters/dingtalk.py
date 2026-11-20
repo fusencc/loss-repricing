@@ -1,12 +1,13 @@
 """Fixed official DingTalk endpoints. Never persist/log raw responses, auth codes or exceptions."""
 import time
+import json
 from urllib.parse import urlsplit
 import httpx
 
 TOKEN = 'https://api.dingtalk.com/v1.0/oauth2/accessToken'
 OAPI = 'https://oapi.dingtalk.com/'
-SEND = 'topapi/message/corpconversation/asyncsend_v2'
-RESULT = 'topapi/message/corpconversation/getsendresult'
+SEND = 'https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend'
+RESULT = 'https://api.dingtalk.com/v1.0/robot/oToMessages/readStatus'
 USER = 'topapi/v2/user/getuserinfo'
 
 
@@ -53,44 +54,48 @@ class DingTalkClient:
             raise ValueError('钉钉免登失败，请重新获取授权码') from None
 
     def send_notice(self, userid, title, markdown, url):
-        parsed=urlsplit(url)
-        if parsed.scheme != 'https' or not parsed.netloc or parsed.username or parsed.password or parsed.query:
-            return {'state':'failed','error':'通知链接必须为不含凭证或查询参数的HTTPS地址'}
+        # 官方人与机器人会话接口；每次只传已核对归属的一名销售员 userId。
+        # 网页未部署时直接发送摘要，不伪造外网详情地址。
+        if url:
+            parsed=urlsplit(url)
+            if parsed.scheme != 'https' or not parsed.netloc or parsed.username or parsed.password or parsed.query:
+                return {'state':'failed','error':'通知链接必须为不含凭证或查询参数的HTTPS地址'}
         try:
-            # Token failure precedes send and is therefore a known failure.
-            self._token()
+            token=self._token()
         except Exception:
             return {'state':'failed','error':'钉钉应用凭证获取失败，未提交消息'}
+        text=markdown + (f"\n\n[查看详情]({url})" if url else '')
         try:
-            data=self._post(SEND, {'agent_id':int(self.config.ding_agent_id),'userid_list':userid,
-                'to_all_user':False,'msg':{'msgtype':'action_card','action_card':{
-                    'title':title[:100], 'markdown':markdown[:500], 'single_title':'查看详情','single_url':url}}})
+            r=self.http.post(SEND, headers={'x-acs-dingtalk-access-token':token}, json={
+                'robotCode':self.config.ding_client_id,'userIds':[userid],
+                'msgKey':'sampleMarkdown','msgParam':json.dumps({'title':title[:100],'text':text},ensure_ascii=False)})
+            if 400 <= r.status_code < 500:
+                return {'state':'failed','error':f'机器人接口明确拒绝消息，HTTP {r.status_code}'}
+            r.raise_for_status()
+            data=r.json()
+            for field in ('invalidStaffIdList','filteredStaffIdList','flowControlledStaffIdList'):
+                if userid in data.get(field,[]):
+                    return {'state':'failed','error':'机器人接口明确未发送：'+field}
+            key=data.get('processQueryKey')
+            if isinstance(key,str) and key:
+                return {'state':'accepted','task_id':key}
+            return {'state':'unknown','error':'机器人未返回消息标识，禁止自动重发'}
         except Exception:
             return {'state':'unknown','error':'发送响应未知，禁止自动重发'}
-        result={key:str(data[key])[:255] for key in ('task_id','request_id') if data.get(key) is not None}
-        if data.get('errcode') == 0 and result.get('task_id'):
-            return dict(result,state='accepted')
-        if isinstance(data.get('errcode'),int) and data['errcode'] != 0:
-            return dict(result,state='failed',error='钉钉明确拒绝消息，错误码 '+str(data['errcode']))
-        return dict(result,state='unknown',error='钉钉未返回有效任务ID，禁止重发')
 
     def query_notice(self, task_id, userid):
         try:
-            data=self._post(RESULT,{'agent_id':int(self.config.ding_agent_id),'task_id':int(task_id)})
-            result=data.get('send_result',{})
-            ids={key:str(data[key])[:255] for key in ('request_id',) if data.get(key) is not None}
-            if data.get('errcode') != 0:
-                return dict(ids,state='accepted',error='发送结果暂不可查询')
-            # Only evidence for the requested recipient counts.
-            for key in ('invalid_user_id_list','forbidden_user_id_list','failed_user_id_list'):
-                if userid in result.get(key,[]):
-                    return dict(ids,state='failed',error='钉钉结果明确未发送：'+key)
-            if any(row.get('userid')==userid for row in result.get('forbidden_list',[])):
-                return dict(ids,state='failed',error='钉钉结果明确限制发送')
-            if userid in result.get('read_user_id_list',[]):
-                return dict(ids,state='read')
-            if userid in result.get('unread_user_id_list',[]):
-                return dict(ids,state='delivered')
-            return dict(ids,state='accepted',error='任务已受理，尚无该收件人送达证据')
+            r=self.http.get(RESULT,headers={'x-acs-dingtalk-access-token':self._token()},
+                params={'robotCode':self.config.ding_client_id,'processQueryKey':task_id})
+            r.raise_for_status()
+            data=r.json()
+            # READ/UNREAD 必须属于目标收件人；其他人的已读不作为该人的送达证据。
+            for row in data.get('messageReadInfoList',[]):
+                if row.get('userId') == userid:
+                    if row.get('readStatus') == 'READ':
+                        return {'state':'read'}
+                    if row.get('readStatus') == 'UNREAD' and data.get('sendStatus') == 'SUCCESS':
+                        return {'state':'delivered'}
+            return {'state':'accepted','error':'机器人已受理，尚无该收件人送达证据'}
         except Exception:
             return {'state':'accepted','error':'发送结果查询失败，保留原任务，禁止重发'}

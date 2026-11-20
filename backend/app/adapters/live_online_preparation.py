@@ -11,14 +11,14 @@ from app.adapters.erp_order_loss import _bound, _warehouse_matches
 from app.adapters.erp_pricing import LiveOnlinePreparation, MappedKey, ReviewedOnlineState
 from app.adapters.normalization import money, source_time
 from app.adapters.sales_fee_model import compile_overseas_fee, compile_direct_fee
-from app.adapters.fixed_pricing_fees import select_fixed_rate
+from app.adapters.current_pricing_fees import select_current_rate
 from app.domain.engine import BEIJING, SITE_CURRENCIES
 from app.domain.types import VariantKey
 from app.adapters.official_price_logs import recent_price_log_for
 
 SCHEMAS={'sales':'sales-source-observations-v1','platform':'sales-platform-controls-v1',
     'window':'erp-goods-sales-reference-v1','local_history':'local-live-price-history-v1',
-    'fixed_fees':'user-fixed-pricing-fees-v1'}
+    'fixed_fees':'sales-current-pricing-fees-v1'}
 
 
 def prepare_online_states(capture,targets,*,sales,platform,window,local_history,fixed_fees,official_history):
@@ -117,9 +117,9 @@ def prepare_online_states(capture,targets,*,sales,platform,window,local_history,
             if stock<0:raise ValueError('海外仓库存为负，无法选择利润公式')
             department=parent.get('department')
             if not isinstance(department,str) or not department.strip():
-                raise ValueError('商品部门归属未知，不能选取固定费率')
+                raise ValueError('商品部门归属未知，不能选取当前部门费率')
             mode='overseas' if stock>0 else 'direct'
-            rate=select_fixed_rate(fixed_fees,variant,parent,key.site,mode)
+            rate=select_current_rate(fixed_fees,variant,parent,key.site,mode)
             if export_proof is not None and 'vat_source' in rate:
                 category = str(export_values['平台尾类目ID'])
                 vat = money(export_values['VAT费率'])

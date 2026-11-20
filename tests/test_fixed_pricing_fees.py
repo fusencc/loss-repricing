@@ -8,7 +8,7 @@ from xml.etree.ElementTree import Element, SubElement, tostring
 
 import pytest
 
-from app.adapters.fixed_pricing_fees import import_workbook, capture_fixed_fees, select_fixed_rate, SCHEMA
+from app.adapters.fixed_pricing_fees import import_workbook, select_fixed_rate, SCHEMA
 from app.adapters.sales_fee_model import compile_direct_fee
 from app.config import Settings
 
@@ -58,40 +58,26 @@ def test_import_keeps_raw_fixed_inputs_and_rejects_formula_caches(tmp_path):
     assert config['public']['TH']['vatRate'] is None
     assert config['overseas']['PH']['vatRate']=='0.0001'
     assert config['overseas']['PH']['orderProcessFee']=='0.0001'
-    assert config['product_inputs'][0]['public_commission_rate']=='5'
-    assert 'direct_vat_rate' not in config['product_inputs'][0]
-    assert config['product_inputs'][1]['public_commission_rate'] is None
+    assert 'product_inputs' not in config
     assert len(config['source']['sha256'])==64
     assert config['version'].endswith(config['source']['sha256'][:16])
 
 
-def test_missing_fixed_configuration_is_unknown_then_imported_version_is_archived(tmp_path):
-    settings=Settings(_env_file=None,runtime_dir=tmp_path)
-    capture={'capture_id':'C1','synthetic':True,'sample_only':False}
-    assert not capture_fixed_fees(settings,capture)['acquisition_complete']
-    workbook(tmp_path/'fixed.xlsx');config=import_workbook(tmp_path/'fixed.xlsx')
-    (tmp_path/'fixed-pricing-fees.json').write_text(json.dumps(config))
-    source=capture_fixed_fees(settings,capture)
-    assert source['acquisition_complete'] and source['queried_at']<=source['completed_at']
-    assert source['config']['version']==config['version']
-    assert json.loads(Path(source['artifact_file']).read_text())==source
-
-
 def direct_source():
     variant={'currency':'PHP','overseasStockSum':0,'marketPrice':'100','localWeight':'21','costPrice':'2'}
-    rate={'siteCode':'PH','version':'fixed-v1','vatRate':'0','publicCommissionRate':'5',
+    rate={'siteCode':'PH','version':'fixed-v1','vatRate':'0',
           'procedureRate':'2.24','commissionRate':'8.5','returnRate':'8','otherRate':'0.001',
           'marketingRate':'10','packageFee':'0.3','warehouseCost':'1.3','fixedFreight':'0',
           'freight':{'base_weight_g':'10','base_price':'5','per_10g_price':'4.5'}}
     return variant,rate
 
 
-def test_direct_formula_uses_weight_tiers_currency_cost_and_full_commission():
+def test_direct_formula_retains_platform_commission_without_product_commission():
     variant,rate=direct_source()
     result=compile_direct_fee(variant,rate,site='PH',company_cny_per_currency='0.1')
     # 21g => 首10g 5PHP + 两档4.5PHP = 14PHP；2+.3+1.3+1.4=5CNY。
     assert Decimal(result['proof']['freight_station'])==Decimal('14')
-    assert result['online_model'].profit(Decimal('100'))==Decimal('16.259')
+    assert result['online_model'].profit(Decimal('100'))==Decimal('21.259')
     assert 'model' not in result  # 不再输出独立的一次毛利算价模型。
 
 
@@ -122,30 +108,27 @@ def test_direct_missing_inputs_never_become_zero(change):
         compile_direct_fee(variant,rate,site='PH',company_cny_per_currency='0.1')
 
 
-def test_fixed_product_inputs_match_exact_identity_and_th_needs_online_category_vat(tmp_path):
+def test_fixed_rates_do_not_require_product_membership_and_th_needs_online_category_vat(tmp_path):
     workbook(tmp_path/'fixed.xlsx');config=import_workbook(tmp_path/'fixed.xlsx')
-    config['product_inputs']=config['product_inputs'][:1]
     config['departments']['D1']=config['departments'].pop('部门0')
     source={'schema_version':SCHEMA,'source_id':'FIXED','config':config,'acquisition_complete':True}
     variant={'sellerSkuId':'I1','localSellerSku':'SKU'}
     parent={'shopName':'SHOPTH','productId':'P1','department':'D1',
             'taxVatRate':'24.12','tkCategoryIdLeaf':'600747'}
     rate=select_fixed_rate(source,variant,parent,'TH','direct')
-    assert rate['vatRate']=='24.12' and rate['publicCommissionRate']=='5'
+    assert rate['vatRate']=='24.12'
+    assert 'publicCommissionRate' not in rate
     assert rate['vat_source']['category_id']=='600747'
-    for changed in [dict(parent,shopName='OTHER'),dict(parent,department='OTHER')]:
-        with pytest.raises(ValueError):select_fixed_rate(source,variant,changed,'TH','direct')
+    assert select_fixed_rate(source,dict(variant,sellerSkuId='NEW'),dict(parent,shopName='OTHER'),'TH','direct')['vatRate']=='24.12'
+    with pytest.raises(ValueError):select_fixed_rate(source,variant,dict(parent,department='OTHER'),'TH','direct')
     parent['taxVatRate']=None
     with pytest.raises(ValueError,match='VAT'):select_fixed_rate(source,variant,parent,'TH','direct')
-    config['product_inputs'][0]['public_commission_rate']=None
-    with pytest.raises(ValueError,match='佣金'):select_fixed_rate(source,variant,parent,'TH','overseas')
+    assert select_fixed_rate(source,variant,parent,'TH','overseas')['vatRate']=='0.0001'
 
 
 @pytest.mark.parametrize('value',[None, '', True, '-1', 'NaN', 'Infinity'])
 def test_th_online_vat_never_falls_back_to_fixed_product_input(tmp_path, value):
     workbook(tmp_path/'fixed.xlsx');config=import_workbook(tmp_path/'fixed.xlsx')
-    config['product_inputs']=config['product_inputs'][:1]
-    config['product_inputs'][0]['direct_vat_rate']='7'
     source={'source_id':'FIXED','config':config,'acquisition_complete':True}
     variant={'sellerSkuId':'I1','localSellerSku':'SKU'}
     parent={'shopName':'SHOPTH','productId':'P1','department':'部门0',
@@ -156,7 +139,6 @@ def test_th_online_vat_never_falls_back_to_fixed_product_input(tmp_path, value):
 
 def test_th_zero_vat_is_valid_but_category_is_required(tmp_path):
     workbook(tmp_path/'fixed.xlsx');config=import_workbook(tmp_path/'fixed.xlsx')
-    config['product_inputs']=config['product_inputs'][:1]
     source={'source_id':'FIXED','config':config,'acquisition_complete':True}
     variant={'sellerSkuId':'I1','localSellerSku':'SKU'}
     parent={'shopName':'SHOPTH','productId':'P1','department':'部门0',
@@ -169,9 +151,18 @@ def test_th_zero_vat_is_valid_but_category_is_required(tmp_path):
 
 def test_th_overseas_keeps_fixed_vat_without_online_vat(tmp_path):
     workbook(tmp_path/'fixed.xlsx');config=import_workbook(tmp_path/'fixed.xlsx')
-    config['product_inputs']=config['product_inputs'][:1]
     source={'source_id':'FIXED','config':config,'acquisition_complete':True}
     variant={'sellerSkuId':'I1','localSellerSku':'SKU'}
     parent={'shopName':'SHOPTH','productId':'P1','department':'部门0'}
     rate=select_fixed_rate(source,variant,parent,'TH','overseas')
     assert rate['vatRate']=='0.0001' and 'vat_source' not in rate
+
+
+def test_direct_extra_public_commission_is_not_a_formula_input():
+    variant,rate=direct_source()
+    rate['publicCommissionRate']='5'
+    with_field=compile_direct_fee(variant,rate,site='PH',company_cny_per_currency='0.1')
+    rate.pop('publicCommissionRate')
+    without_field=compile_direct_fee(variant,rate,site='PH',company_cny_per_currency='0.1')
+    assert with_field['online_model']==without_field['online_model']
+    assert without_field['online_model'].revenue_factor==Decimal('0.71259')

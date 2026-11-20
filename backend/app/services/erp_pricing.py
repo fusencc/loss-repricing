@@ -105,7 +105,7 @@ def save_pricing_preview(runtime_dir, capture_id, evidence=None, *, exports=None
         or (order_preparation is not None and order_preparation['references']['native_source'] != native_source['source_id'])
     ):
         raise ValueError('原生明细来源与采集、样本或订单准备引用不一致')
-    for label, source in (('七日销量',sales_window_source),('本程序真实提价历史',local_history_source),('平台现态',platform_source),('固定费率',fixed_fees_source)):
+    for label, source in (('七日销量',sales_window_source),('本程序真实提价历史',local_history_source),('平台现态',platform_source),('当前费用',fixed_fees_source)):
         if source is not None and (source['erp_capture_id'] != capture_id
                 or source['synthetic'] != bool(capture.get('synthetic', False))
                 or source['sample_only'] != bool(capture.get('sample_only', False))):

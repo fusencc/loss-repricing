@@ -15,7 +15,7 @@ from app.adapters.erp_detail_capture import capture_erp_details
 from app.adapters.erp_order_loss import prepare_order_losses
 from app.adapters.erp_order_headers import capture_order_headers
 from app.adapters.erp_goods_sales import capture_goods_sales
-from app.adapters.fixed_pricing_fees import capture_fixed_fees
+from app.adapters.current_pricing_fees import capture_current_fees
 from app.adapters.erp_pricing import prepare_pricing
 from app.services.local_price_history import capture_local_price_history
 from app.adapters.official_price_logs import capture_recent_price_changes, recent_price_log_for
@@ -221,7 +221,7 @@ def _evaluate_capture(settings, capture_id, *, replay, evidence=None, exports=No
                     'acquisition_complete','artifact_file')}
                 platform_ref['sha256'] = sha256(content).hexdigest()
                 platform_status = 'saved' if platform['acquisition_complete'] else 'partial'
-        fixed_fees = capture_fixed_fees(settings,capture)
+        fixed_fees = capture_current_fees(settings,capture,platform)
         fixed_fees_ref = {key:fixed_fees[key] for key in ('source_id','erp_capture_id','synthetic','sample_only',
             'acquisition_complete','artifact_file')}
         fixed_fees_ref['sha256'] = sha256(Path(fixed_fees['artifact_file']).read_bytes()).hexdigest()

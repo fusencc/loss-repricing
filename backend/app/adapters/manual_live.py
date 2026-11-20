@@ -21,11 +21,12 @@ from app.adapters.sales_auth import ORIGIN, SalesAuth
 from app.adapters.sales_capture import capture_sales_sources, _json_values
 from app.adapters.sales_platform_capture import capture_platform_controls
 from app.adapters.erp_goods_sales import capture_goods_sales
-from app.adapters.fixed_pricing_fees import capture_fixed_fees
+from app.adapters.current_pricing_fees import capture_current_fees
 from app.adapters.live_online_preparation import prepare_online_states
 from app.adapters.erp_rates import query_current_erp_fx
 from app.adapters.transport_privacy import private_request
 from app.domain.money import MoneyRatio
+from app.domain.engine import SITE_CURRENCIES
 from app.domain.types import OnlineState, SiteContract, Snapshot, VariantKey, FeeModel
 from app.services.local_price_history import capture_local_price_history
 from app.adapters.official_price_logs import capture_recent_price_changes
@@ -37,9 +38,8 @@ def validate_authorization(authorization, key, upload_price):
     a = authorization
     if (a.get('approved') is not True or not a.get('id') or not a.get('actor')
             or a.get('business_date') != utcnow().astimezone(BEIJING).date().isoformat()
-            or VariantKey.model_validate(a['key']) != key or key.site != 'PH'
-            or a.get('currency') != 'PHP' or not a.get('shop_name')
-            or a.get('public_commission_policy') != 'excluded_by_user'
+            or VariantKey.model_validate(a['key']) != key or key.site not in ('PH','MY','TH')
+            or a.get('currency') != SITE_CURRENCIES[key.site] or not a.get('shop_name')
             or money(a['upload_price']) != upload_price or upload_price <= 0
             or upload_price != upload_price.quantize(Decimal('.01'))):
         raise ValueError('不符合当日单商品、币种及精确金额授权')
@@ -61,11 +61,13 @@ def verify_price_evidence(authorization, previous_ids, log, detail, current, exp
     retail, uploaded = money(current['retail']), money(a['upload_price'])
     retail_matches = retail == uploaded
     if not retail_matches and abs(retail-uploaded) <= Decimal('.01'):
-        # PH本次真实合同：上传87.18被公司转换为税前82.19，平台回读82.19+物流5=87.19。
-        # 仅接受有相同税前请求/回读及物流构成证据的一档差；仍按既有实际价0.02核验。
-        retail_matches = (money(current['tax_exclusive']) == money(log['priceNew'])
-            and money(current['logistics']) >= 0
-            and retail == money(current['tax_exclusive']) + money(current['logistics']))
+        # PH、MY及2026-11-19 TH实测：税前请求/回读相同，含税价由税前+物流乘当前VAT向上取分。
+        # 只解释有完整构成证据的一分差；原营销价0.02容限及利润非负仍独立校验。
+        net, logistics, vat = (money(current[n]) for n in ('tax_exclusive','logistics','vat_percent'))
+        native_retail = ((MoneyRatio(net)+MoneyRatio(logistics))
+            * (MoneyRatio(Decimal(1))+MoneyRatio(vat)/MoneyRatio(Decimal(100))))
+        retail_matches = (net == money(log['priceNew']) and logistics >= 0 and vat >= 0
+            and retail == native_retail.round_to_step(Decimal('.01'),'ROUND_UP'))
     if (any(current.get(n) != k[n] for n in ('shop_id', 'product_id', 'item_id'))
             or current['currency'] != a['currency'] or not retail_matches
             or money(current['discount']) != money(a['discount_percent_off'])
@@ -91,7 +93,7 @@ class ManualLiveAdapter:
             validate_authorization(self.authorization, self.key, money(self.authorization['upload_price']))
             valid = self.auth.configured and self.settings.vendor_api_url.rstrip('/') == ORIGIN
         except (ValueError, KeyError): valid = False
-        return {'contract_ready': valid, 'verified_sites': ['PH'] if valid else [],
+        return {'contract_ready': valid, 'verified_sites': [self.key.site] if valid else [],
                 'manual_targets': [self.key.target_identity()] if valid else [],
                 'contract_scope': 'explicit_manual_single_sku', 'automatic_collection_ready': False}
 
@@ -143,20 +145,23 @@ class ManualLiveAdapter:
             raise ValueError('活动身份不唯一')
         p = value['data'][0]
         if (p['shopid'] != k.shop_id or p['promotionId'] != promotion or p['promotionType'] != 2
-                or p['productType'] != 2 or p['status'] != 2): raise ValueError('不是已核对的进行中SKU折扣活动')
-        value = self._request('POST', '/Api/api-tiktok-sales/promotion/productList', json={
-            'page': 1, 'limit': 100, 'promotionId': promotion, 'productType': 2,
-            'productIds': [k.product_id], 'sellerSkuIds': [k.item_id]})
+                or p['productType'] not in (1,2) or p['status'] != 2): raise ValueError('不是已核对的进行中百分比折扣活动')
+        body = {'page':1, 'limit':100, 'promotionId':promotion, 'productType':p['productType'], 'productIds':[k.product_id]}
+        if p['productType'] == 2: body['sellerSkuIds'] = [k.item_id]
+        value = self._request('POST', '/Api/api-tiktok-sales/promotion/productList', json=body)
         if value.get('code') != 0 or value.get('count') != 1 or len(value['data']) != 1:
             raise ValueError('活动子商品不唯一')
         row = value['data'][0]
         discount = money(a['discount_percent_off'])
-        if (row['productId'] != k.product_id or row['sellerSkuId'] != k.item_id or row['shopid'] != k.shop_id
+        if (row['productId'] != k.product_id or row['shopid'] != k.shop_id
                 or row['promotionPrice'] is not None or money(row['discount']) != discount
-                or money(variant['discount']) != discount
+                or money(variant['discount']) != discount):
+            raise ValueError('活动归属、固定价或折扣与当前变体不一致')
+        # 产品级百分比活动只返回父商品及折扣；SKU级另核对具体商品与价格。
+        if p['productType'] == 2 and (row['sellerSkuId'] != k.item_id
                 or money(row['priceIncludeVat']) != money(variant['priceIncludeVat'])
                 or money(row['marketPrice']) != money(variant['marketPrice'])):
-            raise ValueError('活动价格或折扣与当前变体不一致')
+            raise ValueError('活动子商品或价格与当前变体不一致')
         if MoneyRatio(money(variant['marketPrice'])) != MoneyRatio(money(variant['priceIncludeVat'])) * MoneyRatio(1-discount/100):
             raise ValueError('当前营销价不符合已授权折扣比例')
         return {'kind': 'percentage_discount', 'discount_percent_off': str(discount), 'promotion_id': promotion, 'fixed_promotion_price': None}
@@ -172,10 +177,12 @@ class ManualLiveAdapter:
         platform = capture_platform_controls(self.settings, capture, [{'erp_shop': a['shop_name'], 'product_id': k.product_id, 'item_id': k.item_id}], client=self.client)
         official_history = capture_recent_price_changes(self.settings,[k],client=self.client)
         from app.adapters.official_price_logs import recent_price_log_for
-        eligible = [target] if recent_price_log_for(official_history,k).count == 0 else []
+        if recent_price_log_for(official_history,k).count != 0:
+            raise ValueError('近72小时已有调价日志，本轮不调')
+        eligible = [target]
         window = capture_goods_sales(self.settings, capture, eligible, client=self.client)
         history = capture_local_price_history(self.settings, capture)
-        fixed = capture_fixed_fees(self.settings, capture)
+        fixed = capture_current_fees(self.settings, capture, platform, client=self.client)
         fx = query_current_erp_fx(self.settings)
         for name, source in [('sales',sales),('platform',platform),('window',window),('history',history),('fixed',fixed),('fx',fx)]:
             write_verified(self.directory / (capture['capture_id']+'-'+name+'.json'), source)
@@ -183,18 +190,13 @@ class ManualLiveAdapter:
         control = platform['records'][0]
         variants = [v for v in control['current_variants'] if v['sellerSkuId'] == k.item_id]
         if len(variants) != 1: raise ValueError('子商品不唯一')
+        target['erp_sku'] = variants[0]['localSellerSku']
         activity = self._promotion(variants[0])
         # 原件不修改；“参加活动”不同于“固定活动价锁住”。本入口只接已核对百分比活动。
         prepared_platform = deepcopy(platform)
         prepared_platform['records'][0]['company_activity_locked'] = False
-        policy_fees = deepcopy(fixed)
-        policy_fees['config']['product_inputs'] = [r for r in policy_fees['config']['product_inputs'] if
-            (r['shop_name'],r['product_id'],r['item_id']) != (a['shop_name'],k.product_id,k.item_id)]
-        policy_fees['config']['product_inputs'].append({'shop_name': a['shop_name'], 'product_id': k.product_id,
-            'item_id': k.item_id, 'local_sku': k.sku, 'public_commission_rate': '0',
-            'source_cells': 'user-policy:excluded_by_user;不是实际佣金为零'})
         prepared = prepare_online_states(capture, [target], sales=sales, platform=prepared_platform,
-            window=window, local_history=history, fixed_fees=policy_fees, official_history=official_history)
+            window=window, local_history=history, fixed_fees=fixed, official_history=official_history)
         write_verified(self.directory / (capture['capture_id']+'-preparation.json'), {'preparation': prepared, 'activity': activity, 'authorization': a})
         if prepared['issues'] or len(prepared['online']) != 1: raise ValueError(str(prepared['issues']))
         state = dict(prepared['online'][0]['state'], fee_scope='normal')
@@ -204,8 +206,8 @@ class ManualLiveAdapter:
         contracts = {r['contract']['site']: SiteContract.model_validate(r['contract']) for r in prepared['contracts']}
         self.snapshot = Snapshot(as_of=utcnow(), business_date=business_date, fx_date=fx['date'], fx_rates=fx['source_rates'],
             fx_rate_unit='cny_per_currency', lines=[], online=[online], contracts=contracts, complete_sources=[],
-            source_versions={'manual_contract': 'explicit-manual-ph-20261117-v1', 'fixed_fees': fixed['config']['version'],
-                             'authorization': a['id'], 'public_commission': 'excluded_by_user'})
+            source_versions={'manual_contract': 'explicit-manual-ph-my-th-20261119-v2', 'fixed_fees': fixed['config']['version'],
+                             'authorization': a['id']})
         self.previous_ids = [str(r['id']) for r in self._logs()]
         write_verified(self.directory / 'latest-snapshot.json', self.snapshot.model_dump(mode='json'))
         return self.snapshot
@@ -284,11 +286,12 @@ class ManualLiveAdapter:
                     or s['seller_sku'] != k.sku or v['sellerSku'] != k.sku): raise ValueError('平台与公司当前价不同步')
             current = {'retail': v['priceIncludeVat'], 'actual': v['marketPrice'], 'discount': v['discount'], 'currency': v['currency'],
                        'tax_exclusive': s['price']['tax_exclusive_price'], 'logistics': v['logisticsCost'],
+                       'vat_percent': control['company_parent']['taxVatRate'],
                        'product_id': v['productId'], 'item_id': v['sellerSkuId'], 'shop_id': v['shopId']}
             expected = money(intent['decision']['trace']['rounded_actual'])
             actual = verify_price_evidence(a, intent['previous_log_ids'], log, detail['datas'], current, expected)
             full = FeeModel.model_validate(intent['decision']['trace']['online_rows'][0]['profit_check']['model'])
-            if full.profit_exact(MoneyRatio(actual)).numerator < 0: raise ValueError('回读营销价利润仍为负')
+            if not full.meets_minimum_online_margin(MoneyRatio(actual)): raise ValueError('回读营销价在线利润率未达到1%')
             observed = utcnow()
             # 官方统计/最新成功价只作独立证据补充，不代替已绑定任务和当前平台价。
             # 按原提交北京时间日期查count；latest只有金额，保留其无任务ID/时间的限制。

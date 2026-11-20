@@ -32,10 +32,8 @@ def sources():
     local={'schema_version':'local-live-price-history-v1','source_id':'LOCAL',**flags,
         'acquisition_complete':True,'archive_binding':'injected_synthetic_test','executions':[],'guards':[],'protections':[]}
     rate['vatRate']='0'
-    fixed={'schema_version':'user-fixed-pricing-fees-v1','source_id':'FIXED',**flags,'acquisition_complete':True,
-        'config':{'version':'fixed-test-v1','overseas':{'PH':rate},'public':{},'departments':{},'freight':{},
-          'product_inputs':[{'shop_name':'SHOPPH','product_id':'P1','item_id':'I1','local_sku':'S1',
-            'public_commission_rate':'0','direct_vat_rate':None,'source_cells':'synthetic!A1'}]}}
+    fixed={'schema_version':'sales-current-pricing-fees-v1','source_id':'FIXED',**flags,'acquisition_complete':True,'artifact_file':'synthetic-fees.json',
+        'config':{'version':'fixed-test-v1','overseas':{'PH':rate},'public':{},'departments':{},'freight':{}}}
     return capture,[target],{'sales':sales,'platform':platform,'window':window,
         'local_history':local,'fixed_fees':fixed,'official_history':{
             'schema_version':'official-recent-price-v1','basis':'official_type_2_completion_time','synthetic':True,
@@ -59,13 +57,12 @@ def test_live_online_uses_actual_platform_price_explicit_activity_exact_fee_and_
     assert r['pricing_ready'] is False
 
 
-@pytest.mark.parametrize('case',['price_changed','wrong_main','fee_override','missing_protection_archive'])
+@pytest.mark.parametrize('case',['price_changed','wrong_main','missing_protection_archive'])
 def test_unknown_live_input_never_becomes_optimistic_online_state(case):
     from app.adapters.live_online_preparation import prepare_online_states
     c,t,s=sources()
     if case=='price_changed':s['platform']['records'][0]['data']['skus'][0]['price']['sale_price']='62'
     elif case=='wrong_main':s['platform']['records'][0]['company_parent']['localMainSku']='OTHER'
-    elif case=='fee_override':s['fixed_fees']['config']['product_inputs'].append({**s['fixed_fees']['config']['product_inputs'][0],'public_commission_rate':'10'})
     else:s['local_history']['acquisition_complete']=False
     r=prepare_online_states(c,t,**s)
     assert not r['online'] and r['issues']
@@ -142,7 +139,9 @@ def test_user_approved_rounding_runs_the_shared_engine_to_an_archivable_price():
         lines=lines,online=[state],contracts={entry['contract']['site']:SiteContract.model_validate(entry['contract'])
             for entry in bundle['contracts']})
     decision=evaluate(snapshot,source_time(bundle['evaluated_at']))[0]
-    assert decision.ready and decision.upload_price==Decimal('75.62')
+    # 1%下限：((1.0557+.0532+1.4503)/.1042)/(.649589-.01)，五折上传向上进档。
+    assert decision.ready and decision.upload_price==Decimal('76.81')
+    assert Decimal(decision.trace['online_profit']['rounded_margin']) >= Decimal('.01')
     assert decision.target_actual>=Decimal('33.556') and decision.predicted_profit>=0
 
 
@@ -173,7 +172,6 @@ def test_conflicting_target_warehouses_are_all_held_without_stopping_independent
     control=inputs['platform']['records'][0]
     variant=copy.deepcopy(control['current_variants'][0]);variant['sellerSkuId']='I2';control['current_variants'].append(variant)
     sku=copy.deepcopy(control['data']['skus'][0]);sku['id']='I2';control['data']['skus'].append(sku)
-    fixed=inputs['fixed_fees']['config']['product_inputs'];fixed.append({**fixed[0],'item_id':'I2'})
     candidates=[targets[0],conflict,independent]
     if reverse:candidates.reverse()
     result=prepare_online_states(c,candidates,**inputs)
@@ -203,7 +201,7 @@ def test_no_overseas_inventory_never_uses_overseas_fee_as_direct_formula():
     s["platform"]["records"][0]["current_variants"][0]["overseasStockSum"]=0
     result=prepare_online_states(c,t,**s)
     assert not result["online"]
-    assert "固定费率表未覆盖" in result["issues"][0]["reason"]
+    assert "本轮当前费用未覆盖" in result["issues"][0]["reason"]
 
 
 def test_th_online_vat_flows_into_profit_model_without_new_source():
@@ -219,8 +217,8 @@ def test_th_online_vat_flows_into_profit_model_without_new_source():
     inputs['sales']['currency_rates']=[{'name':'CNY','rate':'1'},{'name':'THB','rate':'0.1'}]
     _,rate=direct_source()
     config=inputs['fixed_fees']['config']
-    config['public']={'TH':{k:rate[k] for k in ('vatRate','procedureRate','commissionRate','warehouseCost')}}
-    config['public']['TH']['vatRate']=None
+    config['public']={'SHOPPH':{k:rate[k] for k in ('vatRate','procedureRate','commissionRate','warehouseCost')}}
+    config['public']['SHOPPH']['vatRate']=None
     config['departments']={'D1':{'TH':{k:rate[k] for k in ('returnRate','otherRate','marketingRate','packageFee','fixedFreight')}}}
     config['freight']={'TH':rate['freight']}
     result=prepare_online_states(c,targets,**inputs)

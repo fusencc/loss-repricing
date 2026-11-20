@@ -1,3 +1,4 @@
+import { formatDecimal, presentationValue } from './decimal-display.ts'
 import axios from 'axios'
 
 export const api = axios.create({ baseURL: '/api', withCredentials: true, timeout: 20000 })
@@ -136,8 +137,8 @@ export function stateLabel(state: string) {
 export function display(value: unknown): string {
   if (value == null || value === '') return '—'
   if (typeof value === 'boolean') return value ? '是' : '否'
-  if (typeof value === 'object') return JSON.stringify(value, null, 2)
-  return String(value)
+  if (typeof value === 'object') return JSON.stringify(presentationValue(value), null, 2)
+  return formatDecimal(String(value))
 }
 
 export function timeLabel(value: string | null | undefined) {

@@ -25,18 +25,29 @@ const traceLabels: Record<string, string> = {
   business_date: '业务日期', evaluated_at: '评估时间', as_of: '快照采集时间',
   fx_rates: '本日汇率（每 1 CNY）', complete_sources: '已齐备的候选来源',
   source_versions: '来源版本', source_rows: '原始候选行', online_rows: '在线快照',
-  source_issues: '来源异常记录',
+  source_issues: '来源异常记录', online_profit: '在线利润校验依据',
   site_contract: '站点接口合同', sales_window: '仓库七日参考销量',
   excluded_source_rows: '排除的候选行', candidate_unit_losses: '候选单件亏损（原币）',
   station_currency: '站点币', loss_fx_rate: '原币汇率（每 1 CNY）', station_fx_rate: '站点币汇率（每 1 CNY）',
   raw_upload_price: '舍入前含 VAT 上传价', rounded_actual: '舍入后实际价',
-  actual_price_error: '实际价误差', allowed_error: '允许误差', target_profit: '目标价正常一次毛利',
+  actual_price_error: '实际价误差', allowed_error: '允许误差', target_profit: '目标价利润额（按公式版本）',
   quantity: '数量', loss_grain: '亏损粒度', fx_rate: '换算汇率', fx_date: '汇率日期',
   rate: '换算汇率', station_loss: '站点币亏损', current_actual: '当前实际价',
   discount: '折扣系数', revenue_factor: '费用模型收入系数', fixed_cost: '费用模型固定成本',
   target_actual: '目标实际价', upload_price: '含 VAT 上传价', predicted_profit: '预测利润额（见公式版本）',
   retail: '含 VAT 零售价', marketing_price: '营销价', source: '来源',
 }
+// 仅展示后端保存的实际价校正额；历史缺项显示未记录，不从旧证据重算。
+const onlineProfitCorrection = computed(() => {
+  const trace = props.item?.decision?.trace
+  if (!trace || typeof trace !== 'object' || Array.isArray(trace)) return { amount: null, currency: '' }
+  const fields = trace as Record<string, unknown>
+  const evidence = fields.online_profit
+  const amount = evidence && typeof evidence === 'object' && !Array.isArray(evidence)
+    ? (evidence as Record<string, unknown>).correction_amount : undefined
+  return { amount: typeof amount === 'string' ? amount : null,
+    currency: typeof fields.station_currency === 'string' ? fields.station_currency : '' }
+})
 const traceRows = computed(() => {
   const trace = props.item?.decision?.trace
   return trace && typeof trace === 'object' && !Array.isArray(trace) ? Object.entries(trace) : []
@@ -63,12 +74,13 @@ const traceRows = computed(() => {
         <ItemCoordination v-if="!item.read_only" :actor-role="actorRole" :actor-id="actorId" :item="item" @refresh="emit('refresh')" />
         <section v-if="item.decision" class="drawer-section">
           <h3>补亏计算</h3>
-          <p class="muted">目标实际价为当前实际价加站点币单件亏损。含 VAT 上传价为目标实际价除以折扣系数。</p>
+          <p class="muted">初步补亏价为当前实际价加单件补亏额；在线利润校验仍亏时，增加在线利润校正额得到目标实际价，再按折扣反推上传价。</p>
           <dl class="detail-grid">
             <div v-for="(label, key) in decisionFields" :key="key">
               <dt>{{ label }}</dt>
               <dd>{{ key === 'source_row_ids' ? item.decision.source_row_ids?.join('、') || '—' : display(item.decision[key]) }}</dd>
             </div>
+            <div><dt>在线利润校正额（站点币）</dt><dd>{{ onlineProfitCorrection.amount === null ? '未记录' : `${display(onlineProfitCorrection.amount)} ${onlineProfitCorrection.currency}` }}</dd></div>
             <div v-if="item.decision.reason_code === 'ready'"><dt>规则检查</dt><dd>规则检查通过</dd></div>
           </dl>
           <details class="evidence">

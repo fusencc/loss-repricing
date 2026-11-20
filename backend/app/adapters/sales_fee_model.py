@@ -2,7 +2,7 @@
 
 当前一次毛利仅计算现价筛选观测值，不输出独立新价保本模型。
 
-固定费率与商品输入由fixed_pricing_fees绑定版本；库存、成本、重量与报价由
+当前费率由current_pricing_fees绑定本轮版本；库存、成本、重量与报价由
 当前来源提供。未知成本、多个有效海外仓或分项不完整时不生成模型。
 """
 from decimal import Decimal
@@ -67,12 +67,12 @@ def compile_overseas_fee(variant, rate, *, site, warehouse, company_cny_per_curr
     fixed = costs + _nonnegative(procurement[0]) + _nonnegative(freight[0])
     all_factor = (MoneyRatio(Decimal(100)) - total) * MoneyRatio(Decimal('0.01'))
     normal_factor = all_factor + rates['marketingRate'] * MoneyRatio(Decimal('0.01'))
-    # 用户固定BD表AV公式：VAT作用在固定成本上，公开计划佣金独立从收入扣除。
+    # 2026-11-19用户明确移除公开计划佣金；VAT仍作用在固定成本上。
+    # 平台基础费率保留，不能把移除额外佣金当成免除平台费用。
     # 不采用工作簿的缓存利润率；表中12%/12.5%目标也不覆盖本程序0%保本规则。
     vat = _nonnegative(rate.get('vatRate')) * MoneyRatio(Decimal('0.01'))
-    commission = _nonnegative(rate.get('publicCommissionRate')) * MoneyRatio(Decimal('0.01'))
     taxed_fixed = fixed * (MoneyRatio(Decimal(1)) + vat)
-    included_factor = all_factor - commission
+    included_factor = all_factor
     version = rate.get('version')
     if not isinstance(version, str) or not version.strip():
         raise ValueError('固定费率缺少版本')
@@ -91,7 +91,8 @@ def compile_overseas_fee(variant, rate, *, site, warehouse, company_cny_per_curr
             'reported_margin_percent':None if reported is None else str(reported),
             'online_profit_includes_marketing':True,
             'recalculated_including_marketing_percent':str(included_percent.decimal()),
-            'vat_percent':str(rate['vatRate']), 'public_commission_percent':str(rate['publicCommissionRate']),
+            'vat_percent':str(rate['vatRate']),
+            'rate_source':rate.get('rate_source'),
             'fixed_rate_ref':rate.get('source_ref'), 'source_cells':rate.get('source_cells'),
             'excluded_percent_fields':['marketingRate'],'warehouse':warehouse}}
 
@@ -122,8 +123,8 @@ def compile_direct_fee(variant, rate, *, site, company_cny_per_currency):
     fixed = fixed * (MoneyRatio(Decimal(1)) + vat)
     normal_rates = _sum(_nonnegative(rate.get(k)) for k in ('procedureRate', 'commissionRate', 'returnRate', 'otherRate'))
     normal_factor = MoneyRatio(Decimal(1)) - normal_rates * MoneyRatio(Decimal('0.01'))
-    full_factor = normal_factor - (_nonnegative(rate.get('marketingRate'))
-                                  + _nonnegative(rate.get('publicCommissionRate'))) * MoneyRatio(Decimal('0.01'))
+    # 用户确认不采用公开计划佣金；基础平台佣金仍在normal_rates中扣除。
+    full_factor = normal_factor - _nonnegative(rate.get('marketingRate')) * MoneyRatio(Decimal('0.01'))
     version = rate['version']
     if not isinstance(version, str) or not version.strip():
         raise ValueError('固定费率缺少版本')
@@ -137,4 +138,4 @@ def compile_direct_fee(variant, rate, *, site, company_cny_per_currency):
                   'fixed_rate_ref': rate.get('source_ref'), 'weight_g': str(weight),
                   'freight_station': str(freight_station.decimal()), 'fixed_cost_currency': 'CNY',
                   'company_quote': str(quote), 'vat_percent': str(rate['vatRate']),
-                  'public_commission_percent': str(rate['publicCommissionRate'])}}
+                  'rate_source': rate.get('rate_source')}}

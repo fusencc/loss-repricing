@@ -1,22 +1,20 @@
-"""读取用户固定费率；Excel仅在显式导入时读取，运行不查询动态费率或自动改版本。"""
+"""BD表显式导入及统一费用字段转换；真实运行仅复用导入的物流价卡。"""
 from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
-from uuid import uuid4
 import json
 import zipfile
 import xml.etree.ElementTree as ET
 
 from app.adapters.normalization import money
-from app.services.erp_capture_store import write_verified
 
-SCHEMA = 'user-fixed-pricing-fees-v1'
+SCHEMA = 'user-fixed-pricing-fees-v2'
 NS = {'m': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
 
 
 def import_workbook(path):
-    """只采用固定输入单元格；不使用BD商品页里的公式缓存、利润率或历史库存。"""
+    """只采用固定输入单元格；不使用BD商品页的公开计划佣金、公式缓存、利润率或历史库存。"""
     path = Path(path)
     raw = path.read_bytes()
     with zipfile.ZipFile(path) as archive:
@@ -43,13 +41,13 @@ def import_workbook(path):
                 if cell.find('m:f', NS) is None and cell.get('t') != 'e' and text is not None:
                     cells[cell.attrib['r']] = text
             sheets[sheet.attrib['name']] = cells
-    rates, products = sheets['费率表'], sheets['BD项目']
+    rates = sheets['费率表']
     if rates.get('B2') != 'VAT费率' or rates.get('C12') != '总费率(%)':
         raise ValueError('固定费率表布局与已核实版本不一致')
-    config = {'schema_version': SCHEMA, 'version': 'user-fixed-' + sha256(raw).hexdigest()[:16],
+    config = {'schema_version': SCHEMA, 'version': 'user-fixed-no-public-commission-v2-' + sha256(raw).hexdigest()[:16],
         'source': {'file': str(path.resolve()), 'sha256': sha256(raw).hexdigest(),
                    'imported_at': datetime.now(timezone.utc).isoformat()},
-        'public': {}, 'overseas': {}, 'departments': {}, 'product_inputs': [], 'freight': {}}
+        'public': {}, 'overseas': {}, 'departments': {}, 'freight': {}}
 
     def number(cells, key, *, nullable=False):
         try:
@@ -84,55 +82,13 @@ def import_workbook(path):
     for site, row in [('TH', 53), ('VN', 56), ('MY', 60), ('PH', 62)]:
         config['freight'][site] = {name: number(rates, col + str(row)) for col, name in
                                    [('E', 'base_weight_g'), ('F', 'base_price'), ('G', 'per_10g_price')]}
-    for key in sorted(products):
-        if not key.startswith('J') or not key[1:].isdigit() or int(key[1:]) < 4:
-            continue
-        row = key[1:]
-        identity = {name: products.get(col + row) for col, name in
-                    [('G', 'shop_name'), ('I', 'product_id'), ('J', 'item_id'), ('L', 'local_sku')]}
-        if not all(identity.values()):
-            continue
-        config['product_inputs'].append({**identity,
-            'public_commission_rate': number(products, 'M' + row, nullable=True),
-            'source_cells': f'BD项目!G{row}:M{row}'})
     return config
-
-
-def capture_fixed_fees(settings, capture):
-    source_id = 'fixed-fees-' + uuid4().hex
-    path = Path(settings.runtime_dir) / 'fixed-fee-sources' / (source_id + '.json')
-    result = {'schema_version': SCHEMA, 'source_id': source_id, 'erp_capture_id': capture['capture_id'],
-        'synthetic': bool(capture.get('synthetic', False)), 'sample_only': bool(capture.get('sample_only', False)),
-        'queried_at': datetime.now(timezone.utc).isoformat(),
-        'config': None, 'issues': [], 'artifact_file': str(path.resolve())}
-    try:
-        config_path = settings.fixed_fee_config_path or Path(settings.runtime_dir) / 'fixed-pricing-fees.json'
-        raw = config_path.read_bytes()
-        config = json.loads(raw)
-        if (config.get('schema_version') != SCHEMA or not config.get('version')
-                or not config.get('source', {}).get('sha256')):
-            raise ValueError()
-        result.update(config=config, sha256=sha256(raw).hexdigest())
-    except (OSError, ValueError, TypeError, AttributeError):
-        result['issues'].append({'code': 'fixed_fee_config_unavailable'})
-    result['acquisition_complete'] = not result['issues']
-    result['completed_at'] = datetime.now(timezone.utc).isoformat()
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    write_verified(path, result)
-    return result
 
 
 def select_fixed_rate(source, variant, parent, site, mode):
     if not source.get('acquisition_complete') or not isinstance(source.get('config'), dict):
         raise ValueError('用户固定费率配置未导入或无效')
     config = source['config']
-    matches = [row for row in config['product_inputs'] if
-        (row['shop_name'], row['product_id'], row['item_id'], row['local_sku']) ==
-        (parent['shopName'], parent['productId'], variant['sellerSkuId'], variant['localSellerSku'])]
-    values = {row['public_commission_rate'] for row in matches}
-    if len(values) != 1 or next(iter(values)) is None:
-        raise ValueError('固定表缺少唯一的本商品公开计划佣金，不能填0')
-    commission = next(iter(values))
     try:
         if mode == 'overseas':
             rate = dict(config['overseas'][site])
@@ -159,7 +115,7 @@ def select_fixed_rate(source, variant, parent, site, mode):
                     'shop_name': parent['shopName'], 'product_id': parent['productId']}
             if rate['vatRate'] is None:
                 raise ValueError('固定表未明确本站点的直发VAT')
-        return {**rate, 'siteCode': site, 'version': config['version'], 'publicCommissionRate': commission,
-                'source_ref': source['source_id'], 'product_input_refs': [r['source_cells'] for r in matches]}
+        return {**rate, 'siteCode': site, 'version': config['version'],
+                'source_ref': source['source_id']}
     except KeyError:
         raise ValueError('固定费率表未覆盖该站点、部门或仓配') from None

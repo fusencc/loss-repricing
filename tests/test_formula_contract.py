@@ -58,7 +58,7 @@ def test_documented_synthetic_example_and_formula_provenance():
     assert result.selected_row_id == "r1"
     assert (result.unit_loss, result.discount, result.target_actual, result.upload_price,
             result.predicted_profit) == tuple(map(Decimal, ["1", "0.5", "11", "22", "0.4"]))
-    assert result.trace["formula_version"] == FORMULA_VERSION == "loss-optional-sales-reference-20261117-v6"
+    assert result.trace["formula_version"] == FORMULA_VERSION == "loss-online-margin-1pct-20261120-v7"
     assert result.trace["decimal_precision"] == 50
 
 
@@ -93,7 +93,7 @@ def test_formula_matches_independent_rational_reference(rounding, step):
                 assert_close_decimal(result.trace["rounded_actual"], actual)
                 assert_close_decimal(result.predicted_profit, profit)
                 assert result.ready == (abs(actual - target) <= Fraction("0.02")
-                                        and target_profit >= 0 and profit >= 0)
+                                        and target_profit >= target/100 and profit >= actual/100)
 
 
 def test_external_decimal_context_cannot_change_pricing_result():
@@ -107,17 +107,17 @@ def test_external_decimal_context_cannot_change_pricing_result():
 
 
 @pytest.mark.parametrize('rounding', ['ROUND_DOWN', 'ROUND_UP', 'ROUND_HALF_UP'])
-def test_raw_company_fx_preserves_exact_tick_and_zero_profit(rounding):
+def test_raw_company_fx_preserves_exact_tick_at_one_percent(rounding):
     # 来源是3 CNY/MYR。3 CNY亏损精确补1 MYR；显示倒数1/3不能回读作算价输入。
     snapshot = sample(loss='-3', currency='CNY', current='10', retail='10',
-                      rounding=rounding, factor='1', cost='11')
+                      rounding=rounding, factor='1', cost='10.89')
     snapshot = Snapshot.model_validate({**snapshot.model_dump(),
         'fx_rates':{'CNY':'1','MYR':'3'}, 'fx_rate_unit':'cny_per_currency'})
     result = evaluate(snapshot, NOW)[0]
     assert result.ready
     assert result.target_actual == Decimal('11')
     assert result.upload_price == Decimal('11.00')
-    assert result.predicted_profit == Decimal('0')
+    assert result.predicted_profit == Decimal('0.11')
     assert result.trace['fx_rate_unit'] == 'cny_per_currency'
 
 
@@ -131,14 +131,14 @@ def test_raw_company_fx_converts_between_two_foreign_currencies():
     assert result.upload_price == Decimal('13.00')
 
 
-@pytest.mark.parametrize(("cost", "upload"), [("9.9", "22"), ("9.900000000000000000000000000001", "22.01")])
-def test_profit_zero_boundary_requires_an_extra_tick_for_any_negative_amount(cost, upload):
+@pytest.mark.parametrize(("cost", "upload"), [("9.79", "22"), ("9.790000000000000000000000000001", "22.01")])
+def test_one_percent_boundary_requires_an_extra_tick_for_any_shortfall(cost, upload):
     result = evaluate(sample(loss="-1", currency="MYR", cost=cost), NOW)[0]
     assert result.ready
     assert result.upload_price == Decimal(upload)
     assert result.predicted_profit >= 0
-    # 即使差额低于展示精度，也不能通过取整伪造零利润。
-    before = (Fraction(upload)-Fraction("0.01"))/2 * Fraction("0.9") - Fraction(cost)
+    # 即使差额低于展示精度，也不能通过取整伪造达到1%。
+    before = (Fraction(upload)-Fraction("0.01"))/2 * Fraction("0.89") - Fraction(cost)
     assert before < 0
 
 
@@ -153,13 +153,13 @@ def test_repeating_unit_loss_does_not_shift_exact_tick_or_half_tick(loss, curren
     assert result.upload_price == Decimal(upload)
 
 
-def test_repeating_target_with_exact_zero_profit_is_allowed():
+def test_repeating_target_with_exact_one_percent_is_allowed():
     result = evaluate(sample(loss="-1", quantity="3", basis="line", currency="MYR",
-                             current="10", retail="10", rounding="ROUND_UP", factor="0.9", cost="9.3"), NOW)[0]
+                             current="10", retail="10", rounding="ROUND_UP", factor="0.91", cost="9.3"), NOW)[0]
     assert result.ready
-    assert Decimal(result.trace["target_profit"]) == 0
+    assert Decimal(result.trace["online_profit"]["target_margin"]) == Decimal(".01")
     assert result.upload_price == Decimal("10.34")
-    assert result.predicted_profit == Decimal("0.006")
+    assert result.predicted_profit == Decimal("0.1094")
 
 
 def test_repeating_fx_preserves_exact_half_tick():

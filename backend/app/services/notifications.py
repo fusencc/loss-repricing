@@ -1,7 +1,6 @@
 """Persistent notices. Unknown sends never become retryable; only explicit failure can retry."""
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
-from urllib.parse import quote
 from uuid import uuid4
 import time
 from sqlalchemy import select, update
@@ -9,7 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from app.models import Batch, Item, WorkerLease
 from app.models.notifications import Notice
 from app.adapters.dingtalk import DingTalkClient
-from app.services.store import stamp, utcnow
+from app.services.store import stamp, utcnow, BEIJING
 
 
 NOTICE_ITEM_STATES = ('待处理', '待核验', '已核验', '本轮不调')
@@ -70,7 +69,7 @@ def _summary(items, escalation=False):
     counts=dict(Counter(i.status for i in items))
     exceptions=sum(i.status in {'待处理','待核验'} for i in items)
     return {'total':len(items),'exceptions':exceptions,'statuses':counts,
-            'title':('异常超过24小时未确认' if escalation else '亏损提价批次处理结果'),
+            'title':('异常超过24小时未确认' if escalation else '亏损提价处理结果'),
             'unassigned':False}
 
 
@@ -78,13 +77,41 @@ def notice_batch_mode(session, notice):
     return session.scalar(select(Batch.mode).where(Batch.id == notice.batch_id))
 
 
-def _card_text(summary, batch_mode):
-    # 钉钉卡片只带授权检查后的状态汇总，商品与价格在网页重新鉴权后展示。
-    label = {'demo': '演示批次（已核验项为模拟结果）', 'file': '文件对账', 'live': '实时数据批次'}
-    counts = summary['statuses']
-    breakdown = ' · '.join(f'{status} {counts.get(status, 0)}' for status in NOTICE_ITEM_STATES)
-    return (f"{label.get(batch_mode, '批次来源待核实')} · 本批共{summary['total']}条\n\n"
-            f"{breakdown}\n\n打开本条通知核对商品、处理原因和价格。")
+def _notice_category(item):
+    # 活动限制由领域判定 reason_code 确认，不能用原因文案或历史活动字段猜测。
+    if item.status == '已核验':
+        return '已提价'
+    if item.status == '本轮不调':
+        return '本轮不调'
+    if (item.decision or {}).get('reason_code') == 'activity_locked':
+        return '活动中'
+    return '待处理'
+
+
+def _markdown_text(value):
+    # 商品标识和原因属于来源文本，不能让其中的 Markdown 变成链接或格式指令。
+    value=' '.join(str(value or '未提供').split())
+    return ''.join('\\'+char if char in '\\[]()*_`<>#' else char for char in value)
+
+
+def _card_text(summary, batch_mode, items):
+    # 仅渲染发送前按当前收件人权限检查过的 items；明细不暴露其他销售员商品。
+    # 时间是这些记录的最近处理时间（北京时间），不以重发时间冒充处理时间。
+    processed_at=max(datetime.fromisoformat(item.updated_at) for item in items).astimezone(BEIJING)
+    counts=Counter(_notice_category(item) for item in items)
+    breakdown=' · '.join(f'{label} {counts[label]}' for label in ('待处理','活动中','已提价','本轮不调'))
+    manual=[item for item in items if _notice_category(item)=='待处理']
+    details=[]
+    for index,item in enumerate(manual,1):
+        key=item.key
+        details.append(f"{index}. SKU：{_markdown_text(key.get('sku'))} · 站点：{_markdown_text(key.get('site'))} · 店铺：{_markdown_text(key.get('shop_id'))}\n\n"
+                       f"   原因：{_markdown_text(item.reason)}")
+    warning='演示批次（已提价项为模拟结果）\n\n' if batch_mode=='demo' else '文件对账（非真实提价）\n\n' if batch_mode=='file' else ''
+    return (f"**{summary['title']}**\n\n{warning}"
+            f"**{processed_at:%Y-%m-%d %H:%M:%S}** · 共处理**{len(items)}**条\n\n"
+            f"{breakdown}\n\n待处理的明细：\n\n"
+            + ('\n\n'.join(details) if details else '无')
+            + '\n\n查询提价数据下载[http://8.133.252.166:50003](http://8.133.252.166:50003)')
 
 
 def enqueue_batch_notices(factory, batch_id, *, existing_only=False):
@@ -185,12 +212,14 @@ def _escalate(factory):
 
 def notification_status(factory,config):
     live=getattr(config,'notification_mode','demo')=='live'
-    configured=all(getattr(config,k,'') for k in ('ding_corp_id','ding_client_id','ding_client_secret','ding_agent_id','public_base_url'))
+    configured=all(getattr(config,k,'') for k in ('ding_client_id','ding_client_secret'))
     with factory() as session:
         counts=dict(Counter(session.scalars(select(Notice.delivery_state))))
     return {'mode':'live' if live else 'demo','enabled':bool(getattr(config,'ding_enabled',False)),
             'configured':bool(configured),'synthetic':not live,'counts':counts,
-            'message':'演示模拟投递，不代表真实钉钉发送' if not live else '真实通知需启用并完成应用配置'}
+            'message':('演示模拟投递，不代表真实钉钉发送' if not live else
+                       '机器人真实通知已启用' if configured and getattr(config,'ding_enabled',False) else
+                       '真实通知需启用并完成应用配置')}
 
 
 DISPATCH_LEASE = 'notification_dispatch'
@@ -256,6 +285,12 @@ def _dispatch_notices(factory,config,owner):
                     # Result endpoint retains evidence for only 24h. Keep acceptance, never resend.
                     if utcnow()-datetime.fromisoformat(notice.updated_at)>timedelta(hours=24):
                         continue
+                    queries=[e for e in (notice.delivery_evidence or []) if e.get('operation')=='query']
+                    delays=(15,60,300,900,3600)
+                    if queries:
+                        last=datetime.fromisoformat(queries[-1]['at'])
+                        if (utcnow()-last).total_seconds() < delays[min(len(queries)-1,len(delays)-1)]:
+                            continue
                     query=(notice.task_id,notice.recipient_userid)
                     send=None
                 else:
@@ -288,13 +323,11 @@ def _dispatch_notices(factory,config,owner):
                         continue
                     notice.recipient_userid=userid
                     summary=notice.summary
+                    text = _card_text(summary, notice_batch_mode(session, notice), current)
                     notice.delivery_evidence=list(notice.delivery_evidence or []) + [{
                         'operation':'send_intent','summary':dict(summary),'item_ids':list(notice.item_ids),
-                        'at':stamp(utcnow())}]
-                    text = _card_text(summary, notice_batch_mode(session, notice))
-                    base = getattr(config, 'public_base_url', '').partition('#')[0].rstrip('/')
-                    url = f"{base}/#notifications/{quote(notice.id, safe='')}"
-                    send = (userid, summary['title'], text, url)
+                        'title':summary['title'],'markdown':text,'at':stamp(utcnow())}]
+                    send = (userid, summary['title'], text, '')
                     query=None
             # `sending` committed before crossing the external side-effect boundary.
             result=client.send_notice(*send) if send else client.query_notice(*query)

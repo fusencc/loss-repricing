@@ -1,7 +1,7 @@
 """人工修正沿用同一执行意图、防重锁和回读；批准不等于已改价。
 
 与自动补亏不同，目标实际售价由有权销售员/主管明确提出。仍必须确认当前在线
-身份、仓配、币种、保护、活动和费用模型，校验档位前后库存对应完整在线利润不为负。
+身份、仓配、币种、保护、活动和费用模型，校验档位前后库存对应完整在线利润率至少1%。
 只跳过自动补亏的当前不亏/72小时筛选，不把人工修正伪造成历史亏损订单。
 """
 from decimal import Decimal, DecimalException
@@ -15,7 +15,7 @@ from app.services.price_control import price_baseline, same_price, lock_control
 from app.services.store import utcnow, stamp, BEIJING, is_erp_reconciliation
 from app.domain.engine import allowed_error, conflicting_main_sku_scopes, SITE_CURRENCIES
 from app.domain.money import MoneyRatio
-from app.domain.types import Decision, OnlineSourceIssue, VariantKey
+from app.domain.types import Decision, OnlineSourceIssue, VariantKey, ONLINE_PROFIT_MINIMUM_MARGIN
 
 def correction_gate(session, decision, control, locked=None):
     correction = session.get(Correction, decision.trace.get("correction_id"))
@@ -83,16 +83,16 @@ def manual_decision(snapshot, online, desired, reason, correction_id, now):
     target = MoneyRatio(desired)
     upload = (target / discount).round_to_step(contract.price_step, contract.rounding)
     actual = MoneyRatio(upload) * discount
-    if (profit_check.model.profit_exact(target).numerator < 0
-            or profit_check.model.profit_exact(actual).numerator < 0):
-        raise ValueError("人工指定价的在线利润率仍为负，请修正价格")
+    if (not profit_check.model.meets_minimum_online_margin(target)
+            or not profit_check.model.meets_minimum_online_margin(actual)):
+        raise ValueError("人工指定价的在线利润率未达到1%，请修正价格")
     profit = profit_check.model.profit_exact(actual)
     if upload <= 0 or (actual-target).absolute() > MoneyRatio(allowed_error(key.site)):
         raise ValueError("修正价按站点档位舍入后超出实际售价误差")
     return Decision(key=key,status="待处理",ready=True,reason_code="manual_correction",
         reason="已授权人工修正："+reason,source_row_ids=[],current_actual=current,discount=discount.decimal(),
         target_actual=desired,upload_price=upload,predicted_profit=profit.decimal(),upload_column=contract.upload_column,
-        trace={"formula_version":"manual-online-profit-only-v2","correction_id":correction_id,
+        trace={"formula_version":"manual-online-margin-1pct-v3","minimum_margin":str(ONLINE_PROFIT_MINIMUM_MARGIN),"correction_id":correction_id,
                "business_date":today.isoformat(),"evaluated_at":now.isoformat(),
                "online_rows":[online.model_dump(mode="json")],"site_contract":contract.model_dump(mode="json"),
                "source_versions":dict(snapshot.source_versions),"rounded_actual":str(actual.decimal()),
