@@ -40,7 +40,7 @@ def test_report_never_promotes_sample_to_complete_or_authorized():
         'detail_rows': 1, 'detail_issue_count': 0,
     }
     assert '亏损口径待确认' in report['pending_confirmations']
-    assert any('公司正常一次毛利' in x for x in report['pending_confirmations'])
+    assert any('公司完整在线利润' in x for x in report['pending_confirmations'])
 
 
 @pytest.mark.parametrize('total,rows,coverage', [

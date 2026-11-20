@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from app.services.erp_pricing import preview_pricing
+from app.domain.engine import FORMULA_VERSION
 
 
 @pytest.fixture
@@ -48,7 +49,7 @@ def test_replay_deduplicates_by_detail_and_uses_the_existing_price_formula(sourc
     assert Decimal(decision["current_actual"]) == Decimal("18")
     assert Decimal(decision["target_actual"]) == Decimal("18.72")
     assert Decimal(decision["upload_price"]) == Decimal("20.80")
-    assert decision["trace"]["formula_version"] == "loss-optional-sales-reference-20261117-v6"
+    assert decision["trace"]["formula_version"] == FORMULA_VERSION
     assert json.loads(decision["selected_row_id"]) == ["000001", "01"]
     assert {tuple(json.loads(row_id)) for row_id in decision["source_row_ids"]} == {
         ("000001", "01"), ("000002", "01"), ("000002", "03")
@@ -499,7 +500,7 @@ def test_live_online_bundle_uses_same_engine_and_cannot_cross_capture(source_fil
         for row in group['rows']:
             if row['orderid']=='000003':row['fields']['店铺']='HELD-PH'
     online=deepcopy(evidence['online'][:1]);online[0]['state']['fee_scope']='erp-corrected-first-margin-v1'
-    bundle={'schema_version':'erp-live-online-preparation-v1','version':'erp-live-online-v1',
+    bundle={'schema_version':'erp-live-online-preparation-v2','version':'erp-live-online-v2',
         'erp_capture_id':capture['capture_id'],'synthetic':True,'sample_only':False,'pricing_ready':False,
         'observed_at':'2026-11-09T15:00:00+08:00','evaluated_at':'2026-11-09T15:00:00+08:00','online':online,'contracts':evidence['contracts'],
         'issues':[],'references':{'sales_source':'S1'}}

@@ -173,7 +173,8 @@ def test_raw_and_approved_evidence_cannot_silently_disagree(sources, corruption,
 
     report = preview_pricing(capture, evidence, exports=files)
     assert code in {issue["code"] for issue in report["export_mapping"]["evidence_conflicts"]}
-    assert not any(row["ready"] for row in report["decisions"])
+    affected=line["mapping"]["key"]["item_id"]
+    assert not any(row["ready"] for row in report["decisions"] if row["key"]["item_id"]==affected)
 
 
 def test_two_physical_rows_of_the_same_order_and_sku_are_retained(sources):
@@ -214,7 +215,7 @@ def test_exports_can_be_uploaded_and_reopened_by_an_admin(sources, tmp_path):
             path + "/from-exports", files=dict(files, evidence_json=("evidence.json", json.dumps(evidence))),
         )
         assert computed.status_code == 201, computed.text
-        assert computed.json()["summary"]["ready_prices"] == 1
+        assert computed.json()["summary"]["ready_prices"] == 2
         assert client.get("/api/batches").json() == []
         malformed = client.post(path + "/from-exports", files=dict(files, sales_variants=("bad.xlsx", b"wrong")))
         assert malformed.status_code == 422

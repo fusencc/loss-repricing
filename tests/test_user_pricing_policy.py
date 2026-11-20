@@ -31,7 +31,6 @@ def test_fixed_overseas_formula_retains_vat_without_product_commission():
     # 2.5592 CNY × 1.1 / 0.1 = 28.1512 PHP；a = 1 - 35.0411%。
     assert result['online_model'].profit(Decimal('100')) == Decimal('36.8077')
     assert 'model' not in result
-    assert result['current_margin'] < 0  # 现价筛选仍保留。
 
 
 def test_live_enrichment_uses_official_count_even_if_external_snapshot_claims_increase(safety_context,monkeypatch):

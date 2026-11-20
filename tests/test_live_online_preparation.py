@@ -50,7 +50,7 @@ def test_live_online_uses_actual_platform_price_explicit_activity_exact_fee_and_
     assert state['activity_locked'] is True and state['sellable'] is True
     assert state['history_known'] and state['sales_complete'] and state['sales_7d']==0
     assert state['protected'] is False and state['pending_submission'] is False
-    assert Decimal(state['current_margin'])<0 and state['profit_check']['model']['fixed_cost_divisor']=='0.1042'
+    assert state['profit_check']['model']['fixed_cost_divisor']=='0.1042'
     assert r['contracts'][0]['contract']['rounding']=='ROUND_UP'
     assert r['contracts'][0]['contract']['price_step']=='0.01'
     assert r['contracts'][0]['contract']['upload_column']=='税后价格'
@@ -232,3 +232,54 @@ def test_th_online_vat_flows_into_profit_model_without_new_source():
     parent['taxVatRate']=None
     result=prepare_online_states(c,targets,**inputs)
     assert not result['online'] and 'VAT' in result['issues'][0]['reason']
+
+
+@pytest.mark.parametrize('mode', ['overseas', 'direct'])
+def test_erp_loss_is_priced_even_when_current_full_online_profit_is_positive(mode):
+    from app.adapters.live_online_preparation import prepare_online_states
+    from app.adapters.normalization import source_time
+    from app.domain.engine import evaluate
+    from app.domain.types import OnlineState, SiteContract, Snapshot, SourceLine
+    from test_fixed_pricing_fees import direct_source
+
+    capture, targets, inputs = sources()
+    control = inputs['platform']['records'][0]
+    variant = control['current_variants'][0]
+    variant.update(priceIncludeVat='200', marketPrice='100')
+    control['data']['skus'][0]['price']['sale_price'] = '200'
+    inputs['sales']['currency_rates'][1]['rate'] = '0.1'
+    if mode == 'direct':
+        _, rate = direct_source()
+        variant.update(overseasStockSum=0, localWeight='21', costPrice='2')
+        config = inputs['fixed_fees']['config']
+        config['public'] = {'SHOPPH': {k: rate[k] for k in
+            ('vatRate', 'procedureRate', 'commissionRate', 'warehouseCost')}}
+        config['departments'] = {'D1': {'PH': {k: rate[k] for k in
+            ('returnRate', 'otherRate', 'marketingRate', 'packageFee', 'fixedFreight')}}}
+        config['freight'] = {'PH': rate['freight']}
+    prepared = prepare_online_states(capture, targets, **inputs)
+    assert not prepared['issues']
+    state = OnlineState.model_validate(prepared['online'][0]['state'])
+    assert state.profit_check.model.profit(Decimal('100')) > 0
+    # ERP 已给出 -1 CNY 的订单修正一次毛利；汇率 0.1 CNY/PHP，补亏实际价为 110 PHP。
+    loss = SourceLine(row_id='O1', order_id='O1', source='loss_allocatable', key=state.key,
+        main_sku=state.main_sku, quantity='1', loss_amount='-1', currency='CNY',
+        basis='order', allocation_reliable=True, fee_scope=state.fee_scope)
+    snapshot = Snapshot(as_of=state.observed_at, business_date='2026-11-11', fx_date='2026-11-11',
+        fx_rates={'CNY': '1', 'PHP': '0.1'}, fx_rate_unit='cny_per_currency',
+        complete_sources=['loss_allocatable', 'loss_pending', 'blocked_allocatable', 'blocked_pending'],
+        lines=[loss], online=[state], contracts={entry['contract']['site']:
+            SiteContract.model_validate(entry['contract']) for entry in prepared['contracts']})
+    decision = evaluate(snapshot, source_time(prepared['evaluated_at']))[0]
+    assert decision.ready, decision.reason
+    assert decision.target_actual == Decimal('110')
+    assert decision.upload_price == Decimal('220')
+
+
+def test_unknown_official_history_still_prepares_online_state():
+    from app.adapters.live_online_preparation import prepare_online_states
+    c,t,s=sources();s['official_history']['records']={}
+    result=prepare_online_states(c,t,**s)
+    assert len(result['online'])==1 and not result['issues']
+    state=result['online'][0]['state']
+    assert state['history_known'] is False and state['recent_price_log'] is None

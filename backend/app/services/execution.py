@@ -287,6 +287,9 @@ class PricingService:
         with transaction(self.factory) as session:
             if session.scalar(select(Execution.id).where(Execution.item_id == item_id)):
                 return None
+            # 提交前新增的历史未知告警也须进入商品证据，供独立机器人 outbox 读取。
+            item = session.get(Item, item_id)
+            item.decision = decision.model_dump(mode="json")
             if self.config.coordination_required:
                 control = lock_control(session, decision.key)
                 extra=[]
@@ -365,11 +368,10 @@ class PricingService:
             try:
                 recent = recent_price_log_for(official,decision.key)
             except (ValueError,TypeError,KeyError):
-                decision.ready, decision.status = False, '待处理'
-                decision.reason_code, decision.reason = 'unknown_history', '提交前开放调价日志未知，等待重新查询'
-                self._hold(item_id,decision.reason,decision.status,decision=decision)
-                return
-            if recent.count > 0:
+                recent = None
+                decision.trace.setdefault('warning_codes', []).append('unknown_history')
+                decision.trace.setdefault('warnings', []).append('提交前近72小时调价历史无法确认，仅告警')
+            if recent is not None and recent.count > 0:
                 decision.ready, decision.status = False, '本轮不调'
                 decision.reason_code, decision.reason = 'recent_price_change', '提交前查到近72小时调价日志，本轮不调'
                 self._hold(item_id,decision.reason,decision.status,decision=decision)

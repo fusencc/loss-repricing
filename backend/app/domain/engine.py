@@ -16,9 +16,9 @@ from .types import (
 BEIJING = timezone(timedelta(hours=8), name="Asia/Shanghai")
 REQUIRED_SOURCES = frozenset({"loss_allocatable", "loss_pending", "blocked_allocatable", "blocked_pending"})
 # 依据：已确认设计“数据与算价说明”；完整变量/单位见 docs/calculation-and-sources.md。
-# 11/17近72小时保护用官方计数；用户确认删去独立一次毛利保本门槛，费用仅在完整在线利润校验。
+# ERP 修正一次毛利直接作为亏损来源；近72小时保护用官方计数，费用仅在完整在线利润校验。
 # 规则版本不是公司费率或接口验收标志，固定表另存内容版本。
-FORMULA_VERSION = "loss-online-margin-1pct-20261120-v7"
+FORMULA_VERSION = "loss-erp-corrected-margin-warning-policy-20261120-v11"
 # 保存/展示为50位有效数字；档位、容限、毛利正负以 Decimal 精确比值判定。
 # 不能先把循环小数近似为50位，再用其决定整档/半档或毛利是否为零。
 SITE_CURRENCIES: dict[Site, str] = {"MY": "MYR", "PH": "PHP", "SG": "SGD", "TH": "THB", "VN": "VND"}
@@ -205,6 +205,8 @@ def _decide(
         "online_rows": [state.model_dump(mode="json") for state in states],
         "site_contract": contract.model_dump(mode="json") if contract else None,
         "sales_policy": "optional_reference_only",
+        "warnings": list(dict.fromkeys(warning for state in states if state.profit_check
+                                       for warning in state.profit_check.warnings())),
     }
     if issues:
         issue_trace = []
@@ -219,6 +221,11 @@ def _decide(
                     "relation": relation,
                 })
         trace["source_issues"] = issue_trace
+
+    # 2026-11-20：历史未知、不可售仅告警；计算依据无效本轮不调，不伪造价格。
+    def warn(code, message):
+        trace.setdefault("warning_codes", []).append(code)
+        trace["warnings"].append(message)
 
     def finish(
         code: str,
@@ -276,7 +283,7 @@ def _decide(
     loss_currency = active_rows[0].currency
     if not loss_currency.strip() or any(row.currency != loss_currency for row in active_rows):
         return finish("conflicting_currency", "同一在线子 SKU 的候选亏损币种缺失或冲突")
-    # 在线售价、一次毛利模型和上传价采用站点币。ERP 亏损原币独立校验并换汇。
+    # 在线售价、完整在线利润模型和上传价采用站点币。ERP 修正一次毛利原币独立校验并换汇。
     station_currency = SITE_CURRENCIES[key.site]
     trace["station_currency"] = station_currency
     if online.currency != station_currency:
@@ -290,22 +297,20 @@ def _decide(
     if online.pending_submission:
         return finish("pending_submission", "已有未完成核验的提交")
     if not online.history_known:
-        return finish("unknown_history", "缺少可确认的近72小时调价日志")
+        warn("unknown_history", "近72小时调价历史无法确认，仅告警")
     if online.last_increase_at is not None and online.last_increase_at > now:
-        return finish("invalid_history", "上次确认生效时间晚于评估时间")
+        warn("unknown_history", "上次确认生效时间晚于评估时间，历史无法确认，仅告警")
     if online.protected:
         return finish("manual_protection", "命中人工保护名单", status="本轮不调")
-    if online.current_margin >= 0:
-        return finish("current_margin_nonnegative", "当前一次毛利已不亏损", status="本轮不调")
     if online.recent_price_log is not None:
         history = online.recent_price_log
         if (not history.source_id or history.window_end-history.window_start != timedelta(hours=72)
                 or history.window_end > now
                 or history.window_end.astimezone(BEIJING).date()!=snapshot.business_date):
-            return finish("invalid_history", "开放调价日志查询窗口无效或不属于本业务日")
-        if history.count > 0:
+            warn("unknown_history", "开放调价日志查询窗口无效或不属于本业务日，仅告警")
+        elif history.count > 0:
             return finish("recent_price_change", "近72小时存在调价日志，本轮不调", status="本轮不调")
-    elif online.last_increase_at is not None:
+    elif online.last_increase_at is not None and online.last_increase_at <= now:
         elapsed = now.astimezone(timezone.utc) - online.last_increase_at.astimezone(timezone.utc)
         if elapsed < timedelta(hours=72):
             return finish("recent_increase", "距离上次确认生效不足 72 小时", status="本轮不调")
@@ -313,7 +318,7 @@ def _decide(
     # 2026-11-17用户取消销量保护：开放接口仓库销量仅供参考，缺失不阻断。
     # 2026-11-20用户暂停活动限制：参加活动不再拦截算价；营销价、折扣及有效价核验保持不变。
     if not online.sellable:
-        return finish("not_sellable", "子 SKU 当前不可售")
+        warn("not_sellable", "子 SKU 当前不可售，仅告警")
 
     if (
         contract is None
@@ -323,15 +328,19 @@ def _decide(
         or not contract.upload_column.strip()
         or not contract.version.strip()
     ):
-        return finish("unverified_site_contract", "缺少经确认的站点上传字段、价格档位或合同版本")
+        warn("unverified_site_contract", "缺少经确认的站点上传字段、价格档位或合同版本")
+        return finish("unverified_site_contract", "缺少经确认的站点上传字段、价格档位或合同版本", status="本轮不调")
     if key.warehouse not in contract.warehouses:
-        return finish("unsupported_warehouse", "当前仓配未包含在已确认站点上传及费用合同的适用范围")
+        warn("unsupported_warehouse", "当前仓配未包含在已确认站点上传及费用合同的适用范围")
+        return finish("unsupported_warehouse", "当前仓配未包含在已确认站点上传及费用合同的适用范围", status="本轮不调")
 
     profit_check = online.profit_check
     if profit_check is None:
-        return finish("unverified_online_profit", "缺少库存分流、部门费率及完整在线利润公式")
+        warn("unverified_online_profit", "缺少库存分流、部门费率及完整在线利润公式")
+        return finish("unverified_online_profit", "缺少库存分流、部门费率及完整在线利润公式", status="本轮不调")
     if problem := profit_check.problem(now, snapshot.business_date):
-        return finish("unverified_online_profit", problem)
+        warn("unverified_online_profit", problem)
+        return finish("unverified_online_profit", problem, status="本轮不调")
 
     from_rate = snapshot.fx_rates.get(loss_currency)
     to_rate = snapshot.fx_rates.get(station_currency)
@@ -413,7 +422,7 @@ def _decide(
         "target_profit": str(target_profit),
         "online_profit": {
             "mode": profit_check.mode, "department": profit_check.department,
-            "overseas_stock": str(profit_check.overseas_stock),
+            "overseas_stock": None if profit_check.overseas_stock is None else str(profit_check.overseas_stock),
             "inventory_observed_at": profit_check.inventory_observed_at.isoformat(),
             "source_ref": profit_check.source_ref, "model": profit_check.model.model_dump(mode="json"),
             "initial_target": str(initial_target.decimal()), "break_even": str(minimum_actual.decimal()),

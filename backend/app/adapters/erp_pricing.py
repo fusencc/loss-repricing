@@ -18,7 +18,7 @@ from app.domain.types import OnlineProfitCheck, FeeModel, OnlineState, SiteContr
 
 # 仅消费今天已核对的批量合同。逐单诊断与规范 Snapshot 各有独立入口。
 CAPTURE_VERSION = "erp-web-bulk-four-20261109"
-EVIDENCE_VERSION = "erp-pricing-evidence-v1"
+EVIDENCE_VERSION = "erp-pricing-evidence-v2"
 
 
 def decimal_text(value):
@@ -246,7 +246,7 @@ class ReviewedFeeModel(FeeModel):
 
 class ReviewedOnlineProfitCheck(OnlineProfitCheck):
     model_config = ConfigDict(extra="forbid")
-    overseas_stock: DecimalText
+    overseas_stock: DecimalText | None = None
     department: Identifier
     source_ref: Identifier
     inventory_observed_at: SourceTime
@@ -261,7 +261,6 @@ class ReviewedOnlineState(OnlineState):
     currency: Currency
     retail_price: DecimalText
     marketing_price: DecimalText | None
-    current_margin: DecimalText
     fee_scope: Identifier
     profit_check: ReviewedOnlineProfitCheck | None = None
     observed_at: SourceTime
@@ -336,8 +335,8 @@ class PricingEvidence(EvidenceModel):
 
 
 class LiveOnlinePreparation(EvidenceModel):
-    schema_version: Literal['erp-live-online-preparation-v1']
-    version: Literal['erp-live-online-v1']
+    schema_version: Literal['erp-live-online-preparation-v2']
+    version: Literal['erp-live-online-v2']
     evaluated_at: SourceTime
     erp_capture_id: Identifier
     synthetic: StrictBool

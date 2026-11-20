@@ -74,4 +74,5 @@ def test_demo_entry_runs_with_coordination_in_a_fresh_database(tmp_path):
         assert batch["mode"] == "demo" and batch["summary"]["已核验"] >= 1
         worker.tick()
         inbox = client.get("/api/notifications").json()
-        assert len(inbox) == 1 and inbox[0]["delivery_state"] == "demo"
+        assert len(inbox) == 2 and all(notice["delivery_state"] == "demo" for notice in inbox)
+        assert any(notice["summary"].get("kind") == "warning" for notice in inbox)

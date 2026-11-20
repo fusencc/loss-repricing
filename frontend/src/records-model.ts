@@ -77,7 +77,7 @@ export function effectiveTimeLabel(source: string | null | undefined): string {
 }
 
 export function recordStatusLabel(status: string): string {
-  return ({ '已核验': '已提价', '待核验': '待处理', '待处理': '活动中' }[status] ?? status)
+  return ({ '已核验': '已提价', '待核验': '待处理', '待处理': '待处理' }[status] ?? status)
 }
 
 // 价格变动展示：后端已给出 target_actual − current_actual 的十进制文本；这里只决定符号和空值文案。

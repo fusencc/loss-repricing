@@ -35,7 +35,7 @@ class SyntheticAdapter:
                               key=key, main_sku=f"MAIN{index}", quantity="1", loss_amount="-1",
                               currency="MYR", basis="unit"))
             online.append(dict(key=key, main_sku=f"MAIN{index}", currency="MYR", retail_price="20",
-                               marketing_price="10", current_margin="-0.5", fee_scope="normal",
+                               marketing_price="10", fee_scope="normal",
                                profit_check=dict(overseas_stock="0", mode="direct", department="TEST",
                                                  inventory_observed_at=self.clock[0], source_ref="synthetic-inventory",
                                                  model=dict(revenue_factor="1", fixed_cost="0",
@@ -736,3 +736,19 @@ def test_verification_uses_exact_target_instead_of_saved_repeating_decimal(safet
     with factory() as session:
         assert session.get(Execution, original.id).state == "mismatch"
         assert session.get(VariantGuard, original.variant_id).execution_id == original.id
+
+
+def test_unknown_history_before_submit_warns_and_reaches_claim(safety_context, monkeypatch):
+    from unittest.mock import Mock
+    factory, cfg, adapter, clock = safety_context
+    service = PricingService(factory, adapter, cfg)
+    adapter.mode='live'
+    decision=evaluate(adapter.collect(clock[0].date()),clock[0])[0]
+    monkeypatch.setattr(service,'_allowed',lambda *args,**kwargs:(True,''))
+    monkeypatch.setattr('app.services.execution.capture_recent_price_changes',lambda *args,**kwargs:{'records':{}})
+    claim=Mock(return_value=None)
+    monkeypatch.setattr(service,'_claim',claim)
+    service._submit('synthetic-item',decision)
+    claim.assert_called_once()
+    assert decision.ready and 'unknown_history' in decision.trace['warning_codes']
+    assert not adapter.submissions

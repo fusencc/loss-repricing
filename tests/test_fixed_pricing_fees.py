@@ -78,7 +78,7 @@ def test_direct_formula_retains_platform_commission_without_product_commission()
     # 21g => 首10g 5PHP + 两档4.5PHP = 14PHP；2+.3+1.3+1.4=5CNY。
     assert Decimal(result['proof']['freight_station'])==Decimal('14')
     assert result['online_model'].profit(Decimal('100'))==Decimal('21.259')
-    assert 'model' not in result  # 不再输出独立的一次毛利算价模型。
+    assert 'model' not in result
 
 
 @pytest.mark.parametrize('weight,freight',[('10','5'),('10.01','9.5'),('20','9.5'),('20.01','14')])
@@ -96,12 +96,11 @@ def test_direct_freight_tier_does_not_depend_on_global_decimal_precision():
     assert Decimal(result['proof']['freight_station'])==Decimal('14')
 
 
-@pytest.mark.parametrize('change',['missing_weight','missing_cost','unknown_stock','nonzero_freight','missing_vat'])
+@pytest.mark.parametrize('change',['missing_weight','missing_cost','nonzero_freight','missing_vat'])
 def test_direct_missing_inputs_never_become_zero(change):
     variant,rate=direct_source()
     if change=='missing_weight':variant.pop('localWeight')
     elif change=='missing_cost':variant.pop('costPrice')
-    elif change=='unknown_stock':variant['overseasStockSum']=None
     elif change=='nonzero_freight':rate['fixedFreight']='1'
     else:rate['vatRate']=None
     with pytest.raises((ValueError,TypeError,KeyError)):

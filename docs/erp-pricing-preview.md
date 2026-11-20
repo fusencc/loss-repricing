@@ -60,19 +60,21 @@
 
 只有可定位的规范明细才进入商品批次，缺失或歧义留在准备报告。只含原始导出映射或没有汇率的报告仍可回读。对账批次由管理员在 **运行批次** 查看，和当前商品队列分开。入批是本地归档操作，保留的价格为原算价建议。
 
-## 补充文件 `erp-pricing-evidence-v1`
+## 补充文件 `erp-pricing-evidence-v2`
 
 完整样例见 [erp-pricing-evidence.sample.json](../tests/fixtures/erp-pricing-evidence.sample.json)。程序内部字段与公司接口字段分别维护。
 
+在线快照只提供当前价格、保护与历史和完整在线利润证据。文件补充合同采用 v2，实时在线准备采用 `erp-live-online-preparation-v2` / `erp-live-online-v2`；旧补充文件和在线准备须按当前合同重新生成，不自动升级或回写历史档案。ERP 原始财务下载与「修正一次毛利」列保持原样。
+
 | 字段 | 用途 |
 | --- | --- |
-| `schema_version`、`capture_id`、`synthetic` | 固定填 `erp-pricing-evidence-v1`，绑定指定采集编号。样例标记必须与采集一致，真实采集为 `false`。 |
+| `schema_version`、`capture_id`、`synthetic` | 固定填 `erp-pricing-evidence-v2`，绑定指定采集编号。样例标记必须与采集一致，真实采集为 `false`。 |
 | `evaluated_at`、`source_versions` | 带时区的 ISO 8601 回放时点。记录 `details`、`mapping`、`online` 的证据版本。 |
 | `orders[]` | 用文本 `order_id` 关联采集订单。全部明细可核实后填写 `details_complete: true`。来源未取全用 `false`。 |
 | `orders[].lines[]` | 填写该订单内稳定的 `detail_id` 和 `detail_ref`。一个真实明细对应一条记录。缺少可靠在线映射时 `mapping` 填 `null`。 |
 | `mapping` | 填写 `erp_shop`（ERP 财务表的店铺原文）、销售系统的 `key`、`main_sku` 和可回查的 `ref`。键含平台 `TikTok`、店铺 ID、站点、产品 ID、具体商品 ID、子 SKU 和仓配。 |
 | `loss` | 填 `quantity`、带原始负号的 `amount`、原币 `currency`、`basis`、`allocation_reliable`、`fee_scope`、`abnormal`、`ref`。缺任何关键归属证据时填 `null`。 |
-| `online[]` | 每条为 `ref` 与规范 `state`。保留在线观测时点、零售价、营销价、当前毛利率、销量窗口、保护/活动、历史和费率。确认无折扣才填 `marketing_price: null`。在线字段缺失时，该目标的完整快照先留空。 |
+| `online[]` | 每条为 `ref` 与规范 `state`。保留在线观测时点、零售价、营销价、参考销量、保护/活动、调价历史和完整在线利润模型。确认无折扣才填 `marketing_price: null`。在线字段缺失时，该目标的完整快照先留空。 |
 | `fx` | 填业务 `date`、每 CNY 兑换的各币种单位 `rates`、`version` 和 `ref`。CNY 为 `"1"`。未取得日期或汇率方向证据时填 `null`。 |
 | `contracts[]` | 每站一条 `ref` 与 `contract`，写清站点、仓配、步长、舍入规则、含税上传列和版本。回放依据为提供的证据与配置，真实适用范围仍须业务核验。 |
 

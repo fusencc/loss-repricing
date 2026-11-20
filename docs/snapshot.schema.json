@@ -41,7 +41,7 @@
       "type": "object"
     },
     "FeeModel": {
-      "description": "一次毛利系数无量纲，固定成本按明确比值换成站点币，输出仍为站点币。",
+      "description": "完整在线利润系数无量纲，固定成本按明确比值换成站点币，输出仍为站点币。",
       "properties": {
         "revenue_factor": {
           "anyOf": [
@@ -97,7 +97,7 @@
       "type": "object"
     },
     "OnlineProfitCheck": {
-      "description": "11/12新增的完整在线利润校验，与排除广告营销的一次毛利分开。\n\n库存为当前目标的海外可售件数；0明确选直发，正数选海外仓。模型以站点币\n实际售价输入，保留部门底表及库存来源，不使用切价售价对应的利润率。",
+      "description": "按当前海外库存选择仓配的完整在线利润校验证据。\n\n库存为当前目标的海外可售件数；0或缺失选直发，正数选海外仓；缺失保留告警，不填0。模型以站点币\n实际售价输入，保留部门底表及库存来源，不使用切价售价对应的利润率。",
       "properties": {
         "overseas_stock": {
           "anyOf": [
@@ -106,8 +106,12 @@
             },
             {
               "type": "string"
+            },
+            {
+              "type": "null"
             }
           ],
+          "default": null,
           "title": "Overseas Stock"
         },
         "mode": {
@@ -136,7 +140,6 @@
         }
       },
       "required": [
-        "overseas_stock",
         "mode",
         "department",
         "inventory_observed_at",
@@ -222,17 +225,6 @@
           ],
           "default": null,
           "title": "Marketing Price"
-        },
-        "current_margin": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "string"
-            }
-          ],
-          "title": "Current Margin"
         },
         "fee_scope": {
           "title": "Fee Scope",
@@ -377,7 +369,6 @@
         "main_sku",
         "currency",
         "retail_price",
-        "current_margin",
         "fee_scope",
         "observed_at"
       ],

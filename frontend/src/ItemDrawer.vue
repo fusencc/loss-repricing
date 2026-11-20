@@ -22,10 +22,10 @@ const decisionFields = {
 } as const
 
 const traceLabels: Record<string, string> = {
-  business_date: '业务日期', evaluated_at: '评估时间', as_of: '快照采集时间',
+  warning_codes: '告警类型', business_date: '业务日期', evaluated_at: '评估时间', as_of: '快照采集时间',
   fx_rates: '本日汇率（每 1 CNY）', complete_sources: '已齐备的候选来源',
   source_versions: '来源版本', source_rows: '原始候选行', online_rows: '在线快照',
-  source_issues: '来源异常记录', online_profit: '在线利润校验依据',
+  warnings: '计算告警', source_issues: '来源异常记录', online_profit: '在线利润校验依据',
   site_contract: '站点接口合同', sales_window: '仓库七日参考销量',
   excluded_source_rows: '排除的候选行', candidate_unit_losses: '候选单件亏损（原币）',
   station_currency: '站点币', loss_fx_rate: '原币汇率（每 1 CNY）', station_fx_rate: '站点币汇率（每 1 CNY）',
@@ -47,6 +47,12 @@ const onlineProfitCorrection = computed(() => {
     ? (evidence as Record<string, unknown>).correction_amount : undefined
   return { amount: typeof amount === 'string' ? amount : null,
     currency: typeof fields.station_currency === 'string' ? fields.station_currency : '' }
+})
+const calculationWarnings = computed(() => {
+  const trace = props.item?.decision?.trace
+  if (!trace || typeof trace !== 'object' || Array.isArray(trace)) return []
+  const warnings = (trace as Record<string, unknown>).warnings
+  return Array.isArray(warnings) ? warnings.filter((value): value is string => typeof value === 'string') : []
 })
 const traceRows = computed(() => {
   const trace = props.item?.decision?.trace
@@ -74,6 +80,7 @@ const traceRows = computed(() => {
         <ItemCoordination v-if="!item.read_only" :actor-role="actorRole" :actor-id="actorId" :item="item" @refresh="emit('refresh')" />
         <section v-if="item.decision" class="drawer-section">
           <h3>补亏计算</h3>
+          <el-alert v-for="warning in calculationWarnings" :key="warning" :title="warning" type="warning" show-icon :closable="false" />
           <p class="muted">初步补亏价为当前实际价加单件补亏额；在线利润校验仍亏时，增加在线利润校正额得到目标实际价，再按折扣反推上传价。</p>
           <dl class="detail-grid">
             <div v-for="(label, key) in decisionFields" :key="key">

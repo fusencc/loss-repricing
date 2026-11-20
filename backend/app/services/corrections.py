@@ -2,7 +2,7 @@
 
 与自动补亏不同，目标实际售价由有权销售员/主管明确提出。仍必须确认当前在线
 身份、仓配、币种、保护、活动和费用模型，校验档位前后库存对应完整在线利润率至少1%。
-只跳过自动补亏的当前不亏/72小时筛选，不把人工修正伪造成历史亏损订单。
+人工修正不要求关联 ERP 亏损订单，可跳过自动72小时冷却；不把修正价伪造成历史亏损金额。
 """
 from decimal import Decimal, DecimalException
 from uuid import uuid4
@@ -58,15 +58,13 @@ def manual_decision(snapshot, online, desired, reason, correction_id, now):
         raise ValueError("目标或共享主 SKU 的在线数据异常，需核对后重新取数")
     if scope in conflicting_main_sku_scopes(snapshot.online, now):
         raise ValueError("共享主 SKU 的在线归属存在冲突，需核对后重新取数")
-    if not online.history_known or online.pending_submission:
-        raise ValueError("调价历史不完整或仍有未知提交")
+    if online.pending_submission:
+        raise ValueError("仍有未知提交")
     if online.protected:
         raise ValueError("命中人工保护名单")
     # 2026-11-20用户暂停活动限制，人工修正与常规定价使用相同口径。
-    if not online.sellable:
-        raise ValueError("当前不可售，先完成对应人工处理")
     if online.currency != SITE_CURRENCIES[key.site] or online.fee_scope != "normal":
-        raise ValueError("币种或正常毛利口径不一致")
+        raise ValueError("币种或亏损来源口径不一致")
     if (not contract or not contract.verified or contract.site != key.site or not contract.version
             or not contract.upload_column or contract.price_step <= 0 or key.warehouse not in contract.warehouses):
         raise ValueError("站点仓配上传合同尚未确认")
@@ -93,10 +91,12 @@ def manual_decision(snapshot, online, desired, reason, correction_id, now):
     return Decision(key=key,status="待处理",ready=True,reason_code="manual_correction",
         reason="已授权人工修正："+reason,source_row_ids=[],current_actual=current,discount=discount.decimal(),
         target_actual=desired,upload_price=upload,predicted_profit=profit.decimal(),upload_column=contract.upload_column,
-        trace={"formula_version":"manual-online-margin-1pct-v3","minimum_margin":str(ONLINE_PROFIT_MINIMUM_MARGIN),"correction_id":correction_id,
+        trace={"formula_version":"manual-online-margin-missing-stock-direct-v4","minimum_margin":str(ONLINE_PROFIT_MINIMUM_MARGIN),"correction_id":correction_id,
                "business_date":today.isoformat(),"evaluated_at":now.isoformat(),
                "online_rows":[online.model_dump(mode="json")],"site_contract":contract.model_dump(mode="json"),
                "source_versions":dict(snapshot.source_versions),"rounded_actual":str(actual.decimal()),
+               "warning_codes":(["unknown_history"] if not online.history_known else []) + (["not_sellable"] if not online.sellable else []),
+               "warnings":online.profit_check.warnings() + (["近72小时调价历史无法确认，仅告警"] if not online.history_known else []) + (["子 SKU 当前不可售，仅告警"] if not online.sellable else []),
                "exact_target_actual":{"numerator":str(desired),"denominator":"1"},
                "manual_reason":reason})
 

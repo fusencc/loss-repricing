@@ -108,7 +108,7 @@ def build_sample_validation(sample):
         },
         'groups': groups, 'detail_issues': detail_issues,
         'pending_confirmations': [*sample['pending_confirmations'],
-            '公司正常一次毛利分项公式、费用版本及价格适用区间',
+            '公司完整在线利润分项公式、费用版本及价格适用区间',
             '当日汇率方向与生效日期；查询成功不代表可用于算价',
             '当前零售价/营销价、活动与历史来源，以及上传后折扣保持行为'],
         'next_steps': [

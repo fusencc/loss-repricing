@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     worker_poll_seconds: int = 5
     coordination_required: bool = True
     live_writer_exclusive: bool = False
+    ding_alert_userid: str = ""  # 管理员告警的独立机器人私聊目标，不借用销售员归属。
     ding_enabled: bool = False
     ding_corp_id: str = ""
     ding_client_id: str = ""

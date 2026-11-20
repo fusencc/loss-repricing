@@ -27,7 +27,7 @@ def sample(*, loss="-2", quantity="1", basis="unit", currency="CNY", current="10
                           main_sku="main", quantity=quantity, loss_amount=loss,
                           currency=currency, basis=basis, allocation_reliable=True)],
         online=[OnlineState(key=key, main_sku="main", currency="MYR", retail_price=retail,
-                            marketing_price=current, current_margin="-0.05", fee_scope="normal",
+                            marketing_price=current, fee_scope="normal",
                             profit_check=OnlineProfitCheck(overseas_stock="0",mode="direct",department="TEST",
                                 inventory_observed_at=NOW,source_ref="synthetic/profit",
                                 model=FeeModel(revenue_factor=factor,fixed_cost=cost,version="synthetic-online-v1",verified=True)),
@@ -58,7 +58,7 @@ def test_documented_synthetic_example_and_formula_provenance():
     assert result.selected_row_id == "r1"
     assert (result.unit_loss, result.discount, result.target_actual, result.upload_price,
             result.predicted_profit) == tuple(map(Decimal, ["1", "0.5", "11", "22", "0.4"]))
-    assert result.trace["formula_version"] == FORMULA_VERSION == "loss-online-margin-1pct-20261120-v7"
+    assert result.trace["formula_version"] == FORMULA_VERSION == "loss-erp-corrected-margin-warning-policy-20261120-v11"
     assert result.trace["decimal_precision"] == 50
 
 
@@ -181,7 +181,6 @@ def test_equivalent_exact_losses_tie_break_by_row_id():
 
 @pytest.mark.parametrize(("section", "field", "reason"), [
     ("lines", "allocation_reliable", "no_valid_loss"),
-    ("online", "history_known", "unknown_history"),
 ])
 def test_missing_confirmation_does_not_default_to_approval(section, field, reason):
     snapshot = sample(loss="-1", currency="MYR", basis="order")

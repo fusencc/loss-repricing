@@ -42,7 +42,7 @@ def capture_candidate_references(settings, capture, targets, *, progress=None):
         except ValueError:
             count,status=None,'history_unknown'
         filtered.append({'key':target['key'],'count':count,'status':status})
-        if status=='passed':eligible.append(target)
+        if status!='history_protected':eligible.append(target)
     reference=capture_goods_sales(settings,capture,eligible,progress=progress)
     return history,eligible,reference,filtered
 

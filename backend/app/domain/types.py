@@ -76,7 +76,7 @@ class SourceLine(BaseModel):
 
 
 class FeeModel(BaseModel):
-    """一次毛利系数无量纲，固定成本按明确比值换成站点币，输出仍为站点币。"""
+    """完整在线利润系数无量纲，固定成本按明确比值换成站点币，输出仍为站点币。"""
 
     revenue_factor: FiniteDecimal
     fixed_cost: FiniteDecimal
@@ -87,7 +87,7 @@ class FeeModel(BaseModel):
     verified: bool = False
 
     def profit(self, price: Decimal) -> Decimal:
-        """输入站点币实际售价，只核算正常一次毛利，排除广告和营销费用。"""
+        """输入站点币实际售价，按所选仓配的完整费用参数计算在线利润。"""
         return self.profit_exact(MoneyRatio(price)).decimal()
 
     def profit_exact(self, price: MoneyRatio) -> MoneyRatio:
@@ -100,23 +100,28 @@ class FeeModel(BaseModel):
 
 
 class OnlineProfitCheck(BaseModel):
-    """11/12新增的完整在线利润校验，与排除广告营销的一次毛利分开。
+    """按当前海外库存选择仓配的完整在线利润校验证据。
 
-    库存为当前目标的海外可售件数；0明确选直发，正数选海外仓。模型以站点币
+    库存为当前目标的海外可售件数；0或缺失选直发，正数选海外仓；缺失保留告警，不填0。模型以站点币
     实际售价输入，保留部门底表及库存来源，不使用切价售价对应的利润率。
     """
 
-    overseas_stock: FiniteDecimal
+    overseas_stock: FiniteDecimal | None = None
     mode: Literal["direct", "overseas"]
     department: StrictStr
     inventory_observed_at: AwareDatetime
     source_ref: StrictStr
     model: FeeModel
 
+    def warnings(self) -> list[str]:
+        """缺库存是经授权的选模假设，告警留证但不作为待处理原因。"""
+        return ["海外库存缺失，已按直发模型计算，请核实库存"] if self.overseas_stock is None else []
+
     def problem(self, now, business_date):
         from .engine import BEIJING
-        selected = "overseas" if self.overseas_stock > 0 else "direct"
-        if self.overseas_stock < 0 or self.mode != selected:
+        # 2026-11-20用户确认：缺库存用直发；负数和仓配冲突仍阻断。
+        selected = "overseas" if self.overseas_stock is not None and self.overseas_stock > 0 else "direct"
+        if (self.overseas_stock is not None and self.overseas_stock < 0) or self.mode != selected:
             return "海外仓库存与利润校验仓配不一致"
         if (not self.department.strip() or not self.source_ref.strip()
                 or self.inventory_observed_at > now
@@ -150,9 +155,8 @@ class OnlineState(BaseModel):
     retail_price: FiniteDecimal
     # 没有活动折扣时来源须传 None。零元售价由引擎识别为异常数据。
     marketing_price: FiniteDecimal | None = None
-    current_margin: FiniteDecimal
     fee_scope: StrictStr
-    # 费率模型仅属于完整在线利润；当前一次毛利只用于前置筛选。
+    # 当前费用模型用于补亏候选价、进档价及回读价的完整在线利润校验。
     profit_check: OnlineProfitCheck | None = None
     observed_at: AwareDatetime
     sales_7d: StrictInt | None = None

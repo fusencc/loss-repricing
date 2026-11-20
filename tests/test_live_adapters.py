@@ -38,7 +38,7 @@ ROW = {
 }
 ONLINE = {
     "product": PRODUCT, "main": "0003", "ccy": "MYR", "r": "20", "m": "10",
-    "margin": "-0.04", "seen": OBSERVED, "qty": 10,
+    "seen": OBSERVED, "qty": 10,
     "sales_basis": "erp_goods_warehouse_seven_days_reference", "sales_seen": OBSERVED, "full": True, "history": True,
     "last": None, "pending": False, "protected": False, "locked": False, "sellable": True,
     "profit": {"overseas_stock":"0","mode":"direct","department":"TEST",
@@ -56,7 +56,7 @@ def contract():
     }
     online_fields = KEY_MAP | {
         "main_sku": "main", "currency": "ccy", "retail_price": "r", "marketing_price": "m",
-        "current_margin": "margin", "observed_at": "seen", "sales_7d": "qty", "sales_basis": "sales_basis",
+        "observed_at": "seen", "sales_7d": "qty", "sales_basis": "sales_basis",
         "sales_observed_at": "sales_seen", "sales_complete": "full", "protected": "protected",
         "activity_locked": "locked", "sellable": "sellable", "profit_check":"profit",
     }

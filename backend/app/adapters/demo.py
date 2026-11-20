@@ -5,7 +5,6 @@ from pathlib import Path
 import json
 from hashlib import sha256
 from app.domain.types import Snapshot, VariantKey, SourceLine, OnlineState, OnlineProfitCheck, FeeModel, SiteContract
-from app.domain.money import MoneyRatio
 from app.adapters.base import SubmitResult, LookupResult, SourceUnavailable
 
 
@@ -48,10 +47,11 @@ class DemoAdapter:
             for repeat, multiplier in enumerate([1, 2]):
                 lines.append(SourceLine(row_id=f"R{index}-{repeat}", order_id=f"O{index}-{repeat}",
                     source=sources[(index + repeat) % 4], key=key, main_sku=f"MAIN-{index}",
-                    quantity=Decimal("1"), loss_amount=-loss * multiplier, currency=currency,
+                    quantity=Decimal("1"),
+                    loss_amount=loss * multiplier if scenario == "no_loss" else -loss * multiplier, currency=currency,
                     basis="unit", source_ref=f"synthetic-v1/row-{index}-{repeat}"))
             online.append(OnlineState(key=key, main_sku=f"MAIN-{index}", currency=currency,
-                retail_price=price * 2, marketing_price=price, current_margin=Decimal("0.03") if scenario == "no_loss" else Decimal("-0.05"),
+                retail_price=price * 2, marketing_price=price,
                 fee_scope="normal",
                 profit_check=OnlineProfitCheck(overseas_stock="0",mode="direct",department="DEMO",
                     inventory_observed_at=now,source_ref="synthetic-online-profit-v1",
@@ -67,7 +67,6 @@ class DemoAdapter:
                 actual = Decimal(receipt["actual_price"])
                 if row.marketing_price is not None:
                     row.marketing_price = actual
-                row.current_margin = (row.profit_check.model.profit_exact(MoneyRatio(actual)) / MoneyRatio(actual)).decimal()
                 row.last_increase_at = datetime.fromisoformat(receipt["effective_at"])
         return Snapshot(as_of=now, business_date=business_date, fx_date=business_date,
             fx_rates={"CNY": "1", "MYR": "0.6", "PHP": "8", "SGD": "0.2", "THB": "5", "VND": "3500"},

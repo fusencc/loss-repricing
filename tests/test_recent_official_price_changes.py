@@ -65,7 +65,7 @@ def test_live_service_overrides_empty_local_archive_with_official_count(tmp_path
     engine.dispose()
 
 @pytest.mark.parametrize('failure',['business','timeout','invalid_json'])
-def test_query_failure_never_allows_pricing(tmp_path,monkeypatch,failure):
+def test_query_failure_preserves_unknown_history(tmp_path,monkeypatch,failure):
     monkeypatch.setattr(official_price_logs.SalesAuth,'get_token',lambda self:'token')
     def handle(req):
         if failure=='timeout':raise httpx.ReadTimeout('private text',request=req)
@@ -96,14 +96,16 @@ def test_preparation_uses_official_history_and_keeps_missing_unknown(count):
     inputs['official_history']['records']['I1']={'status':'ok' if count is not None else 'transport_error','count':count}
     result=prepare_online_states(capture,targets,**inputs)
     if count is None:
-        assert not result['online'] and '开放调价日志' in result['issues'][0]['reason']
+        assert not result['issues']
+        assert result['online'][0]['state']['history_known'] is False
+        assert result['online'][0]['state']['recent_price_log'] is None
     else:
         state=result['online'][0]['state']
         assert state['last_increase_at'] is None and state['recent_price_log']['count']==count
 
 
 @pytest.mark.parametrize('count,expected_status',[(3,'本轮不调'),(None,'待处理')])
-def test_pre_submit_rechecks_official_log_and_never_claims_on_positive_or_unknown(tmp_path,monkeypatch,count,expected_status):
+def test_pre_submit_rechecks_official_log_and_only_blocks_positive(tmp_path,monkeypatch,count,expected_status):
     from test_execution_safety import SyntheticAdapter
     from app.services.execution import PricingService
     from app.domain.engine import evaluate
@@ -111,14 +113,19 @@ def test_pre_submit_rechecks_official_log_and_never_claims_on_positive_or_unknow
     service=PricingService(None,adapter,Settings(_env_file=None,runtime_dir=tmp_path))
     decision=evaluate(adapter.collect(NOW.date()),NOW)[0]
     monkeypatch.setattr(service,'_allowed',lambda *a,**k:(True,''))
-    monkeypatch.setattr(service,'_claim',lambda *a:pytest.fail('must not claim or submit'))
+    claimed=[]
+    monkeypatch.setattr(service,'_claim',lambda *a:claimed.append(a) or None)
     held=[]
     monkeypatch.setattr(service,'_hold',lambda *a,**k:held.append(a))
     monkeypatch.setattr('app.services.execution.capture_recent_price_changes',lambda *a,**k:{
         'source_id':'official','window_start':(NOW-timedelta(hours=72)).isoformat(),'window_end':NOW.isoformat(),
         'records':{'I0':{'count':count,'status':'ok' if count is not None else 'transport_error'}}})
     service._submit('item',decision)
-    assert held and held[0][2]==expected_status
+    if count is None:
+        assert claimed and not held and decision.ready
+        assert 'unknown_history' in decision.trace['warning_codes']
+    else:
+        assert not claimed and held and held[0][2]==expected_status
 
 
 def test_failed_first_chunk_does_not_discard_second_chunk(tmp_path,monkeypatch):

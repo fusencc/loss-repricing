@@ -89,9 +89,10 @@ def _warehouse_matches(variant, warehouse):
                 continue
         if len(matches) == 1:
             return True
-    # 前端当前海外仓分支只在有海外库存时成立；明确为0才可核对默认直发仓。
+    # 缺库存按2026-11-20确认选直发，但仍须默认仓库名精确匹配，不放宽归属。
     try:
-        return _number(variant.get('overseasStockSum')) == 0 and variant.get('warehousename') == warehouse
+        stock = variant.get('overseasStockSum')
+        return (stock in (None, '') or _number(stock) == 0) and variant.get('warehousename') == warehouse
     except ValueError:
         return False
 

@@ -1,3 +1,5 @@
+import pytest
+
 from app.adapters.sales_batch_export import select_export_candidates
 
 
@@ -117,3 +119,12 @@ def test_batch_prices_are_used_only_when_current_platform_confirms_them():
     assert not report['online']
     assert report['issues'][0]['reason'] == '批量导出价格与当前平台快照不一致'
 
+
+@pytest.mark.parametrize(('corrected_margin', 'selected'), [('-1', True), ('0', False), ('1', False), (None, False)])
+def test_candidates_use_erp_corrected_first_margin_even_when_other_profit_fields_disagree(corrected_margin, selected):
+    fields = {'修正一次毛利': corrected_margin, '一次毛利': '10' if selected else '-10',
+              '毛利': '10' if selected else '-10', '修正毛利': '10' if selected else '-10',
+              'item ID': '12345678901'}
+    capture = {'groups': [{'rows': [{'orderid': 'O1', 'fields': fields}]}]}
+    result = select_export_candidates(capture, {'O1'})
+    assert result == ({'O1': ('12345678901',)} if selected else {})

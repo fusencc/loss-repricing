@@ -28,8 +28,9 @@ def test_no_finite_threshold_price_is_blocked(factor):
     assert not result.ready
     assert result.reason_code=='unverified_online_profit'
 
-def test_manual_break_even_is_rejected_and_one_percent_passes():
-    k=key();o=online(k,profit_check=check());snap=snapshot([line(k)],[o])
+@pytest.mark.parametrize('activity_locked', [False, True])
+def test_manual_break_even_is_rejected_and_one_percent_passes(activity_locked):
+    k=key();o=online(k,profit_check=check(),activity_locked=activity_locked);snap=snapshot([line(k)],[o])
     with pytest.raises(ValueError,match='在线利润率'):
         manual_decision(snap,o,Decimal('12.5'),'test','C1',NOW)
     assert manual_decision(snap,o,Decimal('12.66'),'test','C1',NOW).ready

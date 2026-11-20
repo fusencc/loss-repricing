@@ -33,7 +33,7 @@ def prepare_online_states(capture,targets,*,sales,platform,window,local_history,
     for name,schema in SCHEMAS.items():_bound(capture,sources[name],schema)
     observed=max([source_time(sources[name]['completed_at']) for name in SCHEMAS]+[source_time(official_history['completed_at'])])
     evaluated=observed
-    result={'schema_version':'erp-live-online-preparation-v1','version':'erp-live-online-v1',
+    result={'schema_version':'erp-live-online-preparation-v2','version':'erp-live-online-v2',
         'erp_capture_id':capture['capture_id'],'synthetic':capture['synthetic'],'sample_only':capture['sample_only'],
         'pricing_ready':False,'observed_at':observed.isoformat(),'evaluated_at':evaluated.isoformat(),'online':[],'contracts':[],'issues':[],
         'references':{name:source['source_id'] for name,source in sources.items() if name in SCHEMAS}}
@@ -112,13 +112,15 @@ def prepare_online_states(capture,targets,*,sales,platform,window,local_history,
             if (local_history.get('acquisition_complete') is not True
                     or local_history.get('archive_binding') not in allowed_binding):
                 raise ValueError('本程序人工保护与执行档案未取全')
-            # 11/12最终口径按当前海外库存选一个公式，不能要求两仓同时为正。
-            stock=money(variant.get('overseasStockSum'))
-            if stock<0:raise ValueError('海外仓库存为负，无法选择利润公式')
+            # 2026-11-20用户确认：overseasStockSum缺失选直发；单位为件，未知保留None，
+            # 不伪造零库存。负库存仍阻断；原始来源、采集时间和选模告警随证据保存。
+            raw_stock=variant.get('overseasStockSum')
+            stock=None if raw_stock in (None,'') else money(raw_stock)
+            if stock is not None and stock<0:raise ValueError('海外仓库存为负，无法选择利润公式')
             department=parent.get('department')
             if not isinstance(department,str) or not department.strip():
                 raise ValueError('商品部门归属未知，不能选取当前部门费率')
-            mode='overseas' if stock>0 else 'direct'
+            mode='overseas' if stock is not None and stock>0 else 'direct'
             rate=select_current_rate(fixed_fees,variant,parent,key.site,mode)
             if export_proof is not None and 'vat_source' in rate:
                 category = str(export_values['平台尾类目ID'])
@@ -148,10 +150,13 @@ def prepare_online_states(capture,targets,*,sales,platform,window,local_history,
             sellable=(parent['productStatus']==4 and data['product_status']=='ACTIVATE' and data['status']=='ACTIVATE'
                 and data['is_not_for_sale'] is False and sku['status_info']['status']=='NORMAL')
             # 官方返回的是日志数量，不含具体生效时间；不能构造last_increase_at。
-            recent = recent_price_log_for(official_history,key)
-            if (recent.window_end > observed or recent.window_end+timedelta(seconds=1) <= source_time(capture['queried_at'])
-                    or recent.window_end.astimezone(BEIJING).date()!=observed.astimezone(BEIJING).date()):
-                raise ValueError('开放调价日志未绑定本轮采集时间范围')
+            try:
+                recent = recent_price_log_for(official_history,key)
+                if (recent.window_end > observed or recent.window_end+timedelta(seconds=1) <= source_time(capture['queried_at'])
+                        or recent.window_end.astimezone(BEIJING).date()!=observed.astimezone(BEIJING).date()):
+                    recent = None
+            except (ValueError, TypeError, KeyError):
+                recent = None  # 历史未知保留事实，交由领域规则标识并告警，不剔除候选。
             pending=any(VariantKey.model_validate(row['key']).target_identity()==key.target_identity()
                 and row['state'] not in ('failed','verified') for row in local_history['executions'])
             pending=pending or any(guard['variant_id']==key.target_identity() and guard.get('execution_id') is not None
@@ -161,13 +166,14 @@ def prepare_online_states(capture,targets,*,sales,platform,window,local_history,
                 for row in local_history['protections'])
             state=ReviewedOnlineState.model_validate({'key':key.model_dump(mode='json'),'main_sku':target['main_sku'],
                 'currency':currency,'retail_price':format(retail,'f'),'marketing_price':format(actual,'f'),
-                'current_margin':format(fee['current_margin'],'f'),'fee_scope':'erp-corrected-first-margin-v1',
-                'profit_check':{'overseas_stock':format(stock,'f'),'mode':mode,'department':department,
+                'fee_scope':'erp-corrected-first-margin-v1',
+                'profit_check':{'overseas_stock':None if stock is None else format(stock,'f'),'mode':mode,'department':department,
                     'inventory_observed_at':control['observed_at'],'source_ref':control['ref'],
                     'model':fee['online_model'].model_dump(mode='json')},'observed_at':control['observed_at'],
                 'sales_7d':quantity,'sales_basis':window['basis'],
                 'sales_observed_at':sales_observed.isoformat() if sales_observed else None,'sales_complete':quantity is not None,
-                'history_known':True,'last_increase_at':None,'recent_price_log':recent.model_dump(mode='json'),
+                'history_known':recent is not None,'last_increase_at':None,
+                'recent_price_log':recent.model_dump(mode='json') if recent else None,
                 'pending_submission':pending,'protected':protected,'activity_locked':control['company_activity_locked'],
                 'sellable':sellable})
             result['online'].append({'ref':control['ref'],'state':state.model_dump(mode='json')})

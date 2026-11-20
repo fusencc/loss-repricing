@@ -16,7 +16,7 @@ LINE_FIELDS = KEY_FIELDS | {
     "basis", "allocation_reliable", "fee_scope", "abnormal",
 }
 ONLINE_FIELDS = KEY_FIELDS | {
-    "main_sku", "currency", "retail_price", "marketing_price", "current_margin", "fee_scope",
+    "main_sku", "currency", "retail_price", "marketing_price", "fee_scope",
     "observed_at",
     "protected", "activity_locked", "sellable",
     "profit_check",
@@ -200,7 +200,7 @@ def online_state(record, spec, profit_versions):
     # 通用live来源不证明近期调价；待PricingService查询官方计数及本地未完成任务锁。
     values.update(history_known=False, last_increase_at=None, pending_submission=False)
     values["observed_at"] = source_time(values["observed_at"])
-    for name in ("retail_price", "marketing_price", "current_margin"):
+    for name in ("retail_price", "marketing_price"):
         if name != "marketing_price" or values[name] is not None:
             values[name] = money(values[name])
 
@@ -215,7 +215,8 @@ def online_state(record, spec, profit_versions):
             raise ValueError("在线利润模型版本或审核标记无效")
         for field in ("revenue_factor", "fixed_cost", "fixed_cost_divisor"):
             model[field] = money(model[field])
-        check["overseas_stock"] = money(check["overseas_stock"])
+        stock = check.get("overseas_stock")
+        check["overseas_stock"] = None if stock in (None, "") else money(stock)
         check["inventory_observed_at"] = source_time(check["inventory_observed_at"])
         model["verified"] = model["verified"] and profit_versions.get(values["key"].site) == version
         values["profit_check"] = OnlineProfitCheck.model_validate(check)

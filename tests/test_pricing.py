@@ -33,7 +33,7 @@ def line(variant, **overrides):
 def online(variant, **overrides):
     return OnlineState(**{
         "key": variant, "main_sku": "主款", "currency": "MYR", "retail_price": "10",
-        "marketing_price": None, "current_margin": "-1", "fee_scope": "normal",
+        "marketing_price": None, "fee_scope": "normal",
         "profit_check": OnlineProfitCheck(overseas_stock="0",mode="direct",department="TEST",
             inventory_observed_at=NOW,source_ref="synthetic/profit",
             model=FeeModel(revenue_factor="1",fixed_cost="0",version="synthetic-online-v1",verified=True)),
@@ -74,7 +74,7 @@ def test_cny_fixed_cost_preserves_exact_break_even_and_returns_station_currency(
     assert model.profit_exact(MoneyRatio(Decimal(4),Decimal(3)))==MoneyRatio(Decimal(0))
     assert model.profit_exact(MoneyRatio(Decimal('1.34')))==MoneyRatio(Decimal('0.02'),Decimal(3))
     result=single(line_fields={'loss_amount':'-1','currency':'CNY'},
-        online_fields={'retail_price':'1','current_margin':'-1','profit_check':online(key()).profit_check.model_copy(update={'model':model})},
+        online_fields={'retail_price':'1','profit_check':online(key()).profit_check.model_copy(update={'model':model})},
         snapshot_fields={'fx_rates':{'CNY':'1','MYR':'3'},'fx_rate_unit':'cny_per_currency',
                          'contracts':{'MY':contract(rounding='ROUND_UP')}})
     assert result.ready and result.upload_price==Decimal('1.35')
@@ -221,7 +221,7 @@ def test_sales_quantity_is_reference_only(units, status, ready):
     [
         (timedelta(hours=72) - timedelta(seconds=1), "本轮不调", False),
         (timedelta(hours=72), "待处理", True),
-        (-timedelta(seconds=1), "待处理", False),
+        (-timedelta(seconds=1), "待处理", True),
     ],
 )
 def test_confirmed_increase_age_boundary(age, status, ready):
@@ -239,9 +239,7 @@ def test_exactly_four_sources_are_required(sources):
 @pytest.mark.parametrize(
     "online_fields",
     [
-        {"history_known": False},
         {"pending_submission": True},
-        {"sellable": False},
     ],
 )
 def test_unavailable_online_conditions_are_pending(online_fields):
@@ -250,11 +248,19 @@ def test_unavailable_online_conditions_are_pending(online_fields):
     assert not result.ready
 
 
-@pytest.mark.parametrize("online_fields", [{"protected": True}, {"current_margin": "0"}])
-def test_protected_or_non_loss_margins_are_excluded(online_fields):
-    result = single(online_fields=online_fields)
+def test_manually_protected_variants_are_excluded():
+    result = single(online_fields={"protected": True})
     assert result.status == "本轮不调"
     assert not result.ready
+
+
+def test_activity_restriction_is_suspended_without_changing_price_calculation():
+    baseline = single()
+    active = single(online_fields={"activity_locked": True})
+    assert baseline.ready and active.ready
+    assert active.reason_code == baseline.reason_code
+    assert active.upload_price == baseline.upload_price
+    assert active.target_actual == baseline.target_actual
 
 
 def test_stale_reference_sales_do_not_block_price_calculation():
@@ -385,7 +391,7 @@ def test_rounded_effective_price_must_stay_within_station_tolerance(site, curren
 )
 def test_station_price_precision_requires_a_matching_verified_contract(contracts):
     result = single(snapshot_fields={"contracts": contracts})
-    assert result.status == "待处理"
+    assert result.status == "本轮不调"
     assert not result.ready
 
 

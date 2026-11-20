@@ -42,7 +42,19 @@ def _items(session,notice):
     return [session.get(Item,item_id) for item_id in notice.item_ids]
 
 
+def _warnings(item):
+    trace=(item.decision or {}).get('trace', {})
+    return trace.get('warnings', []) if trace.get('warning_codes') else []
+
+
+def _warning_notice(notice):
+    return notice.summary.get('kind') == 'warning'
+
+
 def _recipient_items(session, notice):
+    if _warning_notice(notice):
+        return [item for item in _items(session,notice) if item and _warnings(item)] if notice.recipient_id == 'admin' else []
+
     role = 'manager' if notice.parent_id else None
     if not _active(session, notice.recipient_id, role=role):
         return []
@@ -92,6 +104,12 @@ def _markdown_text(value):
 
 
 def _card_text(summary, batch_mode, items):
+    if summary.get('kind') == 'warning':
+        details=[]
+        for index,item in enumerate(items,1):
+            details.append(f"{index}. SKU：{_markdown_text(item.key.get('sku'))} · 站点：{_markdown_text(item.key.get('site'))} · 店铺：{_markdown_text(item.key.get('shop_id'))}\n\n"
+                           + '   告警：' + '；'.join(_markdown_text(w) for w in _warnings(item)))
+        return '**亏损提价告警**\n\n' + '\n\n'.join(details)
     # 仅渲染发送前按当前收件人权限检查过的 items；明细不暴露其他销售员商品。
     # 时间是这些记录的最近处理时间（北京时间），不以重发时间冒充处理时间。
     processed_at=max(datetime.fromisoformat(item.updated_at) for item in items).astimezone(BEIJING)
@@ -169,6 +187,27 @@ def write_batch_notices(session, batch_id, *, existing_only=False):
             # 只吸收确实被另一事务插入的通知。其他约束错误须回滚本次批次汇总。
             if session.scalar(select(Notice.id).where(Notice.dedupe_key == key).with_for_update()) is None:
                 raise
+    # 告警独立发给管理员，不能因商品已分配销售员而漏发；每批去重。
+    warned=[item for item in session.scalars(select(Item).where(Item.batch_id==batch_id)) if _warnings(item)]
+    if warned:
+        key=f'warning:{batch_id}:admin'
+        notice=session.scalar(select(Notice).where(Notice.dedupe_key==key).with_for_update())
+        summary=dict(_summary(warned),kind='warning',title='亏损提价告警',exceptions=0)
+        if notice:
+            notice.item_ids=[item.id for item in warned]
+            notice.summary=summary
+        elif not existing_only:
+            now=stamp()
+            try:
+                with session.begin_nested():
+                    session.add(Notice(id=str(uuid4()),dedupe_key=key,recipient_id='admin',
+                        batch_id=batch_id,item_ids=[item.id for item in warned],summary=summary,
+                        delivery_state='pending',created_at=now,updated_at=now))
+                    session.flush()
+                added+=1
+            except IntegrityError:
+                if session.scalar(select(Notice.id).where(Notice.dedupe_key==key)) is None:
+                    raise
     return added
 
 
@@ -179,6 +218,8 @@ def _escalate(factory):
         originals=session.scalars(select(Notice).where(Notice.parent_id.is_(None),Notice.ack_at.is_(None),
                                                        Notice.escalated_at.is_(None))).all()
         for notice in originals:
+            if _warning_notice(notice):
+                continue
             if now-datetime.fromisoformat(notice.created_at)<timedelta(hours=24):
                 continue
             groups=defaultdict(list)
@@ -298,7 +339,8 @@ def _dispatch_notices(factory,config,owner):
                         notice.updated_at=stamp()
                         continue
                     notice.item_ids=[i.id for i in current]
-                    notice.summary=_summary(current,bool(notice.parent_id))
+                    notice.summary=(dict(_summary(current),kind='warning',title='亏损提价告警',exceptions=0)
+                                    if _warning_notice(notice) else _summary(current,bool(notice.parent_id)))
                     _,resolve=_coord()
                     unassigned=any(resolve(session,i.key) is None for i in current)
                     notice.summary=dict(notice.summary,unassigned=unassigned)
@@ -310,7 +352,8 @@ def _dispatch_notices(factory,config,owner):
                         continue
                     UserAccount,_=_coord()
                     user=session.get(UserAccount,notice.recipient_id) if notice.recipient_id!='admin' else None
-                    userid=user.dingtalk_userid if user and user.active else None
+                    userid=(getattr(config,'ding_alert_userid','') if _warning_notice(notice)
+                            else user.dingtalk_userid if user and user.active else None)
                     if not userid:
                         notice.last_error='负责人未绑定钉钉userid，未发送'
                         continue

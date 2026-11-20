@@ -1,6 +1,6 @@
 """用户固定BD表费用公式：费率用于库存对应完整在线利润。
 
-当前一次毛利仅计算现价筛选观测值，不输出独立新价保本模型。
+ERP 订单修正一次毛利由财务导出直接提供；本模块只构建新售价的完整在线利润模型。
 
 当前费率由current_pricing_fees绑定本轮版本；库存、成本、重量与报价由
 当前来源提供。未知成本、多个有效海外仓或分项不完整时不生成模型。
@@ -66,26 +66,22 @@ def compile_overseas_fee(variant, rate, *, site, warehouse, company_cny_per_curr
         raise ValueError('海外仓费率分项与公司合计不一致')
     fixed = costs + _nonnegative(procurement[0]) + _nonnegative(freight[0])
     all_factor = (MoneyRatio(Decimal(100)) - total) * MoneyRatio(Decimal('0.01'))
-    normal_factor = all_factor + rates['marketingRate'] * MoneyRatio(Decimal('0.01'))
     # 2026-11-19用户明确移除公开计划佣金；VAT仍作用在固定成本上。
     # 平台基础费率保留，不能把移除额外佣金当成免除平台费用。
-    # 不采用工作簿的缓存利润率；表中12%/12.5%目标也不覆盖本程序0%保本规则。
+    # 不采用工作簿的缓存利润率；表中12%/12.5%目标也不覆盖本程序统一利润率门槛。
     vat = _nonnegative(rate.get('vatRate')) * MoneyRatio(Decimal('0.01'))
     taxed_fixed = fixed * (MoneyRatio(Decimal(1)) + vat)
-    included_factor = all_factor
     version = rate.get('version')
     if not isinstance(version, str) or not version.strip():
         raise ValueError('固定费率缺少版本')
-    included_model = FeeModel(revenue_factor=included_factor.decimal(), fixed_cost=taxed_fixed.decimal(),
+    included_model = FeeModel(revenue_factor=all_factor.decimal(), fixed_cost=taxed_fixed.decimal(),
         fixed_cost_divisor=quote, version=version)
     included_percent = included_model.profit_exact(MoneyRatio(actual)) / MoneyRatio(actual) * MoneyRatio(Decimal(100))
     # 11/12明确使用部门统一费率，而列表显示值可能使用个人/店铺覆盖费率。
     # 显示值只保留作对账，不能据其倒推成本或要求与部门模型强行相等。
     reported = variant.get('currentOverseasProfitMargin')
     included_model.verified = True
-    model = FeeModel(revenue_factor=normal_factor.numerator, fixed_cost=fixed.numerator,
-        fixed_cost_divisor=quote, version=version, verified=True)
-    return {'online_model':included_model, 'current_margin':(model.profit_exact(MoneyRatio(actual)) / MoneyRatio(actual)).decimal(),
+    return {'online_model':included_model,
         'proof':{'version':version,'fixed_cost_currency':'CNY','company_quote_unit':'CNY/'+variant['currency'],
             'company_quote':format(quote,'f'),'fixed_cost':format(fixed.numerator,'f'),
             'reported_margin_percent':None if reported is None else str(reported),
@@ -94,7 +90,7 @@ def compile_overseas_fee(variant, rate, *, site, warehouse, company_cny_per_curr
             'vat_percent':str(rate['vatRate']),
             'rate_source':rate.get('rate_source'),
             'fixed_rate_ref':rate.get('source_ref'), 'source_cells':rate.get('source_cells'),
-            'excluded_percent_fields':['marketingRate'],'warehouse':warehouse}}
+            'warehouse':warehouse}}
 
 
 def compile_direct_fee(variant, rate, *, site, company_cny_per_currency):
@@ -105,9 +101,11 @@ def compile_direct_fee(variant, rate, *, site, company_cny_per_currency):
     """
     if site not in SITE_CURRENCIES or variant.get('currency') != SITE_CURRENCIES[site]:
         raise ValueError('直发币种与站点不一致')
-    if money(variant.get('overseasStockSum')) != 0:
+    # 缺失按用户2026-11-20确认选直发；保留原值，告警由规范快照进入计算记录。
+    stock = variant.get('overseasStockSum')
+    if stock not in (None, '') and money(stock) != 0:
         raise ValueError('有海外库存不能使用直发公式')
-    quote, actual = _positive(company_cny_per_currency), _positive(variant.get('marketPrice'))
+    quote = _positive(company_cny_per_currency)
     weight = _positive(variant.get('localWeight'))
     freight = rate['freight']
     base_weight = _positive(freight['base_weight_g'])
@@ -121,19 +119,16 @@ def compile_direct_fee(variant, rate, *, site, company_cny_per_currency):
              + _nonnegative(rate.get('warehouseCost')) + freight_station * MoneyRatio(quote))
     vat = _nonnegative(rate.get('vatRate')) * MoneyRatio(Decimal('0.01'))
     fixed = fixed * (MoneyRatio(Decimal(1)) + vat)
-    normal_rates = _sum(_nonnegative(rate.get(k)) for k in ('procedureRate', 'commissionRate', 'returnRate', 'otherRate'))
-    normal_factor = MoneyRatio(Decimal(1)) - normal_rates * MoneyRatio(Decimal('0.01'))
-    # 用户确认不采用公开计划佣金；基础平台佣金仍在normal_rates中扣除。
-    full_factor = normal_factor - _nonnegative(rate.get('marketingRate')) * MoneyRatio(Decimal('0.01'))
+    # 完整在线利润包含营销费与基础平台佣金；不叠加公开计划佣金。
+    rates = _sum(_nonnegative(rate.get(k)) for k in
+        ('procedureRate', 'commissionRate', 'returnRate', 'otherRate', 'marketingRate'))
+    full_factor = MoneyRatio(Decimal(1)) - rates * MoneyRatio(Decimal('0.01'))
     version = rate['version']
     if not isinstance(version, str) or not version.strip():
         raise ValueError('固定费率缺少版本')
-    model = FeeModel(revenue_factor=normal_factor.decimal(), fixed_cost=fixed.decimal(),
-                    fixed_cost_divisor=quote, version=version, verified=True)
     online = FeeModel(revenue_factor=full_factor.decimal(), fixed_cost=fixed.decimal(),
                      fixed_cost_divisor=quote, version=version, verified=True)
     return {'online_model': online,
-        'current_margin': (model.profit_exact(MoneyRatio(actual)) / MoneyRatio(actual)).decimal(),
         'proof': {'version': version, 'mode': 'direct', 'source_cells': rate.get('source_cells'),
                   'fixed_rate_ref': rate.get('source_ref'), 'weight_g': str(weight),
                   'freight_station': str(freight_station.decimal()), 'fixed_cost_currency': 'CNY',

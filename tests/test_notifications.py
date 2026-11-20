@@ -493,7 +493,7 @@ def test_robot_result_template_uses_authorized_details_and_download_link(notices
     assert userid=='ding-seller' and url==''
     assert title=='亏损提价处理结果'
     assert '**2026-11-19 10:30:00** · 共处理**1**条' in text
-    assert '待处理 1 · 活动中 0 · 已提价 0 · 本轮不调 0' in text
+    assert '待处理 1 · 已提价 0 · 本轮不调 0' in text
     assert '待处理的明细：' in text
     assert 'sku' in text and 'MY' in text and 'shop' in text and '缺少费用数据' in text
     assert '查询提价数据下载[http://8.133.252.166:50003](http://8.133.252.166:50003)' in text
@@ -660,15 +660,16 @@ def test_receipt_polling_backs_off_without_resending(notices_context,monkeypatch
     assert query.call_count==1
 
 
-def test_result_template_activity_excluded_from_manual_and_verified_is_increased():
+def test_result_template_historical_activity_is_pending_and_verified_is_increased():
     from app.services.notifications import _card_text, _summary
     def item(status,code,sku):
         return SimpleNamespace(status=status,decision={'reason_code':code},key={'sku':sku,'site':'PH','shop_id':'s'},reason='原因',updated_at='2026-11-19T02:30:00+00:00')
     items=[item('待处理','activity_locked','active-sku'),item('待核验','pending_submission','manual-sku'),item('已核验','ready','done-sku'),item('本轮不调','recent_price_change','skip-sku')]
     text=_card_text(_summary(items),'live',items)
-    assert '待处理 1 · 活动中 1 · 已提价 1 · 本轮不调 1' in text
-    assert 'manual-sku' in text
-    assert 'active-sku' not in text and 'done-sku' not in text and 'skip-sku' not in text
+    assert '待处理 2 · 已提价 1 · 本轮不调 1' in text
+    assert '活动中' not in text
+    assert 'manual-sku' in text and 'active-sku' in text
+    assert 'done-sku' not in text and 'skip-sku' not in text
 
 
 def test_result_template_empty_manual_list_and_markdown_escape():
@@ -679,3 +680,29 @@ def test_result_template_empty_manual_list_and_markdown_escape():
     text=_card_text(_summary([pending]),'live',[pending])
     assert '[bad](https://wrong.test)' not in text
     assert '*reason*\nnext' not in text
+
+
+def test_warning_notice_goes_to_admin_independent_of_owner(notices_context, monkeypatch):
+    from app.models import Item
+    from app.models.notifications import Notice
+    from app.services.notifications import enqueue_batch_notices, dispatch_notices
+    from app.adapters.dingtalk import DingTalkClient
+    factory,cfg=notices_context
+    cfg.notification_mode='live';cfg.ding_enabled=True;cfg.ding_alert_userid='ding-self'
+    with factory.begin() as session:
+        item=session.get(Item,'i');item.status='本轮不调'
+        item.decision={'trace':{'warning_codes':['unverified_online_profit'],'warnings':['费用模型无效']}}
+    assert enqueue_batch_notices(factory,'b')==2
+    sent=[]
+    def send(self,userid,title,text,url):
+        sent.append((userid,title,text));return {'state':'accepted','task_id':'task-'+userid}
+    monkeypatch.setattr(DingTalkClient,'send_notice',send)
+    monkeypatch.setattr(DingTalkClient,'query_notice',lambda *args:{'state':'accepted'})
+    dispatch_notices(factory,cfg)
+    assert any(uid=='ding-self' and title=='亏损提价告警' and '费用模型无效' in text and 'sku' in text for uid,title,text in sent)
+    assert enqueue_batch_notices(factory,'b')==0
+    dispatch_notices(factory,cfg)
+    assert sum(uid=='ding-self' for uid,_,_ in sent)==1
+    with factory() as session:
+        n=session.scalar(select(Notice).where(Notice.recipient_id=='admin'))
+        assert n.summary['kind']=='warning' and n.delivery_state=='accepted'

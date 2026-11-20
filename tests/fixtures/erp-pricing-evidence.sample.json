@@ -1,5 +1,5 @@
 {
-  "schema_version": "erp-pricing-evidence-v1",
+  "schema_version": "erp-pricing-evidence-v2",
   "capture_id": "erp-capture-20261109T063500000000Z-00000000000000000000000000000001",
   "synthetic": true,
   "evaluated_at": "2026-11-09T15:00:00+08:00",
@@ -148,7 +148,6 @@
         "currency": "MYR",
         "retail_price": "20.00",
         "marketing_price": "18.00",
-        "current_margin": "-0.03333333",
         "fee_scope": "normal",
         "observed_at": "2026-11-09T14:45:00+08:00",
         "sales_7d": 5,
@@ -192,7 +191,6 @@
         "currency": "MYR",
         "retail_price": "30.00",
         "marketing_price": null,
-        "current_margin": "-0.03333333",
         "fee_scope": "normal",
         "observed_at": "2026-11-09T14:45:00+08:00",
         "sales_7d": 21,
