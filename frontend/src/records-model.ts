@@ -1,5 +1,5 @@
 import { formatDecimal } from './decimal-display.ts'
-import type { ItemStatus } from './api'
+import type { ItemStatus, SkuPriceReference, PriceLimit } from './api'
 
 export interface RecordStage {
   key: 'original' | 'loss' | 'break_even'
@@ -26,6 +26,8 @@ export interface RecordItem {
   decision: { current_actual: string | null; target_actual: string | null; upload_price: string | null
     price_change: string | null
     stages: RecordStages | null
+    sku_price_reference?: SkuPriceReference | null
+    price_limit?: PriceLimit | null
     trace: { station_currency: string | null } } | null
   corrected_first_margin: { amount: string; currency: string } | null
   execution: { state: string; task_id: string | null; uploaded_price: string | null; actual_price: string | null
@@ -67,7 +69,7 @@ export function recordSource(item: RecordItem): string {
 }
 
 export function recordTone(status: string): string {
-  return ({ '已核验': 'verified', '待核验': 'pending', '待处理': 'attention' }[status] ?? 'neutral')
+  return ({ '已核验': 'verified', '待核验': 'attention', '待处理': 'attention' }[status] ?? 'neutral')
 }
 
 export function effectiveTimeLabel(source: string | null | undefined): string {
@@ -77,7 +79,15 @@ export function effectiveTimeLabel(source: string | null | undefined): string {
 }
 
 export function recordStatusLabel(status: string): string {
+  // 仅合并前端展示：后台待核验仍只核验、不重传，原始状态和执行证据保持不变。
   return ({ '已核验': '已提价', '待核验': '待处理', '待处理': '待处理' }[status] ?? status)
+}
+
+export const recordDisplayStates = ['已核验', '待处理', '本轮不调'] as const
+
+// 汇总的是记录数量，不计算价格；同一显示状态合并后台两个互斥状态，避免隐藏待核验后漏计。
+export function recordStatusCount(counts: Partial<Record<ItemStatus, number>>, status: typeof recordDisplayStates[number]): number {
+  return status === '待处理' ? (counts['待处理'] ?? 0) + (counts['待核验'] ?? 0) : counts[status] ?? 0
 }
 
 // 价格变动展示：后端已给出 target_actual − current_actual 的十进制文本；这里只决定符号和空值文案。
@@ -115,10 +125,6 @@ export function stagePriceLabel(stage: RecordStage, currency: string | null | un
   return `${formatDecimal(stage.price)} ${currency ?? '币种未记录'}`
 }
 
-export function stageCnyLabel(value: string | null | undefined): string {
-  return value == null ? '—' : `${formatDecimal(value)} 元`
-}
-
 export function stageChangeLabel(value: string | null | undefined): string {
   return value == null ? '—' : `${signedDecimal(value)} 元`
 }
@@ -127,20 +133,13 @@ export function stagePercentLabel(value: string | null | undefined): string {
   return value == null ? '—' : `${signedDecimal(value)}%`
 }
 
-// 「在线利润率导致的变动」只在 ③ 利润校验行展示：后端给出的在线利润校正额折合人民币；
-// 缺证据显示 —，为 0 显示 0 元（校验已通过，没有额外加价），正数前置 + 并用强调色。
-export function stageProfitChangeLabel(stage: { key: string; profit_change_cny: string | null | undefined }): string {
-  if (stage.key !== 'break_even' || stage.profit_change_cny == null || stage.profit_change_cny === '') return '—'
-  return `${signedDecimal(stage.profit_change_cny)} 元`
-}
-
-// 弹窗内日志筛选：状态用原始四态，避免展示别名和实际状态不一致；关键词匹配 SKU、商品/子商品 ID、店铺名与店铺 ID。
-export type RecordStatusFilter = ItemStatus | '全部'
+// 弹窗筛选只合并显示分组，不修改记录原状态或执行动作；关键词匹配 SKU、商品/子商品 ID、店铺名与店铺 ID。
+export type RecordStatusFilter = typeof recordDisplayStates[number] | '全部'
 
 export function filterRecordItems(items: RecordItem[], status: RecordStatusFilter, query: string): RecordItem[] {
   const keyword = query.trim().toLocaleLowerCase()
   return items.filter(item => {
-    if (status !== '全部' && item.status !== status) return false
+    if (status !== '全部' && recordStatusLabel(item.status) !== recordStatusLabel(status)) return false
     if (!keyword) return true
     const haystack = [item.key.sku, item.key.product_id, item.key.item_id,
       item.shop_name, item.key.shop_id].filter(Boolean).join('\n').toLocaleLowerCase()

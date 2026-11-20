@@ -64,7 +64,7 @@ def _display(value, quantum=DISPLAY_QUANT):
 
 
 def price_stages(decision, trace, snapshot, item_key):
-    """把价格拆成「原实际营销价→只补回订单亏损→提高到模型保本价」三环节。
+    """把价格拆成「原实际营销价→只补回订单亏损→利润校验或参考价优先」三环节。
 
     只使用判定时保存的金额：① 为 decision.current_actual；② 优先取
     trace.online_profit.initial_target，旧判定回退到 current_actual + station_loss；
@@ -110,6 +110,8 @@ def price_stages(decision, trace, snapshot, item_key):
     profit_change_cny = to_cny(profit_correction)
     rows, previous = [], None
     for key, label in STAGE_LABELS:
+        if key == 'break_even' and trace.get('price_limit'):
+            label = '③ 参考价优先'
         amount = values[key]
         cny = to_cny(amount)
         # 「比上一环节」严格相对表格上一行；上一环节缺失时为 —，不跨行比较制造环比。
@@ -190,6 +192,8 @@ def public_record(item, batch, execution, department, seller):
             'trace': {'station_currency': currency}, 'price_change': price_change,
             # 三环节价格表由后端用保存金额与当日汇率算出，前端只按行展示。
             'stages': price_stages(decision, trace, batch.snapshot, item.key) if decision else None,
+            'sku_price_reference': trace.get('sku_price_reference'),
+            'price_limit': trace.get('price_limit'),
         } if decision else None,
         'corrected_first_margin': margin,
         'execution': {

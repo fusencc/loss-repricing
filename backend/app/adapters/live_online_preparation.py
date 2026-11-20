@@ -15,13 +15,15 @@ from app.adapters.current_pricing_fees import select_current_rate
 from app.domain.engine import BEIJING, SITE_CURRENCIES
 from app.domain.types import VariantKey
 from app.adapters.official_price_logs import recent_price_log_for
+from app.adapters.sales_price_reference import price_reference_for
 
 SCHEMAS={'sales':'sales-source-observations-v1','platform':'sales-platform-controls-v1',
     'window':'erp-goods-sales-reference-v1','local_history':'local-live-price-history-v1',
     'fixed_fees':'sales-current-pricing-fees-v1'}
 
 
-def prepare_online_states(capture,targets,*,sales,platform,window,local_history,fixed_fees,official_history):
+def prepare_online_states(capture,targets,*,sales,platform,window,local_history,fixed_fees,official_history,
+                          price_references=None):
     capture=dict(capture,synthetic=capture.get('synthetic',False),sample_only=capture.get('sample_only',False))
     if type(capture['synthetic']) is not bool or type(capture['sample_only']) is not bool:
         raise ValueError('采集环境标记无效')
@@ -166,6 +168,8 @@ def prepare_online_states(capture,targets,*,sales,platform,window,local_history,
                 for row in local_history['protections'])
             state=ReviewedOnlineState.model_validate({'key':key.model_dump(mode='json'),'main_sku':target['main_sku'],
                 'currency':currency,'retail_price':format(retail,'f'),'marketing_price':format(actual,'f'),
+                'sku_price_reference':price_reference_for(price_references,capture,key,
+                    sku=target['erp_sku'],currency=currency),
                 'fee_scope':'erp-corrected-first-margin-v1',
                 'profit_check':{'overseas_stock':None if stock is None else format(stock,'f'),'mode':mode,'department':department,
                     'inventory_observed_at':control['observed_at'],'source_ref':control['ref'],

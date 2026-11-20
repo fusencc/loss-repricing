@@ -172,3 +172,39 @@ def test_th_native_vat_price_uses_observed_upward_cent_rounding():
     detail['requestBody']['skus'][0]['price']={'currency':'THB','amount':'61.26'}
     current.update(retail='76.54',actual='30.616',currency='THB',tax_exclusive='61.26',logistics='0.40',vat_percent='24.12')
     assert verify_price_evidence(a,[],log,detail,current,Decimal('30.612'))==Decimal('30.616')
+
+
+@pytest.mark.parametrize('has_reference,expected',[(False,'unknown'),(True,'accepted')])
+def test_live_lookup_uses_saved_reference_priority_instead_of_profit_veto(tmp_path,monkeypatch,has_reference,expected):
+    import json
+    import app.adapters.manual_live as module
+    a,log,detail,current=evidence()
+    trace={'rounded_actual':'34.872','online_rows':[{'profit_check':{'model':{
+        'revenue_factor':'.1','fixed_cost':'20','version':'synthetic','verified':True}}}]}
+    if has_reference:
+        trace['price_limit']={'policy':'sku-reference-priority-v2',
+                             'exact_upper_actual':{'numerator':'35','denominator':'1'}}
+    submitted_at=datetime.now(timezone.utc).isoformat()
+    (tmp_path/'intent-one.json').write_text(json.dumps({'authorization':a,'previous_log_ids':[],
+        'created_at':submitted_at,'decision':{'trace':trace}}))
+    adapter=module.ManualLiveAdapter(Settings(_env_file=None),a,tmp_path)
+    adapter._logs=lambda:[log]
+    adapter._request=lambda *args,**kwargs:{'resp_code':0,'datas':detail}
+    raw={'acquisition_complete':True,'records':[{
+        'company_parent':{'taxVatRate':'0'},
+        'data':{'skus':[{'id':'item-1','seller_sku':'SKU-1','price':{
+            'currency':'PHP','sale_price':'87.18','tax_exclusive_price':'87.18'}}]},
+        'current_variants':[{'sellerSkuId':'item-1','sellerSku':'SKU-1','productId':'product-1',
+            'shopId':'shop-1','currency':'PHP','priceIncludeVat':'87.18','marketPrice':current['actual'],
+            'discount':'60','logisticsCost':'0'}]}]}
+    monkeypatch.setattr(module,'capture_platform_controls',lambda *args,**kwargs:raw)
+    official={'key':a['key'],'shop_name':a['shop_name'],
+              'latest_success_query':{'status':'ok','amount':'87.18'}}
+    monkeypatch.setattr('app.adapters.official_price_logs.capture_official_price_logs',lambda *args,**kwargs:official)
+    result=adapter.lookup('one',None,VariantKey.model_validate(a['key']))
+    assert result.status==expected
+    if has_reference:
+        saved=json.loads((tmp_path/'verified-one.json').read_text())
+        assert saved['actual_profit']=='-16.513'
+        assert saved['minimum_margin_required'] is False and saved['online_margin_passed'] is False
+        assert result.price_record['prices']['marketing']['amount']=='34.87'

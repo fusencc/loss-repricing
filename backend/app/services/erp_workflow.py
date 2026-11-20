@@ -16,6 +16,7 @@ from app.adapters.erp_order_loss import prepare_order_losses
 from app.adapters.erp_order_headers import capture_order_headers
 from app.adapters.erp_goods_sales import capture_goods_sales
 from app.adapters.current_pricing_fees import capture_current_fees
+from app.adapters.sales_price_reference import capture_sku_price_references
 from app.adapters.erp_pricing import prepare_pricing
 from app.services.local_price_history import capture_local_price_history
 from app.adapters.official_price_logs import capture_recent_price_changes, recent_price_log_for
@@ -233,8 +234,12 @@ def _evaluate_capture(settings, capture_id, *, replay, evidence=None, exports=No
         local_history_ref['sha256'] = sha256(content).hexdigest()
         local_history_status = 'saved' if local_history['acquisition_complete'] else 'partial'
         if pricing_targets and all(source is not None for source in (sales,platform,window,fixed_fees)):
+            # 参考不属于核心来源合同；其issues不合入在线准备或待处理清单。
+            price_references = capture_sku_price_references(settings,capture,pricing_targets,
+                platform=platform,progress=progress)
             online_preparation = prepare_online_states(capture,pricing_targets,sales=sales,
-                platform=platform,window=window,local_history=local_history,fixed_fees=fixed_fees,official_history=official_history)
+                platform=platform,window=window,local_history=local_history,fixed_fees=fixed_fees,
+                official_history=official_history,price_references=price_references)
         try:
             current_fx = query_current_erp_fx(settings)
         except SourceUnavailable:

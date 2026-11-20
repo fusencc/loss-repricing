@@ -5,6 +5,7 @@ from decimal import Decimal, DecimalException, localcontext
 from itertools import chain
 
 from .money import MoneyRatio, PRICE_CONTEXT
+from .price_reference import reference_upper_price, describe_price_limit
 
 from .types import (
     CandidateSourceIssue, Decision, DecisionStatus, OnlineState, Site, Snapshot,
@@ -18,7 +19,7 @@ REQUIRED_SOURCES = frozenset({"loss_allocatable", "loss_pending", "blocked_alloc
 # 依据：已确认设计“数据与算价说明”；完整变量/单位见 docs/calculation-and-sources.md。
 # ERP 修正一次毛利直接作为亏损来源；近72小时保护用官方计数，费用仅在完整在线利润校验。
 # 规则版本不是公司费率或接口验收标志，固定表另存内容版本。
-FORMULA_VERSION = "loss-erp-corrected-margin-warning-policy-20261120-v11"
+FORMULA_VERSION = "loss-erp-corrected-margin-reference-priority-20261120-v13"
 # 保存/展示为50位有效数字；档位、容限、毛利正负以 Decimal 精确比值判定。
 # 不能先把循环小数近似为50位，再用其决定整档/半档或毛利是否为零。
 SITE_CURRENCIES: dict[Site, str] = {"MY": "MYR", "PH": "PHP", "SG": "SGD", "TH": "THB", "VN": "VND"}
@@ -269,8 +270,20 @@ def _decide(
     if not states:
         return finish("missing_mapping", "候选明细未匹配到当前在线子 SKU")
     online = states[0]
-    if any(state != online for state in states[1:]):
+    if any(state.model_dump(exclude={'sku_price_reference'})
+           != online.model_dump(exclude={'sku_price_reference'}) for state in states[1:]):
         return finish("conflicting_mapping", "同一在线子 SKU 存在多条冲突的在线快照")
+    # 参考观察不构成现价冲突；有参考时在算价处执行上限，缺失不阻断。
+    references = [state.sku_price_reference for state in states
+                  if state.sku_price_reference is not None and state.sku_price_reference.currency == online.currency]
+    # 重复现态不因参考差异挂起，也不能以行序或异币种参考绕过已存在的上限。
+    price_reference = min(references, key=lambda ref: reference_upper_price(ref, online.currency), default=None)
+    # 核心现态一致的重复观察合并为一条执行依据；原始观察仍在批次快照中留证。
+    # 保存选中参考，保证后续回读只有一个利润模型来源且不会因重复行永久挂起。
+    online = online.model_copy(update={'sku_price_reference': price_reference})
+    trace['online_rows'] = [online.model_dump(mode='json')]
+    if price_reference is not None:
+        trace['sku_price_reference'] = price_reference.model_dump(mode='json')
     if any(row.key.warehouse != online.key.warehouse for row in active_rows):
         return finish("conflicting_warehouse", "候选仓配与在线快照不一致")
     if (
@@ -338,7 +351,10 @@ def _decide(
     if profit_check is None:
         warn("unverified_online_profit", "缺少库存分流、部门费率及完整在线利润公式")
         return finish("unverified_online_profit", "缺少库存分流、部门费率及完整在线利润公式", status="本轮不调")
-    if problem := profit_check.problem(now, snapshot.business_date):
+    upper = reference_upper_price(price_reference, station_currency)
+    minimum_margin_required = upper is None
+    if problem := profit_check.problem(now, snapshot.business_date,
+                                       minimum_margin_required=minimum_margin_required):
         warn("unverified_online_profit", problem)
         return finish("unverified_online_profit", problem, status="本轮不调")
 
@@ -384,20 +400,40 @@ def _decide(
         station_ratio = (unit_ratio if loss_currency == station_currency
                          else unit_ratio * MoneyRatio(rate_numerator, rate_denominator))
         # 11/12会议后段：先直接补亏，再只复算库存选定仓配的完整在线利润。
-        # 在线利润校正额是通过该公式校验所需的实际价增量；通过时为0；2026-11-20统一要求完整在线利润率至少1%。
+        # 无参考时要求1%；有参考时优先上限，利润不足或需降价均不再拦截。
         initial_target = MoneyRatio(current) + station_ratio
-        minimum_actual = profit_check.minimum_actual_price()
-        target_ratio = max(initial_target, minimum_actual)
-        online_profit_correction = target_ratio - initial_target
+        if profit_check.model.revenue_factor > ONLINE_PROFIT_MINIMUM_MARGIN:
+            minimum_actual = profit_check.minimum_actual_price()
+        elif (profit_check.model.revenue_factor == ONLINE_PROFIT_MINIMUM_MARGIN
+              and profit_check.model.fixed_cost == 0):
+            minimum_actual = MoneyRatio(Decimal(0))
+        else:
+            minimum_actual = None  # 费用模型无法达到1%，仍可按参考上限调整。
+        unlimited_target = max(initial_target, minimum_actual) if minimum_actual is not None else None
+        target_ratio = unlimited_target
+        # 不可达的1%价格不伪造校正额；上限压减单列，不记成负校正额。
+        online_profit_correction = unlimited_target - initial_target if unlimited_target is not None else None
+        maximum_upload = None
+        if upper is not None:
+            # 用户确认参考为硬上限，先向下取可上传档位，防止进档后突破营销均价。
+            maximum_upload = (upper * MoneyRatio(retail) / MoneyRatio(current)).round_to_step(
+                contract.price_step, 'ROUND_DOWN')
+            maximum_actual = MoneyRatio(maximum_upload) * MoneyRatio(current) / MoneyRatio(retail)
+            target_ratio = (min(unlimited_target, maximum_actual)
+                            if unlimited_target is not None else maximum_actual)
+            trace['price_limit'] = describe_price_limit(upper, unlimited_target, target_ratio)
         discount = MoneyRatio(current, retail).decimal()
         # 含 VAT 上传价 = T×R/P；按精确商余数舍入，可支持0.025档位及半档边界。
         raw_ratio = target_ratio * MoneyRatio(retail) / MoneyRatio(current)
         upload_price = raw_ratio.round_to_step(contract.price_step, contract.rounding)
 
-        # 在线利润校正后，合同进档不能让利润再次为负；校验下限对应上传档位向上取整。
-        floor_upload = (minimum_actual * MoneyRatio(retail) / MoneyRatio(current)).round_to_step(
-            contract.price_step, "ROUND_UP")
-        upload_price = max(upload_price, floor_upload)
+        # 能达到1%时先保留利润档位；参考上限始终优先，允许压到利润下限以下。
+        if minimum_actual is not None:
+            floor_upload = (minimum_actual * MoneyRatio(retail) / MoneyRatio(current)).round_to_step(
+                contract.price_step, "ROUND_UP")
+            upload_price = max(upload_price, floor_upload)
+        if maximum_upload is not None:
+            upload_price = min(upload_price, maximum_upload)
         rounded_ratio = MoneyRatio(upload_price) * MoneyRatio(current) / MoneyRatio(retail)
         error_ratio = (rounded_ratio - target_ratio).absolute()
         tolerance = allowed_error(key.site)
@@ -425,10 +461,14 @@ def _decide(
             "overseas_stock": None if profit_check.overseas_stock is None else str(profit_check.overseas_stock),
             "inventory_observed_at": profit_check.inventory_observed_at.isoformat(),
             "source_ref": profit_check.source_ref, "model": profit_check.model.model_dump(mode="json"),
-            "initial_target": str(initial_target.decimal()), "break_even": str(minimum_actual.decimal()),
-            "correction_amount": str(online_profit_correction.decimal()),
-            "adjusted": target_ratio > initial_target, "minimum_margin": str(ONLINE_PROFIT_MINIMUM_MARGIN),
-            "target_margin": str((online_target_profit / target_ratio).decimal()),
+            "initial_target": str(initial_target.decimal()),
+            "break_even": str(minimum_actual.decimal()) if minimum_actual is not None else None,
+            "correction_amount": str(online_profit_correction.decimal()) if online_profit_correction is not None else None,
+            "adjusted": unlimited_target is not None and unlimited_target > initial_target,
+            "minimum_margin": str(ONLINE_PROFIT_MINIMUM_MARGIN),
+            "minimum_margin_required": minimum_margin_required,
+            "target_margin": (str((online_target_profit / target_ratio).decimal())
+                              if target_ratio.numerator > 0 else None),
             "rounded_margin": (str((online_rounded_profit / rounded_ratio).decimal())
                                if rounded_ratio.numerator > 0 else None),
         },
@@ -441,7 +481,11 @@ def _decide(
     }
     if upload_price <= 0 or error_ratio > MoneyRatio(tolerance):
         return finish("rounding_error", "站点价格档位导致实际价无效或超出误差容限", **prices)
-    if (not profit_check.model.meets_minimum_online_margin(target_ratio)
+    if upper is not None and rounded_ratio > upper:
+        return finish('reference_price_exceeded', '进档后营销价超过参考上限，本轮不调', status='本轮不调', **prices)
+    if minimum_margin_required and (not profit_check.model.meets_minimum_online_margin(target_ratio)
             or not profit_check.model.meets_minimum_online_margin(rounded_ratio)):
         return finish("online_profit_shortfall", "目标价或档位后在线利润率未达到1%", **prices)
-    return finish("ready", "补亏价格通过站点精度、库存对应完整在线利润率核验", ready=True, **prices)
+    reason = ("已按参考价优先确定价格，预计在线利润已记录" if upper is not None else
+              "补亏价格通过站点精度、库存对应完整在线利润率核验")
+    return finish("ready", reason, ready=True, **prices)

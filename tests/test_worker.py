@@ -39,6 +39,37 @@ def test_job_completes_and_schedule_creates_only_one_daily_job(tmp_path):
     engine.dispose()
 
 
+def test_schedule_starts_at_beijing_six_thirty(tmp_path):
+    engine, factory, service = setup(tmp_path)
+    update_settings(factory, {"schedule_enabled": True})
+    worker = Worker(factory, service)
+    # UTC前一日22:30对应北京时间当日06:30，业务日键使用北京时间。
+    before = datetime(2026, 11, 4, 22, 29, 59, tzinfo=timezone.utc).timestamp()
+    worker.tick(before)
+    assert service.calls == 0
+    with factory() as session:
+        assert session.query(Job).count() == 0
+    worker.tick(before + 1)
+    worker.tick(before + 6)
+    assert service.calls == 1
+    with factory() as session:
+        job = session.query(Job).one()
+        assert job.dedupe_key == "daily:2026-11-05"
+        assert job.state == "done"
+    engine.dispose()
+
+
+def test_schedule_disabled_at_beijing_six_thirty(tmp_path):
+    engine, factory, service = setup(tmp_path)
+    update_settings(factory, {"schedule_enabled": False})
+    worker = Worker(factory, service)
+    worker.tick(datetime(2026, 11, 4, 22, 30, tzinfo=timezone.utc).timestamp())
+    assert service.calls == 0
+    with factory() as session:
+        assert session.query(Job).count() == 0
+    engine.dispose()
+
+
 def test_not_ready_retries_after_five_minutes_without_marking_success(tmp_path):
     engine, factory, service = setup(tmp_path)
     service.ready = False

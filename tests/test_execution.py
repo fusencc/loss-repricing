@@ -27,6 +27,94 @@ def enable(factory):
                                   site_enabled=["MY","PH","SG","TH","VN"]))
 
 
+@pytest.mark.parametrize('overshoot,expected',[('0','verified'),('.001','mismatch')])
+def test_readback_above_reference_is_not_verified_within_old_amount_tolerance(context,overshoot,expected):
+    from test_sku_price_reference import ceiling
+    factory,cfg,_=context
+    class Capped(DemoAdapter):
+        def collect(self,day):
+            snapshot=super().collect(day)
+            snapshot.online=snapshot.online[:1]
+            snapshot.lines=snapshot.lines[:2]
+            snapshot.online[0].sku_price_reference=ceiling('10.8')
+            return snapshot
+        def lookup(self,*args):
+            result=super().lookup(*args)
+            return replace(result,actual_price=result.actual_price+Decimal(overshoot))
+    enable(factory)
+    PricingService(factory,Capped(cfg.runtime_dir),cfg).run_batch('reference-readback')
+    with factory() as session:
+        execution=session.scalar(select(Execution))
+        assert execution.state==expected
+        if overshoot!='0':
+            assert execution.evidence['price_limit_passed'] is False
+            assert session.get(VariantGuard,execution.variant_id).execution_id==execution.id
+
+
+def test_submission_refresh_uses_the_new_lower_reference_cap(context):
+    from test_sku_price_reference import ceiling
+    factory,cfg,_=context
+    class ChangingCap(DemoAdapter):
+        collections=0
+        def collect(self,day):
+            self.collections+=1
+            snapshot=super().collect(day)
+            snapshot.online=snapshot.online[:1];snapshot.lines=snapshot.lines[:2]
+            snapshot.online[0].sku_price_reference=ceiling('10.9' if self.collections==1 else '10.8')
+            return snapshot
+    enable(factory)
+    PricingService(factory,ChangingCap(cfg.runtime_dir),cfg).run_batch('refresh-reference')
+    with factory() as session:
+        execution=session.scalar(select(Execution))
+        assert Decimal(execution.request['upload_price'])==Decimal('21.60')
+        assert execution.request['trace']['price_limit']['upper_actual']=='10.8'
+
+
+@pytest.mark.parametrize('cap',['9','10','10.6'])
+def test_reference_priority_can_submit_and_verify_even_with_loss_or_no_price_increase(context,cap):
+    from test_sku_price_reference import ceiling
+    factory,cfg,_=context
+    class ReferencePriority(DemoAdapter):
+        def collect(self,day):
+            snapshot=super().collect(day)
+            snapshot.online=snapshot.online[:1]
+            snapshot.lines=snapshot.lines[:2]
+            snapshot.online[0].sku_price_reference=ceiling(cap)
+            return snapshot
+    enable(factory)
+    PricingService(factory,ReferencePriority(cfg.runtime_dir),cfg).run_batch('reference-priority')
+    with factory() as session:
+        execution=session.scalar(select(Execution))
+        assert execution is not None and execution.state=='verified'
+        assert Decimal(execution.request['upload_price'])==Decimal(cap)*2
+        assert execution.evidence['online_margin_passed'] is False
+        assert execution.evidence['minimum_margin_required'] is False
+        assert execution.evidence['price_limit_passed'] is True
+        assert session.get(VariantGuard,execution.variant_id).execution_id is None
+    assert settings_value(factory)['paused_sites']==[]
+
+
+def test_duplicate_online_references_keep_one_profit_source_for_readback(context):
+    from test_sku_price_reference import ceiling
+    factory,cfg,_=context
+    class DuplicateReference(DemoAdapter):
+        def collect(self,day):
+            snapshot=super().collect(day)
+            first=snapshot.online[0]
+            snapshot.online=[first.model_copy(update={'sku_price_reference':ceiling('10.9')}),
+                             first.model_copy(update={'sku_price_reference':ceiling('10.8')})]
+            snapshot.lines=snapshot.lines[:2]
+            return snapshot
+    enable(factory)
+    PricingService(factory,DuplicateReference(cfg.runtime_dir),cfg).run_batch('duplicate-reference')
+    with factory() as session:
+        execution=session.scalar(select(Execution))
+        assert execution.state=='verified'
+        assert Decimal(execution.request['upload_price'])==Decimal('21.60')
+        assert len(execution.request['trace']['online_rows'])==1
+        assert execution.request['trace']['online_rows'][0]['sku_price_reference']['marketing_price']=='10.8'
+
+
 def test_empty_pilot_never_submits_then_enabled_batch_verifies(context):
     factory, cfg, adapter = context
     service = PricingService(factory, adapter, cfg)

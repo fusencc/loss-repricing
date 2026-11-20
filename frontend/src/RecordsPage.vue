@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { Download, Search } from '@element-plus/icons-vue'
-import { api, errorMessage, timeLabel, type ItemStatus } from './api'
-import { groupBySeller, recordTone, recordStatusLabel, recordDepartments, type RecordData, type SellerGroup } from './records-model'
+import { api, errorMessage, timeLabel } from './api'
+import { groupBySeller, recordTone, recordStatusLabel, recordStatusCount, recordDisplayStates, recordDepartments, type RecordData, type SellerGroup } from './records-model'
 import { formatDecimal } from './decimal-display'
 import SellerRecordLogs from './SellerRecordLogs.vue'
 import RecordsDots from './RecordsDots.vue'
@@ -17,28 +17,22 @@ const loading = ref(true)
 const refreshing = ref(false)
 const error = ref('')
 const dialogOpen = ref(false)
+const logHitCount = ref<number | null>(null)
+const logTotal = computed(() => activeSeller.value?.items.length ?? 0)
+const logTitle = computed(() => `${activeSeller.value?.name ?? '销售员'}的提价日志`)
 const selectedSeller = ref<string | null>(null)
-const searchOpen = ref(false)
 const sellerQuery = ref('')
 const searchInput = ref<HTMLInputElement | null>(null)
-const searchButton = ref<HTMLButtonElement | null>(null)
 const groups = computed(() => groupBySeller(data.value?.items ?? []))
 // 仅筛选当前部门已读取的姓名；保留完整人员记录，不改变部门汇总或下载内容。
 const visibleGroups = computed(() => {
   const query = sellerQuery.value.trim().toLocaleLowerCase()
   return query ? groups.value.filter(group => group.name.toLocaleLowerCase().includes(query)) : groups.value
 })
-async function toggleSearch() {
-  searchOpen.value = !searchOpen.value
-  if (!searchOpen.value) sellerQuery.value = ''
-  await nextTick()
-  if (searchOpen.value) searchInput.value?.focus()
-  else searchButton.value?.focus()
-}
 const activeSeller = computed(() => groups.value.find(group => group.id === selectedSeller.value))
 const departmentName = computed(() => departments.find(entry => entry.id === department.value)?.name ?? '部门提价记录')
 const sellerCount = computed(() => groups.value.filter(group => group.assigned).length)
-const states: ItemStatus[] = ['已核验', '待核验', '待处理', '本轮不调']
+const states = recordDisplayStates
 let controller: AbortController | undefined
 let request = 0
 let timer: number | undefined
@@ -80,6 +74,7 @@ function openSeller(group: SellerGroup, event: MouseEvent) {
   const target = event.currentTarget as HTMLElement
   opener = target instanceof HTMLButtonElement ? target : target.querySelector<HTMLButtonElement>('.records-person-button')
   opener?.focus()
+  logHitCount.value = null
   selectedSeller.value = group.id
   dialogOpen.value = true
 }
@@ -132,7 +127,7 @@ onUnmounted(() => { ++request; controller?.abort(); window.clearInterval(timer) 
 
       <div class="records-overview" aria-live="polite">
         <div><strong>{{ departmentName }}</strong><span v-if="data">{{ sellerCount }} 位销售员，全部 {{ data.total }} 条记录<span v-if="groups.some(group => !group.assigned)">，含待分配记录</span></span></div>
-        <div v-if="data" class="records-counts"><span v-for="state in states" :key="state"><i :class="recordTone(state)"></i>{{ state === '本轮不调' ? '不调价' : recordStatusLabel(state) }} <b>{{ data.counts[state] ?? 0 }}</b></span></div>
+        <div v-if="data" class="records-counts"><span v-for="state in states" :key="state"><i :class="recordTone(state)"></i>{{ state === '本轮不调' ? '不调价' : recordStatusLabel(state) }} <b>{{ recordStatusCount(data.counts, state) }}</b></span><span class="records-activity-placeholder"><i class="neutral"></i>活动中</span></div>
       </div>
       <p v-if="error" class="records-error motion-reveal" role="alert"><strong>{{ data ? '更新未成功，以下保留最近读取的数据。' : '暂时无法读取记录。' }}</strong>{{ error }}。可切换部门或刷新页面，系统也会自动重试。</p>
 
@@ -140,12 +135,9 @@ onUnmounted(() => { ++request; controller?.abort(); window.clearInterval(timer) 
         <div class="records-panel-heading">
           <h2>销售员提价记录</h2>
           <div class="records-search" role="search">
-            <input v-if="searchOpen" id="records-seller-search" ref="searchInput" v-model="sellerQuery"
-              type="search" placeholder="搜索当前部门销售员" aria-label="搜索当前部门销售员"
-              @keydown.esc.prevent.stop="toggleSearch" />
-            <button ref="searchButton" type="button" class="records-download"
-              :aria-expanded="searchOpen" :aria-controls="searchOpen ? 'records-seller-search' : undefined"
-              :aria-label="searchOpen ? '关闭姓名搜索' : '搜索销售员'" @click="toggleSearch">
+            <input id="records-seller-search" ref="searchInput" v-model="sellerQuery"
+              type="search" placeholder="搜索当前部门销售员" aria-label="搜索当前部门销售员" />
+            <button type="button" class="records-download" aria-label="聚焦销售员搜索框" @click="searchInput?.focus()">
               <Search aria-hidden="true" />
             </button>
           </div>
@@ -157,24 +149,32 @@ onUnmounted(() => { ++request; controller?.abort(); window.clearInterval(timer) 
         </div>
         <table v-else class="records-table motion-reveal">
           <caption class="records-sr">{{ departmentName }}全部销售员提价记录，点击姓名查看本人详细日志</caption>
-          <thead><tr><th scope="col">销售员 / 全部记录</th><th scope="col">最近商品 / SKU</th><th scope="col">店铺 / 站点</th><th scope="col" title="算价选中的订单修正一次毛利，按原币展示">一次毛利</th><th scope="col">最近营销价变动</th><th scope="col">上传价</th><th scope="col">处理状态</th><th scope="col">最近更新</th></tr></thead>
+          <thead><tr><th scope="col">销售员 / 全部记录</th><th scope="col">最近商品 / SKU</th><th scope="col">店铺 / 站点</th><th scope="col" title="算价选中的订单修正一次毛利，按原币展示">修正一次毛利</th><th scope="col">最近营销价变动</th><th scope="col">上传价</th><th scope="col">处理状态</th><th scope="col">最近更新</th></tr></thead>
           <tbody><tr v-for="(group, index) in visibleGroups" :key="group.id" class="records-person-row" :data-seller="group.id" @click="openSeller(group, $event)">
             <td class="records-person-cell"><button class="records-person-button" :aria-label="`查看${group.name}的全部${group.items.length}条提价日志`" aria-haspopup="dialog" @click.stop="openSeller(group, $event)"><span class="records-avatar" :class="`tone-${index % 4}`" aria-hidden="true">{{ group.assigned ? group.name.slice(-1) : '?' }}</span><span><strong>{{ group.name }}</strong><small>共计{{ group.items.length }}条</small></span></button></td>
             <td class="records-product-cell"><strong>{{ group.latest.key.sku || 'SKU 未记录' }}</strong><small>商品 {{ group.latest.key.product_id || group.latest.key.item_id || '未记录' }}</small></td>
             <td class="records-shop-cell"><strong>{{ group.latest.shop_name || group.latest.key.shop_id || '店铺未记录' }}</strong><small>{{ group.latest.key.site }} / {{ group.latest.key.platform }}</small></td>
-            <td class="records-margin-cell"><span class="records-mobile-label">一次毛利</span><strong>{{ formatDecimal(group.latest.first_margin?.amount ?? '未记录') }}</strong><small v-if="group.latest.first_margin">{{ group.latest.first_margin.currency }}</small></td>
+            <td class="records-margin-cell"><span class="records-mobile-label">修正一次毛利</span><strong>{{ formatDecimal(group.latest.first_margin?.amount ?? '未记录') }}</strong><small v-if="group.latest.first_margin">{{ group.latest.first_margin.currency }}</small></td>
             <td class="records-price-cell"><span class="records-mobile-label">最近营销价变动</span><div class="records-price-change"><span>{{ formatDecimal(group.latest.decision?.current_actual ?? '未记录') }}</span><i aria-hidden="true">→</i><strong>{{ formatDecimal(group.latest.execution?.actual_price ?? group.latest.decision?.target_actual ?? '未记录') }}</strong></div><small>{{ group.latest.execution?.actual_price == null ? '目标' : '回读' }} · {{ group.latest.decision?.trace.station_currency || '币种未记录' }}</small></td>
             <!-- 上传价取最近记录的持久提交意图，使用持久化十进制文本并限制展示为两位小数；不以建议价或回读价代替，也不表示已经生效。 -->
             <td class="records-upload-cell"><span class="records-mobile-label">上传价</span><strong>{{ formatDecimal(group.latest.execution?.uploaded_price ?? (group.latest.execution ? '未记录' : '未提交')) }}</strong><small v-if="group.latest.execution?.uploaded_price != null">{{ group.latest.decision?.trace.station_currency || '币种未记录' }}</small></td>
-            <td class="records-progress-cell"><div class="records-status-list"><template v-for="state in states" :key="state"><span v-if="group.counts[state]" class="records-status" :class="recordTone(state)"><i></i>{{ recordStatusLabel(state) }} {{ group.counts[state] }}</span></template></div></td>
+            <td class="records-progress-cell"><div class="records-status-list"><template v-for="state in states" :key="state"><span v-if="recordStatusCount(group.counts, state)" class="records-status" :class="recordTone(state)"><i></i>{{ recordStatusLabel(state) }} {{ recordStatusCount(group.counts, state) }}</span></template></div></td>
             <td class="records-time-cell"><div class="records-row-end"><time :datetime="group.latest.updated_at">{{ timeLabel(group.latest.updated_at) }}</time><button type="button" class="records-download" title="下载个人数据" aria-label="下载个人数据" @click.stop="downloadSeller(group)"><Download aria-hidden="true" /></button></div></td>
           </tr></tbody>
         </table>
       </section>
     </main>
 
-    <el-dialog v-model="dialogOpen" class="records-dialog" modal-class="records-overlay" :title="`${activeSeller?.name ?? '销售员'}的提价日志`" width="min(1120px, calc(100vw - 32px))" align-center append-to-body destroy-on-close @closed="restoreFocus">
-      <SellerRecordLogs v-if="activeSeller" :seller="activeSeller" />
+    <el-dialog v-model="dialogOpen" class="records-dialog" modal-class="records-overlay" :title="logTitle" width="min(1120px, calc(100vw - 32px))" align-center append-to-body destroy-on-close @closed="restoreFocus">
+      <template #header="{ titleId, titleClass }">
+        <div class="records-log-title">
+          <h2 :id="titleId" :class="titleClass">{{ logTitle }}</h2>
+          <span class="records-log-count" role="status" aria-atomic="true">
+            共 {{ logTotal }} 条记录<span v-if="logHitCount !== null && logHitCount !== logTotal">，当前筛选命中 {{ logHitCount }} 条</span>
+          </span>
+        </div>
+      </template>
+      <SellerRecordLogs v-if="activeSeller" :seller="activeSeller" @hit-count="logHitCount = $event" />
     </el-dialog>
   </div>
 </template>

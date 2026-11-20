@@ -84,6 +84,31 @@ def test_missing_reference_sales_does_not_block_pricing_preparation():
     assert r['online'][0]['state']['sales_7d'] is None
 
 
+@pytest.mark.parametrize('payload', [None, {}, {'schema_version': 'wrong'},
+    {'schema_version': 'sales-sku-price-reference-v1', 'records': {}}])
+def test_missing_or_invalid_price_reference_is_not_a_pricing_issue(payload):
+    from app.adapters.live_online_preparation import prepare_online_states
+    c,t,s=sources()
+    baseline=prepare_online_states(c,t,**s)
+    result=prepare_online_states(c,t,**s,price_references=payload)
+    assert not result['issues'] and result['online']==baseline['online']
+
+
+def test_top3_price_reference_survives_the_prepared_online_snapshot():
+    from app.adapters.live_online_preparation import prepare_online_states
+    from app.domain.types import VariantKey
+    from test_sku_price_reference import reference, sample
+    c,t,s=sources(); key=VariantKey.model_validate(t[0]['key'])
+    ref=reference([sample(name, 1, '100', '0') for name in 'ABC'])
+    ref=ref.model_copy(update={'sku':t[0]['erp_sku'], 'currency':'PHP'})
+    payload={'schema_version':'sales-sku-price-reference-v1','source_id':'REFERENCE',
+        'erp_capture_id':c['capture_id'],'synthetic':True,'sample_only':False,
+        'records':{key.identity():ref.model_dump(mode='json')}}
+    result=prepare_online_states(c,t,**s,price_references=payload)
+    assert not result['issues']
+    assert result['online'][0]['state']['sku_price_reference']['marketing_price']=='100'
+
+
 def test_released_verified_guard_after_72_hours_is_not_a_permanent_submission_lock():
     from app.adapters.live_online_preparation import prepare_online_states
     c,t,s=sources()

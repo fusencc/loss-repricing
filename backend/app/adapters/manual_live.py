@@ -22,10 +22,12 @@ from app.adapters.sales_capture import capture_sales_sources, _json_values
 from app.adapters.sales_platform_capture import capture_platform_controls
 from app.adapters.erp_goods_sales import capture_goods_sales
 from app.adapters.current_pricing_fees import capture_current_fees
+from app.adapters.sales_price_reference import capture_sku_price_references
 from app.adapters.live_online_preparation import prepare_online_states
 from app.adapters.erp_rates import query_current_erp_fx
 from app.adapters.transport_privacy import private_request
 from app.domain.money import MoneyRatio
+from app.domain.price_reference import saved_price_limit
 from app.domain.engine import SITE_CURRENCIES
 from app.domain.types import OnlineState, SiteContract, Snapshot, VariantKey, FeeModel
 from app.services.local_price_history import capture_local_price_history
@@ -62,7 +64,7 @@ def verify_price_evidence(authorization, previous_ids, log, detail, current, exp
     retail_matches = retail == uploaded
     if not retail_matches and abs(retail-uploaded) <= Decimal('.01'):
         # PH、MY及2026-11-19 TH实测：税前请求/回读相同，含税价由税前+物流乘当前VAT向上取分。
-        # 只解释有完整构成证据的一分差；原营销价0.02容限及利润非负仍独立校验。
+        # 只解释有完整构成证据的一分差；营销价0.02容限仍独立校验。
         net, logistics, vat = (money(current[n]) for n in ('tax_exclusive','logistics','vat_percent'))
         native_retail = ((MoneyRatio(net)+MoneyRatio(logistics))
             * (MoneyRatio(Decimal(1))+MoneyRatio(vat)/MoneyRatio(Decimal(100))))
@@ -195,8 +197,11 @@ class ManualLiveAdapter:
         # 原件不修改；“参加活动”不同于“固定活动价锁住”。本入口只接已核对百分比活动。
         prepared_platform = deepcopy(platform)
         prepared_platform['records'][0]['company_activity_locked'] = False
+        price_references = capture_sku_price_references(self.settings,capture,[target],
+            platform=prepared_platform,client=self.client)
         prepared = prepare_online_states(capture, [target], sales=sales, platform=prepared_platform,
-            window=window, local_history=history, fixed_fees=fixed, official_history=official_history)
+            window=window, local_history=history, fixed_fees=fixed, official_history=official_history,
+            price_references=price_references)
         write_verified(self.directory / (capture['capture_id']+'-preparation.json'), {'preparation': prepared, 'activity': activity, 'authorization': a})
         if prepared['issues'] or len(prepared['online']) != 1: raise ValueError(str(prepared['issues']))
         state = dict(prepared['online'][0]['state'], fee_scope='normal')
@@ -291,7 +296,9 @@ class ManualLiveAdapter:
             expected = money(intent['decision']['trace']['rounded_actual'])
             actual = verify_price_evidence(a, intent['previous_log_ids'], log, detail['datas'], current, expected)
             full = FeeModel.model_validate(intent['decision']['trace']['online_rows'][0]['profit_check']['model'])
-            if not full.meets_minimum_online_margin(MoneyRatio(actual)): raise ValueError('回读营销价在线利润率未达到1%')
+            upper = saved_price_limit(intent['decision']['trace'])
+            if upper is None and not full.meets_minimum_online_margin(MoneyRatio(actual)):
+                raise ValueError('回读营销价在线利润率未达到1%')
             observed = utcnow()
             # 官方统计/最新成功价只作独立证据补充，不代替已绑定任务和当前平台价。
             # 按原提交北京时间日期查count；latest只有金额，保留其无任务ID/时间的限制。
@@ -303,11 +310,14 @@ class ManualLiveAdapter:
                 log, current, observed, official, submitted_at=submitted_at)
             write_verified(self.directory / ('price-record-'+execution_id+'-'+uuid4().hex+'.json'), price_record)
             write_verified(self.directory / ('verified-'+execution_id+'.json'), {'log': log, 'current': current,
-                'actual_profit': str(full.profit_exact(MoneyRatio(actual)).decimal()), 'observed_at': observed.isoformat(),
+                'actual_profit': str(full.profit_exact(MoneyRatio(actual)).decimal()),
+                'minimum_margin_required': upper is None,
+                'online_margin_passed': full.meets_minimum_online_margin(MoneyRatio(actual)),
+                'observed_at': observed.isoformat(),
                 'freshness_basis': '提交前不同价格+本次新增任务平台成功回执+提交后平台及公司价格一致；首次确认时间',
                 'platform_update_time': control['data'].get('update_time')})
             return LookupResult('accepted', actual, observed, None, 'actual_including_vat',
                 '平台任务'+str(log['id'])+'成功；上传含税'+a['upload_price']+'，回读含税'+str(current['retail'])+
-                '，营销价'+str(actual)+'；税前及物流换算已核对，实际价在0.02容限内且利润非负', price_record=price_record)
+                '，营销价'+str(actual)+'；税前及物流换算已核对，实际价在0.02容限内，在线利润已记录', price_record=price_record)
         except Exception as exc:
             return LookupResult('unknown', message='当前生效证据尚未齐备（'+type(exc).__name__+'），仅核验')

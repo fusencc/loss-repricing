@@ -7,6 +7,28 @@ export const statuses = ['本轮不调', '待处理', '待核验', '已核验'] 
 export type ItemStatus = typeof statuses[number]
 export type Identifier = string | number
 
+export interface SkuPriceReference {
+  marketing_price: string
+  currency: string
+  sku: string
+  observed_at: string
+  samples: {
+    shop_name: string
+    product_id: string
+    item_id: string
+    sales_7d: number
+    tax_inclusive_price: string
+    discount_percent: string
+    marketing_price: string
+  }[]
+}
+
+export interface PriceLimit {
+  upper_actual: string
+  applied: boolean
+  reduction_amount: string | null
+}
+
 export interface Settings {
   paused: boolean
   paused_sites: string[]

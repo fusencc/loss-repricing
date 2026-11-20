@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import ItemCoordination from './ItemCoordination.vue'
-import { display, statusType, stateLabel, timeLabel, type Item } from './api'
+import SkuPriceReferenceView from './SkuPriceReference.vue'
+import { display, statusType, stateLabel, timeLabel, type Item, type SkuPriceReference, type PriceLimit } from './api'
 
 const props = defineProps<{ actorRole: string; actorId: string; admin: boolean; open: boolean; item: Item | null; loading: boolean; error: string; busy: boolean }>()
 const emit = defineEmits<{ close: []; refresh: []; reevaluate: [id: Item['id'], note: string] }>()
@@ -27,6 +28,8 @@ const traceLabels: Record<string, string> = {
   source_versions: '来源版本', source_rows: '原始候选行', online_rows: '在线快照',
   warnings: '计算告警', source_issues: '来源异常记录', online_profit: '在线利润校验依据',
   site_contract: '站点接口合同', sales_window: '仓库七日参考销量',
+  sku_price_reference: '同 SKU Top3 营销参考价',
+  price_limit: '参考价上限与压减',
   excluded_source_rows: '排除的候选行', candidate_unit_losses: '候选单件亏损（原币）',
   station_currency: '站点币', loss_fx_rate: '原币汇率（每 1 CNY）', station_fx_rate: '站点币汇率（每 1 CNY）',
   raw_upload_price: '舍入前含 VAT 上传价', rounded_actual: '舍入后实际价',
@@ -58,6 +61,16 @@ const traceRows = computed(() => {
   const trace = props.item?.decision?.trace
   return trace && typeof trace === 'object' && !Array.isArray(trace) ? Object.entries(trace) : []
 })
+const skuPriceReference = computed(() => {
+  const trace = props.item?.decision?.trace
+  return trace && typeof trace === 'object' && !Array.isArray(trace)
+    ? (trace as { sku_price_reference?: SkuPriceReference }).sku_price_reference : null
+})
+const priceLimit = computed(() => {
+  const trace = props.item?.decision?.trace
+  return trace && typeof trace === 'object' && !Array.isArray(trace)
+    ? (trace as { price_limit?: PriceLimit }).price_limit : null
+})
 </script>
 
 <template>
@@ -81,7 +94,7 @@ const traceRows = computed(() => {
         <section v-if="item.decision" class="drawer-section">
           <h3>补亏计算</h3>
           <el-alert v-for="warning in calculationWarnings" :key="warning" :title="warning" type="warning" show-icon :closable="false" />
-          <p class="muted">初步补亏价为当前实际价加单件补亏额；在线利润校验仍亏时，增加在线利润校正额得到目标实际价，再按折扣反推上传价。</p>
+          <p class="muted">先计算补亏及 1% 在线利润率所需价格；有参考价时优先参考上限，利润不足或需要降价时也按参考上限调整，再按折扣反推上传价。没有参考价时沿用原规则。</p>
           <dl class="detail-grid">
             <div v-for="(label, key) in decisionFields" :key="key">
               <dt>{{ label }}</dt>
@@ -90,6 +103,7 @@ const traceRows = computed(() => {
             <div><dt>在线利润校正额（站点币）</dt><dd>{{ onlineProfitCorrection.amount === null ? '未记录' : `${display(onlineProfitCorrection.amount)} ${onlineProfitCorrection.currency}` }}</dd></div>
             <div v-if="item.decision.reason_code === 'ready'"><dt>规则检查</dt><dd>规则检查通过</dd></div>
           </dl>
+          <SkuPriceReferenceView :reference="skuPriceReference" :price-limit="priceLimit" />
           <details class="evidence">
             <summary>展开计算过程</summary>
             <dl v-if="traceRows.length" class="detail-grid">

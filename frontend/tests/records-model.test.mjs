@@ -51,17 +51,17 @@ test('dialog log filter keeps full-keyword match across SKU, product and shop, a
   ]
   assert.deepEqual(filterRecordItems(items, '全部', '').map(r=>r.id), ['1','2','3'])
   assert.deepEqual(filterRecordItems(items, '已核验', '').map(r=>r.id), ['1'])
-  // 展示别名不参与筛选：待处理状态原值是“待处理”，不能被“活动中”误匹配。
-  assert.deepEqual(filterRecordItems(items, '待处理', '').map(r=>r.id), ['3'])
+  // 待处理展示组包含两个后台状态，保留原记录及顺序。
+  assert.deepEqual(filterRecordItems(items, '待处理', '').map(r=>r.id), ['2','3'])
   assert.deepEqual(filterRecordItems(items, '全部', 'hhx1983').map(r=>r.id), ['1'])
   assert.deepEqual(filterRecordItems(items, '全部', 'TIKTOK-22070PH').map(r=>r.id), ['1','3'])
   assert.deepEqual(filterRecordItems(items, '全部', '222').map(r=>r.id), ['2'])
-  assert.deepEqual(filterRecordItems(items, '待核验', 'shop9').map(r=>r.id), ['2'])
+  assert.deepEqual(filterRecordItems(items, '待处理', 'shop9').map(r=>r.id), ['2'])
   assert.deepEqual(filterRecordItems(items, '全部', '没有这个'), [])
 })
 
 test('stage table formats saved amounts with sign and unit, never inventing zeros', async () => {
-  const { signedDecimal, stagePriceLabel, stageCnyLabel, stageChangeLabel, stagePercentLabel, isIncrease } =
+  const { signedDecimal, stagePriceLabel, stageChangeLabel, stagePercentLabel, isIncrease } =
     await import('../src/records-model.ts')
   assert.equal(signedDecimal('1.2331'), '+1.23')
   assert.equal(signedDecimal('-1.23'), '-1.23')
@@ -69,8 +69,6 @@ test('stage table formats saved amounts with sign and unit, never inventing zero
   assert.equal(signedDecimal(null), '—')
   assert.equal(stagePriceLabel({ price: '25.9602' }, 'PHP'), '25.96 PHP')
   assert.equal(stagePriceLabel({ price: null }, 'PHP'), '未记录')
-  assert.equal(stageCnyLabel('2.6765'), '2.68 元')
-  assert.equal(stageCnyLabel(null), '—')
   assert.equal(stageChangeLabel('1.2331'), '+1.23 元')
   assert.equal(stageChangeLabel(null), '—')
   assert.equal(stagePercentLabel('85.43'), '+85.43%')
@@ -80,25 +78,59 @@ test('stage table formats saved amounts with sign and unit, never inventing zero
   assert.equal(isIncrease(null), false)
 })
 
-test('profit-change column only renders the break-even row and keeps missing evidence empty', async () => {
-  const { stageProfitChangeLabel } = await import('../src/records-model.ts')
-  // ③ 利润校验行：保存的在线利润校正额折合人民币，正数补 + 号。
-  assert.equal(stageProfitChangeLabel({ key: 'break_even', profit_change_cny: '5.7901' }), '+5.79 元')
-  // 校验已通过时校正额为 0：显示 0 元，不虚加 + 号。
-  assert.equal(stageProfitChangeLabel({ key: 'break_even', profit_change_cny: '0.0000' }), '0 元')
-  // 没保存校正额的历史记录显示 —，不推断为 0。
-  assert.equal(stageProfitChangeLabel({ key: 'break_even', profit_change_cny: null }), '—')
-  // ① ② 行不显示该列内容。
-  assert.equal(stageProfitChangeLabel({ key: 'loss', profit_change_cny: '5.7901' }), '—')
-  assert.equal(stageProfitChangeLabel({ key: 'original', profit_change_cny: null }), '—')
+test('dialog stages use wrapping horizontal fields with saved price and secondary changes', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const source = await readFile(new URL('../src/SellerRecordLogs.vue', import.meta.url), 'utf8')
+  const css = await readFile(new URL('../src/records.css', import.meta.url), 'utf8')
+  assert.match(source, /<dl v-if="item\.decision\?\.stages" class="records-log-stages"/)
+  assert.match(source, /<dt>\{\{ stage\.label \}\}<\/dt>/)
+  assert.match(source, /<strong>\{\{ stagePriceLabel\(stage, item\.decision\.stages\.currency\) \}\}<\/strong>/)
+  assert.match(source, /<small class="records-stage-change">/)
+  assert.doesNotMatch(source, /<table|在线利润率导致的变动|stageProfitChangeLabel|stage\.profit_change_cny|records-stage-formula|公式：/)
+  assert.doesNotMatch(css, /records-stage-table|records-stage-formula/)
+  assert.match(css, /\.records-log\{display:grid;grid-template-columns:/)
+  assert.match(css, /\.records-log-stages\{display:grid;grid-template-columns:repeat\(auto-fit,minmax\(min\(135px,100%\),1fr\)\)/)
+  assert.match(css, /\.records-stage-change\{display:flex;flex-wrap:wrap;/)
 })
 
 test('records use the requested business labels and four fixed departments', async () => {
   const { recordStatusLabel, recordDepartments } = await import('../src/records-model.ts')
-  assert.deepEqual(['已核验','待核验','待处理','本轮不调'].map(recordStatusLabel), ['已提价','待处理','活动中','本轮不调'])
+  assert.deepEqual(['已核验','待核验','待处理','本轮不调'].map(recordStatusLabel), ['已提价','待处理','待处理','本轮不调'])
   assert.deepEqual(recordDepartments.map(d => d.name), ['Tiktok一部','Tiktok五部','Tiktok十二部','Tiktok二十二部'])
 })
 
+
+test('overview keeps real statuses separate from the unconnected activity placeholder and preserves margin evidence', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const source = await readFile(new URL('../src/RecordsPage.vue', import.meta.url), 'utf8')
+  assert.match(source, /title="算价选中的订单修正一次毛利，按原币展示">修正一次毛利<\/th>/)
+  assert.match(source, /class="records-mobile-label">修正一次毛利<\/span>/)
+  assert.match(source, /group\.latest\.first_margin\?\.amount/)
+  assert.match(source, /group\.latest\.first_margin\.currency/)
+  assert.match(source, /recordStatusCount\(data\.counts, state\)/)
+  assert.match(source, /recordStatusCount\(group\.counts, state\)/)
+  assert.match(source, /class="records-activity-placeholder"><i class="neutral"><\/i>活动中<\/span>/)
+  assert.doesNotMatch(source, /未接入/)
+  assert.doesNotMatch(source, /counts\['活动中'\]|searchExpanded|toggleSearch/)
+  assert.match(source, /<input id="records-seller-search" ref="searchInput" v-model="sellerQuery"/)
+})
+
+test('pending display counts merge both backend statuses without mutating evidence', async () => {
+  const { recordStatusCount, recordDisplayStates, recordTone, filterRecordItemsCount } = await import('../src/records-model.ts')
+  const counts = { '已核验': 2, '待核验': 3, '待处理': 4, '本轮不调': 1 }
+  const original = structuredClone(counts)
+  assert.deepEqual(recordDisplayStates, ['已核验', '待处理', '本轮不调'])
+  assert.deepEqual(recordDisplayStates.map(state => recordStatusCount(counts, state)), [2, 7, 1])
+  assert.equal(recordStatusCount({ '待核验': 3 }, '待处理'), 3)
+  assert.equal(recordStatusCount({ '待处理': 4 }, '待处理'), 4)
+  assert.equal(recordStatusCount({}, '待处理'), 0)
+  assert.equal(recordTone('待核验'), recordTone('待处理'))
+  assert.deepEqual(counts, original)
+  const items = [row('1','a','待核验'), row('2','a','待处理'), row('3','a','已核验')]
+  const saved = structuredClone(items)
+  assert.equal(filterRecordItemsCount(items, '待处理', ''), 2)
+  assert.deepEqual(items, saved)
+})
 
 test('all price displays round to at most two places without changing input or long identifiers', async () => {
   const { recordPrice, changeLabel } = await import('../src/records-model.ts')

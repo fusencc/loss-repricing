@@ -54,6 +54,21 @@ def test_first_margin_exposes_only_selected_erp_order_amount(client):
     assert rows['i0']['first_margin'] is None
 
 
+def test_record_projection_exposes_optional_saved_reference_without_changing_status(client):
+    from test_sku_price_reference import reference, sample
+    ref=reference([sample(s, 1, '100', '50') for s in 'ABC']).model_dump(mode='json')
+    with client.app.state.factory.begin() as session:
+        item=session.get(Item, 'i3')
+        item.decision=dict(item.decision, trace=dict(item.decision['trace'], sku_price_reference=ref,
+            price_limit={'upper_actual':'50','applied':True,'reduction_amount':'1.2'}))
+    rows={r['id']:r for r in client.get('/api/records').json()['items']}
+    assert rows['i3']['decision']['sku_price_reference']['marketing_price']=='50'
+    assert len(rows['i3']['decision']['sku_price_reference']['samples'])==3
+    assert rows['i3']['decision']['price_limit']['reduction_amount']=='1.2'
+    assert rows['i3']['status']=='已核验'
+    assert rows['i0']['decision'].get('sku_price_reference') is None
+
+
 def test_department_records_are_public_but_management_remains_protected(client):
     response = client.get('/api/records')
     assert response.status_code == 200
@@ -207,6 +222,18 @@ def test_price_stages_never_invent_the_loss_step_or_fx_rate(client):
     stages = {row['id']: row for row in client.get('/api/records').json()['items']}['i3']['decision']['stages']
     # 该记录原始价 12.00 MYR；12 ÷ 1.5385 = 7.7998 元。
     assert stages['rows'][0]['cny'] == '7.7998'
+
+
+def test_reference_stage_shows_decrease_without_claiming_profit_check_passed():
+    from app.services.records import price_stages
+    trace={'station_currency':'MYR','price_limit':{'upper_actual':'9'},
+           'online_profit':{'initial_target':'11.2','correction_amount':None}}
+    stages=price_stages({'current_actual':'10','target_actual':'9'},trace,
+                       {'fx_rates':{'MYR':'1'},'fx_rate_unit':'cny_per_currency'},key(0))
+    final=stages['rows'][2]
+    assert final['label']=='③ 参考价优先'
+    assert final['price']=='9.0000' and final['change_cny']=='-2.2000'
+    assert final['profit_change_cny'] is None
 
 
 def test_empty_database_is_a_valid_empty_page(client):

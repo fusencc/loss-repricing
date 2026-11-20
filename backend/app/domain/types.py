@@ -8,6 +8,7 @@ from typing import Annotated, Any, Literal
 from pydantic import AwareDatetime, BaseModel, Field, StrictInt, StrictStr
 
 from .money import MoneyRatio
+from .price_reference import SkuPriceReference
 
 
 Site = Literal["MY", "PH", "SG", "TH", "VN"]
@@ -117,7 +118,7 @@ class OnlineProfitCheck(BaseModel):
         """缺库存是经授权的选模假设，告警留证但不作为待处理原因。"""
         return ["海外库存缺失，已按直发模型计算，请核实库存"] if self.overseas_stock is None else []
 
-    def problem(self, now, business_date):
+    def problem(self, now, business_date, *, minimum_margin_required=True):
         from .engine import BEIJING
         # 2026-11-20用户确认：缺库存用直发；负数和仓配冲突仍阻断。
         selected = "overseas" if self.overseas_stock is not None and self.overseas_stock > 0 else "direct"
@@ -127,8 +128,8 @@ class OnlineProfitCheck(BaseModel):
                 or self.inventory_observed_at > now
                 or self.inventory_observed_at.astimezone(BEIJING).date() != business_date):
             return "库存日期、部门或利润公式来源未确认"
-        if (not self.model.verified or not self.model.version.strip()
-                or self.model.revenue_factor <= ONLINE_PROFIT_MINIMUM_MARGIN or self.model.fixed_cost < 0):
+        if (not self.model.verified or not self.model.version.strip() or self.model.fixed_cost < 0
+                or (minimum_margin_required and self.model.revenue_factor <= ONLINE_PROFIT_MINIMUM_MARGIN)):
             return "在线利润模型未确认或不能计算在线利润校正额"
         return None
 
@@ -155,6 +156,8 @@ class OnlineState(BaseModel):
     retail_price: FiniteDecimal
     # 没有活动折扣时来源须传 None。零元售价由引擎识别为异常数据。
     marketing_price: FiniteDecimal | None = None
+    # 可选同SKU营销均价，有值时限制最高营销价；没有Top3或查询失败不新增限制。
+    sku_price_reference: SkuPriceReference | None = None
     fee_scope: StrictStr
     # 当前费用模型用于补亏候选价、进档价及回读价的完整在线利润校验。
     profit_check: OnlineProfitCheck | None = None

@@ -24,6 +24,10 @@ from app.services.erp_capture_store import write_verified
 
 SCHEMA = 'sales-current-pricing-fees-v1'
 OVERSEAS = '/Api/api-tiktok-sales/supplierrateoversea/findByPage'
+# TODO(2026-11-20，部门费率来源待排查)：用户确认该页面未及时更新，
+# 本接口返回的部门费率不能据此认定为最新费率，已有计算结果需重新核对。
+# 用户提供并确认准确的表：D:/钉钉/集团二部2026-11费率配置.xlsx。
+# 待用户排查确认后调整取数来源与匹配规则；本次仅备注，尚未切换到该表。
 DEPARTMENT = '/Api/api-tiktok-sales/supplierrate/findByPage'
 PUBLIC = '/Api/api-tiktok-publish/autoPublishConfig/getPublicRatesByShopName'
 

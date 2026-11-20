@@ -1,10 +1,11 @@
 """人工修正沿用同一执行意图、防重锁和回读；批准不等于已改价。
 
 与自动补亏不同，目标实际售价由有权销售员/主管明确提出。仍必须确认当前在线
-身份、仓配、币种、保护、活动和费用模型，校验档位前后库存对应完整在线利润率至少1%。
+身份、仓配、币种、保护和费用模型；有参考时优先参考上限，无参考时要求在线利润率至少1%。
 人工修正不要求关联 ERP 亏损订单，可跳过自动72小时冷却；不把修正价伪造成历史亏损金额。
 """
 from decimal import Decimal, DecimalException
+from app.domain.price_reference import reference_upper_price, describe_price_limit
 from uuid import uuid4
 from sqlalchemy import select
 from app.db import transaction
@@ -77,12 +78,16 @@ def manual_decision(snapshot, online, desired, reason, correction_id, now):
     profit_check = online.profit_check
     if profit_check is None:
         raise ValueError("缺少库存分流、部门费率及完整在线利润公式")
-    if problem := profit_check.problem(now, today):
+    upper = reference_upper_price(online.sku_price_reference, online.currency)
+    if problem := profit_check.problem(now, today, minimum_margin_required=upper is None):
         raise ValueError(problem)
     target = MoneyRatio(desired)
     upload = (target / discount).round_to_step(contract.price_step, contract.rounding)
     actual = MoneyRatio(upload) * discount
-    if (not profit_check.model.meets_minimum_online_margin(target)
+    if upper is not None and (target > upper or actual > upper):
+        # 人工授权绑定明确价格，不能静默改成另一价格后执行旧授权。
+        raise ValueError('人工指定价或进档后营销价超过同SKU参考上限，请修正价格')
+    if upper is None and (not profit_check.model.meets_minimum_online_margin(target)
             or not profit_check.model.meets_minimum_online_margin(actual)):
         raise ValueError("人工指定价的在线利润率未达到1%，请修正价格")
     profit = profit_check.model.profit_exact(actual)
@@ -91,9 +96,13 @@ def manual_decision(snapshot, online, desired, reason, correction_id, now):
     return Decision(key=key,status="待处理",ready=True,reason_code="manual_correction",
         reason="已授权人工修正："+reason,source_row_ids=[],current_actual=current,discount=discount.decimal(),
         target_actual=desired,upload_price=upload,predicted_profit=profit.decimal(),upload_column=contract.upload_column,
-        trace={"formula_version":"manual-online-margin-missing-stock-direct-v4","minimum_margin":str(ONLINE_PROFIT_MINIMUM_MARGIN),"correction_id":correction_id,
+        trace={"formula_version":"manual-online-margin-reference-priority-v6","minimum_margin":str(ONLINE_PROFIT_MINIMUM_MARGIN),
+               "minimum_margin_required":upper is None,"correction_id":correction_id,
                "business_date":today.isoformat(),"evaluated_at":now.isoformat(),
                "online_rows":[online.model_dump(mode="json")],"site_contract":contract.model_dump(mode="json"),
+               **({'sku_price_reference':online.sku_price_reference.model_dump(mode='json')}
+                  if online.sku_price_reference is not None else {}),
+               **({'price_limit':describe_price_limit(upper,target,target)} if upper is not None else {}),
                "source_versions":dict(snapshot.source_versions),"rounded_actual":str(actual.decimal()),
                "warning_codes":(["unknown_history"] if not online.history_known else []) + (["not_sellable"] if not online.sellable else []),
                "warnings":online.profit_check.warnings() + (["近72小时调价历史无法确认，仅告警"] if not online.history_known else []) + (["子 SKU 当前不可售，仅告警"] if not online.sellable else []),

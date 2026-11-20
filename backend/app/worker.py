@@ -80,7 +80,8 @@ class Worker:
                 self._failures.pop("worker.notice_dispatch_failed", None)
         config = settings_value(self.factory)
         local = datetime.fromtimestamp(now, timezone.utc).astimezone(BEIJING)
-        if config["schedule_enabled"] and local.hour >= 8:
+        # 2026-11-20用户确认：北京时间06:30起建立当日唯一任务，晚启动仍补建。
+        if config["schedule_enabled"] and (local.hour, local.minute) >= (6, 30):
             enqueue(self.factory, "run", {"date": local.date().isoformat()}, f"daily:{local.date().isoformat()}")
         if now - self.last_reconcile >= 60:
             self.service.reconcile()
