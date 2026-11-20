@@ -62,8 +62,9 @@ def manual_decision(snapshot, online, desired, reason, correction_id, now):
         raise ValueError("调价历史不完整或仍有未知提交")
     if online.protected:
         raise ValueError("命中人工保护名单")
-    if online.activity_locked or not online.sellable:
-        raise ValueError("活动锁价或不可售，先完成对应人工处理")
+    # 2026-11-20用户暂停活动限制，人工修正与常规定价使用相同口径。
+    if not online.sellable:
+        raise ValueError("当前不可售，先完成对应人工处理")
     if online.currency != SITE_CURRENCIES[key.site] or online.fee_scope != "normal":
         raise ValueError("币种或正常毛利口径不一致")
     if (not contract or not contract.verified or contract.site != key.site or not contract.version

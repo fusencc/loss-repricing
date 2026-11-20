@@ -311,8 +311,7 @@ def _decide(
             return finish("recent_increase", "距离上次确认生效不足 72 小时", status="本轮不调")
 
     # 2026-11-17用户取消销量保护：开放接口仓库销量仅供参考，缺失不阻断。
-    if online.activity_locked:
-        return finish("activity_locked", "商品活动限制当前提价")
+    # 2026-11-20用户暂停活动限制：参加活动不再拦截算价；营销价、折扣及有效价核验保持不变。
     if not online.sellable:
         return finish("not_sellable", "子 SKU 当前不可售")
 

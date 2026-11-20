@@ -241,7 +241,6 @@ def test_exactly_four_sources_are_required(sources):
     [
         {"history_known": False},
         {"pending_submission": True},
-        {"activity_locked": True},
         {"sellable": False},
     ],
 )

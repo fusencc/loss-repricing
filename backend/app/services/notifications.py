@@ -78,13 +78,10 @@ def notice_batch_mode(session, notice):
 
 
 def _notice_category(item):
-    # 活动限制由领域判定 reason_code 确认，不能用原因文案或历史活动字段猜测。
     if item.status == '已核验':
         return '已提价'
     if item.status == '本轮不调':
         return '本轮不调'
-    if (item.decision or {}).get('reason_code') == 'activity_locked':
-        return '活动中'
     return '待处理'
 
 
@@ -99,7 +96,7 @@ def _card_text(summary, batch_mode, items):
     # 时间是这些记录的最近处理时间（北京时间），不以重发时间冒充处理时间。
     processed_at=max(datetime.fromisoformat(item.updated_at) for item in items).astimezone(BEIJING)
     counts=Counter(_notice_category(item) for item in items)
-    breakdown=' · '.join(f'{label} {counts[label]}' for label in ('待处理','活动中','已提价','本轮不调'))
+    breakdown=' · '.join(f'{label} {counts[label]}' for label in ('待处理','已提价','本轮不调'))
     manual=[item for item in items if _notice_category(item)=='待处理']
     details=[]
     for index,item in enumerate(manual,1):
