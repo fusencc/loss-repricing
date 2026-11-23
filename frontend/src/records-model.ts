@@ -10,6 +10,9 @@ export interface RecordStage {
   change_percent: string | null
   // ③ 利润校验行专属：在线利润校正额折合人民币；缺证据为 null，不推断为 0。
   profit_change_cny: string | null
+  // 仅在②有初步补亏后营销价的试算记录时提供；百分数已经由后端换算。
+  trial_profit?: string
+  trial_margin_percent?: string
 }
 export interface RecordStages {
   currency: string | null

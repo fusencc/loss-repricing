@@ -191,7 +191,8 @@ def test_price_stages_split_loss_and_profit_check_steps(client):
         item = session.get(Item, 'i3')
         item.decision = dict(item.decision, current_actual='14', target_actual='34.868', station_loss='11.9602',
                              trace=dict(item.decision['trace'], online_profit={
-                                 'initial_target': '25.9602', 'correction_amount': '8.9078'}))
+                                 'initial_target': '25.9602', 'correction_amount': '8.9078',
+                                 'initial_profit': '-0.8000', 'initial_margin': '-0.0308164'}))
     rows = {row['id']: row for row in client.get('/api/records').json()['items']}
     stages = rows['i3']['decision']['stages']
     assert stages['currency'] == 'MYR' and stages['fx_rate'] == '0.65'
@@ -203,6 +204,9 @@ def test_price_stages_split_loss_and_profit_check_steps(client):
     assert [row['change_percent'] for row in stages['rows']] == [None, '85.43', '34.31']
     # 在线利润率导致的变动只出现在 ③ 利润校验行：校正额 8.9078 MYR × 0.65 = 5.7901 元。
     assert [row['profit_change_cny'] for row in stages['rows']] == [None, None, '5.7901']
+    assert stages['rows'][1]['trial_profit'] == '-0.8000'
+    assert stages['rows'][1]['trial_margin_percent'] == '-3.08'
+    assert all('trial_margin_percent' not in stages['rows'][index] for index in (0, 2))
 
 
 def test_price_stages_never_invent_the_loss_step_or_fx_rate(client):
@@ -210,6 +214,7 @@ def test_price_stages_never_invent_the_loss_step_or_fx_rate(client):
     rows = {row['id']: row for row in client.get('/api/records').json()['items']}
     stages = rows['i3']['decision']['stages']
     assert stages['rows'][1]['price'] is None and stages['rows'][1]['change_cny'] is None
+    assert 'trial_profit' not in stages['rows'][1] and 'trial_margin_percent' not in stages['rows'][1]
     # 上一环节缺失时「比上一环节」留空，不跨行比较制造环比。
     assert stages['rows'][2]['change_cny'] is None and stages['rows'][2]['change_percent'] is None
     # 没有保存在线利润校正额时该列留空，不把缺证据当 0。

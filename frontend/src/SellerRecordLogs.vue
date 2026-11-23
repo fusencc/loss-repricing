@@ -69,6 +69,9 @@ const searchInput = ref<HTMLInputElement | null>(null)
             <div v-for="stage in item.decision.stages.rows" :key="stage.key" :data-stage="stage.key" class="records-stage-field">
               <dt>{{ recordStageLabel(stage) }}</dt>
               <dd><strong>{{ stagePriceLabel(stage, item.decision.stages.currency) }}</strong></dd>
+              <dd v-if="stage.key === 'loss' && stage.trial_profit != null && stage.trial_margin_percent != null">
+                <small>按初步补亏后的营销价试算，每件利润 {{ formatDecimal(stage.trial_profit) }} {{ item.decision.stages.currency ?? '币种未记录' }}，利润率 {{ formatDecimal(stage.trial_margin_percent) }}%</small>
+              </dd>
             </div>
           </template>
           <!-- 没有三环节证据的历史记录保留原两价和变动，不补造中间环节。 -->

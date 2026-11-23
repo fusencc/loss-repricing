@@ -406,6 +406,9 @@ def _decide(
         # 11/12会议后段：先直接补亏，再只复算库存选定仓配的完整在线利润。
         # 无参考时要求1%；有参考时优先上限，利润不足或需降价均不再拦截。
         initial_target = MoneyRatio(current) + station_ratio
+        # 单独保存补亏候选价的站点币利润与利润率，供核对利润校正和参考限价前的状态。
+        initial_profit = profit_check.model.profit_exact(initial_target)
+        initial_margin = initial_profit / initial_target
         minimum_actual = profit_check.minimum_actual_price()
         unlimited_target = max(initial_target, minimum_actual) if minimum_actual is not None else None
         target_ratio = unlimited_target
@@ -460,6 +463,8 @@ def _decide(
             "inventory_observed_at": profit_check.inventory_observed_at.isoformat(),
             "source_ref": profit_check.source_ref, "model": profit_check.model.model_dump(mode="json"),
             "initial_target": str(initial_target.decimal()),
+            "initial_profit": str(initial_profit.decimal()),
+            "initial_margin": str(initial_margin.decimal()),
             "break_even": str(minimum_actual.decimal()) if minimum_actual is not None else None,
             "correction_amount": str(online_profit_correction.decimal()) if online_profit_correction is not None else None,
             "adjusted": unlimited_target is not None and unlimited_target > initial_target,

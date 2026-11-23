@@ -27,6 +27,18 @@ const item = () => ({
 })
 const render = async row => renderToString(createSSRApp(Component, { seller: groupBySeller([row])[0] }))
 
+test('the initial marketing price shows its saved trial profit including zero', async () => {
+  const row = item()
+  const loss = row.decision.stages.rows.find(stage => stage.key === 'loss')
+  assert.doesNotMatch(await render(row), /按初步补亏后的营销价试算/)
+  loss.trial_profit = '-1.0400'
+  loss.trial_margin_percent = '-9.29'
+  assert.match(await render(row), /按初步补亏后的营销价试算，每件利润 -1\.04 PHP，利润率 -9\.29%/)
+  loss.trial_profit = '0.0000'
+  loss.trial_margin_percent = '0.00'
+  assert.match(await render(row), /每件利润 0 PHP，利润率 0%/)
+})
+
 test('the dialog count follows its accessible title and receives the log filter count', async () => {
   const { readFile } = await import('node:fs/promises')
   const page = await readFile(new URL('../src/RecordsPage.vue', import.meta.url), 'utf8')

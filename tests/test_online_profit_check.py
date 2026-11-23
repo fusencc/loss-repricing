@@ -1,6 +1,6 @@
 """完整在线利润率1%校验，手算预期，不访问真实系统。"""
 from datetime import timedelta
-from decimal import Decimal
+from decimal import Decimal, localcontext
 import pytest
 from app.domain.types import FeeModel, OnlineProfitCheck
 from test_pricing import single, NOW, contract
@@ -21,6 +21,28 @@ def test_negative_online_profit_raises_original_compensation_to_one_percent():
     assert Decimal(result.trace["online_profit"]["rounded_margin"])>=Decimal(".01")
     assert result.trace["online_profit"]["initial_target"]=="11.2"
     assert result.trace["online_profit"]["adjusted"] is True
+
+
+@pytest.mark.parametrize(("cost", "reference", "initial_profit", "upload_price"), [
+    ("8", None, "0.96", "22.40"),
+    ("10", None, "-1.04", "25.32"),
+    ("10", "9", "-1.04", "18.00"),
+])
+def test_records_profit_at_compensated_price_before_floor_and_cap(cost, reference, initial_profit, upload_price):
+    from test_sku_price_reference import ceiling
+
+    result = single(
+        online_fields={"retail_price": "20", "marketing_price": "10", "profit_check": check(cost=cost),
+                       "sku_price_reference": ceiling(reference) if reference else None},
+        snapshot_fields={"contracts": {"MY": contract(rounding="ROUND_UP")}},
+    )
+    assert result.ready and result.upload_price == Decimal(upload_price)
+    profit = result.trace["online_profit"]
+    assert Decimal(profit["initial_target"]) == Decimal("11.2")
+    assert Decimal(profit["initial_profit"]) == Decimal(initial_profit)
+    with localcontext() as ctx:
+        ctx.prec = 50
+        assert Decimal(profit["initial_margin"]) == Decimal(initial_profit) / Decimal("11.2")
 
 
 def test_discount_and_tick_are_applied_after_selected_profit_floor():

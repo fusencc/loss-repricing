@@ -118,7 +118,7 @@ def price_stages(decision, trace, snapshot, item_key):
         change_cny = to_cny(amount - previous) if amount is not None and previous is not None else None
         change_percent = (None if amount is None or previous is None or previous == 0
                           else (amount - previous) / previous * Decimal(100))
-        rows.append({
+        row = {
             'key': key, 'label': label,
             'price': None if amount is None else _display(amount),
             'cny': None if cny is None else _display(cny),
@@ -127,7 +127,15 @@ def price_stages(decision, trace, snapshot, item_key):
             # ③ 行展示在线利润校正额折合人民币；缺证据为 null，显示层不推断为 0。
             'profit_change_cny': None if key != 'break_even' or profit_change_cny is None
                                  else _display(profit_change_cny),
-        })
+        }
+        if key == 'loss' and initial is not None:
+            # ② 的价格是 BD 公式的首次试算输入。只展示该次判定保存的结果。
+            initial_profit = _decimal(online_profit.get('initial_profit'))
+            initial_margin = _decimal(online_profit.get('initial_margin'))
+            if initial_profit is not None and initial_margin is not None:
+                row['trial_profit'] = _display(initial_profit)
+                row['trial_margin_percent'] = _display(initial_margin * 100, PERCENT_QUANT)
+        rows.append(row)
         previous = amount
 
     return {
