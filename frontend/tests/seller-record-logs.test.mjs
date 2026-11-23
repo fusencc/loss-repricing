@@ -39,16 +39,20 @@ test('the initial marketing price shows its saved trial profit including zero', 
   assert.match(await render(row), /每件利润 0 PHP，利润率 0%/)
 })
 
-test('the dialog count follows its accessible title and receives the log filter count', async () => {
+test('dialog title shows evidence dates without total or hit counts, while filter buttons show full seller counts including zero', async () => {
   const { readFile } = await import('node:fs/promises')
   const page = await readFile(new URL('../src/RecordsPage.vue', import.meta.url), 'utf8')
-  assert.match(page, /#header="\{ titleId, titleClass \}"[\s\S]*<h2 :id="titleId"[^>]*>\{\{ logTitle \}\}<\/h2>\s*<span class="records-log-count" role="status" aria-atomic="true">/)
-  assert.match(page, /共 \{\{ logTotal \}\} 条记录.*当前筛选命中 \{\{ logHitCount \}\} 条/)
-  assert.match(page, /@hit-count="logHitCount = \$event"/)
-  const counts = []
-  const seller = groupBySeller([item()])[0]
-  await renderToString(createSSRApp(Component, { seller, onHitCount: count => counts.push(count) }))
-  assert.deepEqual(counts, [1])
+  const source = await readFile(new URL('../src/SellerRecordLogs.vue', import.meta.url), 'utf8')
+  assert.match(page, /#header="\{ titleId, titleClass \}"[\s\S]*<h2 :id="titleId"[^>]*>\{\{ logTitle \}\}<\/h2>\s*<p class="records-log-date">\{\{ logDate \}\}<\/p>/)
+  assert.doesNotMatch(page + source, /logHitCount|logTotal|records-log-count|hit-count|hitCount|defineEmits/)
+  assert.match(source, /seller\.items\.length : recordStatusCount\(seller\.counts, state\)/)
+  const seller = groupBySeller([item(), { ...item(), id: 'second', status: '待处理' }, { ...item(), id: 'third', status: '已核验' }])[0]
+  const saved = structuredClone(seller)
+  const html = await renderToString(createSSRApp(Component, { seller }))
+  for (const [name, count] of [['全部', 3], ['已提价', 1], ['待处理', 2], ['本轮不调', 0]]) {
+    assert.ok(html.includes(`${name} <span class="records-log-filter-count">${count}</span>`))
+  }
+  assert.deepEqual(seller, saved)
 })
 
 test('compact log retains identity, status, three horizontal stage fields and upload evidence without formula text', async () => {
@@ -105,7 +109,7 @@ test('upload is a peer price field and all execution statuses occupy a separate 
   }
   const { readFile } = await import('node:fs/promises')
   const css = await readFile(new URL('../src/records.css', import.meta.url), 'utf8')
-  assert.match(css, /\.records-log\{display:grid;grid-template-columns:minmax\(140px,\.85fr\) minmax\(0,4fr\) minmax\(120px,\.85fr\);align-items:start;/)
+  assert.match(css, /\.records-log\{display:grid;grid-template-columns:minmax\(min-content,1\.2fr\) minmax\(0,4fr\) minmax\(120px,\.85fr\);align-items:start;/)
   assert.match(css, /\.records-log-state\{grid-column:3;grid-row:1;align-self:start;justify-self:stretch;display:flex;flex-direction:column;align-items:center;gap:7px;min-width:0\}/)
   assert.match(css, /\.records-log-stages\{display:grid;grid-template-columns:repeat\(5,minmax\(0,1fr\)\);align-items:start;/)
   assert.match(css, /@media\(max-width:900px\)\{[\s\S]*?\.records-log-state\{grid-column:2;grid-row:1\}[\s\S]*?\.records-log-stages\{grid-column:1\/-1;grid-row:2\}/)
@@ -159,6 +163,28 @@ test('missing concrete item IDs stay optional and never use parent IDs or SKU as
     assert.match(html, /data-stage="original"/)
     assert.match(html, /<dt>上传含税价<\/dt><dd><strong>18\.24 PHP<\/strong><\/dd>/)
   }
+})
+
+test('item ID stays a single text-only copy target while SKU keeps its icon and phone identity has its own row', async () => {
+  const row = item()
+  row.key.item_id = '1731919633741415702'
+  const html = await render(row)
+  const buttons = [...html.matchAll(/<button[^>]*class="records-id-copy-button"[\s\S]*?<\/button>/g)].map(match => match[0])
+  assert.equal(buttons.length, 2)
+  assert.match(buttons[0], /复制SKU：SYNTHETIC-001[\s\S]*<svg/)
+  assert.match(buttons[1], /复制商品ID：1731919633741415702/)
+  assert.match(buttons[1], /title="点击复制商品ID"/)
+  assert.match(buttons[1], /<span>商品ID：1731919633741415702<\/span>/)
+  assert.doesNotMatch(buttons[1], /<svg|<br|复制<\/span>/)
+  const { readFile } = await import('node:fs/promises')
+  const css = await readFile(new URL('../src/records.css', import.meta.url), 'utf8')
+  const source = await readFile(new URL('../src/RecordIdCopy.vue', import.meta.url), 'utf8')
+  assert.match(source, /showIcon\?: boolean/)
+  assert.match(source, /showIcon: true/)
+  assert.match(source, /<CopyDocument v-if="showIcon"/)
+  assert.match(css, /\.records-id-copy-text-only \.records-id-copy-button\{white-space:nowrap\}/)
+  assert.match(css, /@media\(max-width:480px\)\{[\s\S]*?\.records-log-heading\{grid-column:1;grid-row:1\}[\s\S]*?\.records-log-state\{grid-column:1;grid-row:2;align-items:flex-start\}[\s\S]*?\.records-log-stages\{grid-column:1;grid-row:3\}/)
+  assert.doesNotMatch(css, /text-overflow:ellipsis/)
 })
 
 test('identity copy buttons expose distinct accessible names and missing IDs remain plain text', async () => {
@@ -230,7 +256,7 @@ test('saved historical threshold reasons are displayed as text, escaped, and nev
   const { readFile } = await import('node:fs/promises')
   const css = await readFile(new URL('../src/records.css', import.meta.url), 'utf8')
   assert.match(css, /\.records-log-state \.records-log-reason\{[^}]*white-space:pre-wrap;overflow-wrap:anywhere/)
-  assert.match(css, /grid-template-columns:minmax\(0,1fr\) minmax\(0,\.8fr\)/)
+  assert.match(css, /grid-template-columns:minmax\(min-content,1fr\) minmax\(0,\.8fr\)/)
 })
 
 test('optional reference evidence and price-cap explanation remain accessible', async () => {

@@ -5,7 +5,7 @@ import { formatDecimal } from './decimal-display.ts'
 import SkuPriceReferenceView from './SkuPriceReference.vue'
 import RecordIdCopy from './RecordIdCopy.vue'
 import { recordPrice, recordTone, recordStatusLabel, recordDisplayStates,
-  changeLabel, isPositiveChange, filterRecordItems, stagePriceLabel, recordStageLabel, recordStateReason,
+  changeLabel, isPositiveChange, filterRecordItems, stagePriceLabel, recordStageLabel, recordStateReason, recordStatusCount,
   type RecordStatusFilter,
   type SellerGroup } from './records-model'
 
@@ -15,11 +15,9 @@ const props = defineProps<{ seller: SellerGroup }>()
 const statusFilter = ref<RecordStatusFilter>('全部')
 const keyword = ref('')
 const statuses: RecordStatusFilter[] = ['全部', ...recordDisplayStates]
+// 数量固定取该销售员完整记录；状态和关键词只筛选下方内容，不让按钮数字随自身筛选缩减。
 
 const visibleItems = computed(() => filterRecordItems(props.seller.items, statusFilter.value, keyword.value))
-const emit = defineEmits<{ hitCount: [count: number] }>()
-// 弹窗标题播报当前筛选命中数；部门首页统计与下载不受影响。
-watch(() => visibleItems.value.length, (count) => emit('hitCount', count), { immediate: true })
 
 // 每次打开人员弹窗重置筛选，避免上一位销售员的条件串到本人日志。
 watch(() => props.seller.id, () => {
@@ -37,7 +35,7 @@ const searchInput = ref<HTMLInputElement | null>(null)
         <button v-for="state in statuses" :key="state" type="button"
           :aria-pressed="statusFilter === state"
           :class="{ active: statusFilter === state }"
-          @click="statusFilter = state">{{ state === '全部' ? '全部' : recordStatusLabel(state) }}</button>
+          @click="statusFilter = state"><i v-if="state !== '全部'" class="records-log-filter-dot" :class="recordTone(state)" aria-hidden="true"></i>{{ state === '全部' ? '全部' : recordStatusLabel(state) }} <span class="records-log-filter-count">{{ state === '全部' ? seller.items.length : recordStatusCount(seller.counts, state) }}</span></button>
       </div>
       <div class="records-log-search" role="search">
         <input ref="searchInput" v-model="keyword" type="search"
@@ -54,7 +52,7 @@ const searchInput = ref<HTMLInputElement | null>(null)
             <h3><RecordIdCopy v-if="item.key.sku" :value="item.key.sku" label="SKU" /><template v-else>SKU 未记录</template></h3>
             <p>{{ item.shop_name || item.key.shop_id }} / {{ item.key.site }}</p>
             <!-- key.item_id 是规范身份中的具体商品 ID；不拿产品 ID 或主 SKU 补齐，缺失只影响展示。 -->
-            <p><RecordIdCopy v-if="item.key.item_id" :value="item.key.item_id" label="商品ID" prefix="商品ID：" /><template v-else>商品ID：未记录</template></p>
+            <p><RecordIdCopy v-if="item.key.item_id" :value="item.key.item_id" label="商品ID" prefix="商品ID：" :show-icon="false" /><template v-else>商品ID：未记录</template></p>
           </div>
         </header>
 

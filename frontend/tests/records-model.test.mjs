@@ -1,6 +1,33 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { groupBySeller, effectiveTimeLabel } from '../src/records-model.ts'
+import { groupBySeller, effectiveTimeLabel, recordDateLabel } from '../src/records-model.ts'
+
+test('title dates distinguish platform effective time, first verification and record updates in Beijing time', () => {
+  const record = (status, execution, updated_at = '2026-11-22T18:00:00Z') => ({ status, execution, updated_at })
+  const effective = record('已核验', { effective_time_source: 'effective_at', effective_at: '2026-11-17T18:00:00Z', confirmed_at: '2026-11-20T01:00:00Z' })
+  const confirmed = record('已核验', { effective_time_source: 'confirmed_at', effective_at: '2026-11-17T01:00:00Z', confirmed_at: '2026-11-19T01:00:00Z' })
+  assert.equal(recordDateLabel([effective]), '提价生效日期：2026/11/18（北京时间）')
+  assert.equal(recordDateLabel([confirmed]), '提价核验日期：2026/11/19（北京时间）')
+  // 受理、待核验与普通更新时间均不能冒充真实提价；即使存在未终结回执也只展示记录更新日期。
+  const pending = record('待核验', { state: 'accepted', effective_at: '2026-11-17T01:00:00Z', confirmed_at: '2026-11-19T01:00:00Z' })
+  assert.equal(recordDateLabel([pending]), '记录更新日期：2026/11/23（北京时间）')
+  assert.equal(recordDateLabel([record('待处理', null)]), '记录更新日期：2026/11/23（北京时间）')
+  const mixed = [pending, confirmed, effective]
+  const saved = structuredClone(mixed)
+  assert.equal(recordDateLabel(mixed), '提价生效日期：2026/11/18；提价核验日期：2026/11/19；记录更新日期：2026/11/23（北京时间）')
+  assert.deepEqual(mixed, saved)
+})
+
+test('title dates show a single day or sorted range and explicitly preserve missing or invalid date evidence', () => {
+  const record = updated_at => ({ status: '待处理', execution: null, updated_at })
+  assert.equal(recordDateLabel([record('2026-11-23T01:00:00Z'), record('2026-11-17T18:00:00Z'), record('2026-11-23T01:00:00Z')]),
+    '记录更新日期：2026/11/18 至 2026/11/23（北京时间）')
+  for (const value of [undefined, null, '', 'not-a-date', '2026-11-23', '2026-11-23T01:00:00']) {
+    assert.equal(recordDateLabel([record(value)]), '提价日期未记录')
+  }
+  assert.equal(recordDateLabel([]), '提价日期未记录')
+  assert.equal(recordDateLabel([record(null), record('2026-11-23T01:00:00+08:00')]), '记录更新日期：2026/11/23；提价日期未记录（北京时间）')
+})
 
 const row = (id, owner, status='待核验') => ({
   id, seller: {id:owner,name:'同名销售'}, status,
@@ -118,7 +145,7 @@ test('overview keeps real statuses separate from the unconnected activity placeh
 })
 
 test('pending display counts merge both backend statuses without mutating evidence', async () => {
-  const { recordStatusCount, recordDisplayStates, recordTone, filterRecordItemsCount } = await import('../src/records-model.ts')
+  const { recordStatusCount, recordDisplayStates, recordTone, filterRecordItems } = await import('../src/records-model.ts')
   const counts = { '已核验': 2, '待核验': 3, '待处理': 4, '本轮不调': 1 }
   const original = structuredClone(counts)
   assert.deepEqual(recordDisplayStates, ['已核验', '待处理', '本轮不调'])
@@ -130,7 +157,7 @@ test('pending display counts merge both backend statuses without mutating eviden
   assert.deepEqual(counts, original)
   const items = [row('1','a','待核验'), row('2','a','待处理'), row('3','a','已核验')]
   const saved = structuredClone(items)
-  assert.equal(filterRecordItemsCount(items, '待处理', ''), 2)
+  assert.equal(filterRecordItems(items, '待处理', '').length, 2)
   assert.deepEqual(items, saved)
 })
 

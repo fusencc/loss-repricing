@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { Download, Search } from '@element-plus/icons-vue'
 import { api, errorMessage, timeLabel } from './api'
-import { groupBySeller, recordTone, recordStatusLabel, recordStatusCount, recordDisplayStates, recordDepartments, type RecordData, type SellerGroup } from './records-model'
+import { groupBySeller, recordTone, recordStatusLabel, recordStatusCount, recordDisplayStates, recordDepartments, recordDateLabel, type RecordData, type SellerGroup } from './records-model'
 import { formatDecimal } from './decimal-display'
 import { downloadSellerExcel } from './records-download'
 import SellerRecordLogs from './SellerRecordLogs.vue'
@@ -19,8 +19,6 @@ const refreshing = ref(false)
 const error = ref('')
 const downloadError = ref('')
 const dialogOpen = ref(false)
-const logHitCount = ref<number | null>(null)
-const logTotal = computed(() => activeSeller.value?.items.length ?? 0)
 const logTitle = computed(() => `${activeSeller.value?.name ?? '销售员'}的提价日志`)
 const selectedSeller = ref<string | null>(null)
 const sellerQuery = ref('')
@@ -32,6 +30,7 @@ const visibleGroups = computed(() => {
   return query ? groups.value.filter(group => group.name.toLocaleLowerCase().includes(query)) : groups.value
 })
 const activeSeller = computed(() => groups.value.find(group => group.id === selectedSeller.value))
+const logDate = computed(() => recordDateLabel(activeSeller.value?.items ?? []))
 const departmentName = computed(() => departments.find(entry => entry.id === department.value)?.name ?? '部门提价记录')
 const sellerCount = computed(() => groups.value.filter(group => group.assigned).length)
 const states = recordDisplayStates
@@ -76,7 +75,6 @@ function openSeller(group: SellerGroup, event: MouseEvent) {
   const target = event.currentTarget as HTMLElement
   opener = target instanceof HTMLButtonElement ? target : target.querySelector<HTMLButtonElement>('.records-person-button')
   opener?.focus()
-  logHitCount.value = null
   selectedSeller.value = group.id
   dialogOpen.value = true
 }
@@ -162,14 +160,12 @@ onUnmounted(() => { ++request; controller?.abort(); window.clearInterval(timer) 
       <template #header="{ titleId, titleClass }">
         <div class="records-log-title">
           <h2 :id="titleId" :class="titleClass">{{ logTitle }}</h2>
-          <span class="records-log-count" role="status" aria-atomic="true">
-            共 {{ logTotal }} 条记录<span v-if="logHitCount !== null && logHitCount !== logTotal">，当前筛选命中 {{ logHitCount }} 条</span>
-          </span>
+          <p class="records-log-date">{{ logDate }}</p>
           <button v-if="activeSeller" type="button" class="records-download records-log-download" title="下载Excel" aria-label="下载Excel" @click.stop="downloadSeller(activeSeller)"><Download aria-hidden="true" /></button>
         </div>
         <p v-if="downloadError" class="records-error" role="alert">{{ downloadError }}</p>
       </template>
-      <SellerRecordLogs v-if="activeSeller" :seller="activeSeller" @hit-count="logHitCount = $event" />
+      <SellerRecordLogs v-if="activeSeller" :seller="activeSeller" />
     </el-dialog>
   </div>
 </template>

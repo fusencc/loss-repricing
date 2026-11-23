@@ -34,6 +34,9 @@
 .records-log-filter{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:13px 28px;border-bottom:1px solid var(--r-line);flex:none;flex-wrap:wrap}
 .records-log-states{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
 .records-log-states button{font:inherit;font-size:12px;white-space:nowrap;color:var(--r-muted);border:1px solid transparent;border-radius:8px;background:transparent;padding:6px 11px;cursor:pointer}
+.records-log-filter-dot{display:inline-block;width:5px;height:5px;margin-right:6px;border-radius:50%;background:currentColor;vertical-align:middle;color:var(--r-muted)}
+.records-log-filter-dot.verified{color:var(--r-mint)}
+.records-log-filter-dot.attention{color:var(--r-amber)}
 .records-log-states button:hover{background:#ffffff09;color:var(--r-text)}
 .records-log-states button.active{color:var(--r-mint);background:#b4f4df13;border-color:#b4f4df28}
 .records-log-states button:focus-visible{outline:2px solid var(--r-mint);outline-offset:2px}
@@ -42,11 +45,12 @@
 .records-log-search input::placeholder{color:var(--r-faint)}
 .records-log-search input:focus-visible{outline:2px solid var(--r-mint);outline-offset:1px}
 .records-log-search-icon{position:absolute;right:9px;width:14px;height:14px;color:var(--r-faint);pointer-events:none}
-.records-log-title{display:flex;align-items:baseline;flex-wrap:wrap;gap:3px 12px}
+.records-log-title{display:flex;align-items:baseline;flex-wrap:wrap;gap:6px 12px;min-width:0}
 .records-log-title h2{margin:0;min-width:0;overflow-wrap:anywhere}
-/* 弹窗标题行右侧下载入口复用首页按钮样式，靠右并与标题基线对齐。 */
-.records-log-title .records-log-download{margin-left:auto;align-self:center;flex:none}
-.records-log-count{font-size:11px;color:var(--r-faint)}
+/* 标题、证据日期、下载按内容自然排列并换行；关闭按钮的空间由弹窗 header 右内边距保留。 */
+.records-log-title .records-log-download{align-self:center;flex:none}
+.records-log-date{margin:0;min-width:0;font-size:11px;line-height:1.6;color:var(--r-faint);overflow-wrap:anywhere}
+.records-log-filter-count{display:inline-block;min-width:1em;margin-left:4px;font-variant-numeric:tabular-nums}
 .records-log-empty{margin:0;padding:38px 20px;text-align:center;font-size:13px;color:var(--r-muted)}
 @media(max-width:680px){.records-log-filter{padding:12px 19px}.records-log-search input{width:100%}.records-log-search{flex:1}}
 
@@ -55,7 +59,8 @@
 .records-search input:focus-visible{outline:2px solid currentColor;outline-offset:2px}
 
 /* 商品身份、同层价格字段、独立执行状态三列；价格只展示已保存金额。 */
-.records-log{display:grid;grid-template-columns:minmax(140px,.85fr) minmax(0,4fr) minmax(120px,.85fr);align-items:start;gap:12px 18px;padding:14px 0;border-bottom:1px solid var(--r-line)}
+/* 身份列下限由完整商品 ID 的文本宽度决定；只增加必要空间，价格仍共享剩余宽度。 */
+.records-log{display:grid;grid-template-columns:minmax(min-content,1.2fr) minmax(0,4fr) minmax(120px,.85fr);align-items:start;gap:12px 18px;padding:14px 0;border-bottom:1px solid var(--r-line)}
 .records-log:last-child{border-bottom:0}
 .records-log-heading{display:flex;flex-direction:column;align-items:flex-start;gap:9px;min-width:0}
 .records-log-heading>div:first-child{min-width:0}
@@ -65,6 +70,8 @@
 .records-id-copy{display:block;min-width:0}
 .records-id-copy-button{display:inline-flex;align-items:baseline;gap:5px;max-width:100%;padding:0;border:0;border-radius:3px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;user-select:text}
 .records-id-copy-button>span{min-width:0;overflow-wrap:anywhere}
+/* 商品 ID 前缀和值是一段完整可复制文本；SKU 仍可换行并保留图标。 */
+.records-id-copy-text-only .records-id-copy-button{white-space:nowrap}
 .records-id-copy-button svg{width:12px;height:12px;flex:none;align-self:center;color:var(--r-muted)}
 .records-id-copy-button:hover{color:var(--r-mint)}
 .records-id-copy-button:focus-visible{outline:2px solid var(--r-mint);outline-offset:3px}
@@ -82,7 +89,7 @@
 .records-log-target dd,.records-change-up{color:var(--r-mint)}
 .records-log>.sku-price-reference{grid-column:1/-1;margin:0;font-size:12px}
 @media(max-width:900px){
-  .records-log{grid-template-columns:minmax(0,1fr) minmax(0,.8fr);gap:10px 14px}
+  .records-log{grid-template-columns:minmax(min-content,1fr) minmax(0,.8fr);gap:10px 14px}
   .records-log-heading{grid-column:1;grid-row:1}
   .records-log-state{grid-column:2;grid-row:1}
   .records-log-stages{grid-column:1/-1;grid-row:2}
@@ -92,4 +99,11 @@
 @media(max-width:680px){
   .records-log{padding:12px 0;gap:10px}
   .records-log-stages{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+/* 手机上给完整商品 ID 独立一行；状态说明和价格各占自身行，不裁剪 ID 或覆盖金额。 */
+@media(max-width:480px){
+  .records-log{grid-template-columns:minmax(0,1fr)}
+  .records-log-heading{grid-column:1;grid-row:1}
+  .records-log-state{grid-column:1;grid-row:2;align-items:flex-start}
+  .records-log-stages{grid-column:1;grid-row:3}
 }

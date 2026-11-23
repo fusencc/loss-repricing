@@ -81,6 +81,41 @@ export function effectiveTimeLabel(source: string | null | undefined): string {
   return '保护起算时间（来源未记录）'
 }
 
+// 标题日期只投影保存的执行证据。首次核验不是平台真实生效，更新时间也不是提交或生效时间。
+// 与 timeLabel 一致使用北京时间及中文年月日格式；无时区、无效或缺失的时间不猜今天。
+export function recordDateLabel(items: RecordItem[]): string {
+  const dates = new Map<string, string[]>()
+  const format = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+  })
+  const dateText = (value: string | null | undefined): string | null => {
+    if (!value || !/T.*(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return null
+    const date = new Date(value)
+    return Number.isNaN(date.getTime()) ? null : format.format(date)
+  }
+  let missing = items.length === 0
+  for (const item of items) {
+    const execution = item.execution
+    const effective = item.status === '已核验' && execution?.effective_time_source === 'effective_at'
+      ? dateText(execution.effective_at) : null
+    const confirmed = item.status === '已核验' ? dateText(execution?.confirmed_at) : null
+    const updated = dateText(item.updated_at)
+    const label = effective ? '提价生效日期' : confirmed ? '提价核验日期' : '记录更新日期'
+    const date = effective ?? confirmed ?? updated
+    if (!date) { missing = true; continue }
+    const group = dates.get(label) ?? []
+    group.push(date)
+    dates.set(label, group)
+  }
+  const labels = ['提价生效日期', '提价核验日期', '记录更新日期'].flatMap(label => {
+    const sorted = [...new Set(dates.get(label) ?? [])].sort()
+    if (!sorted.length) return []
+    return [`${label}：${sorted[0]}${sorted.length > 1 ? ` 至 ${sorted[sorted.length - 1]}` : ''}`]
+  })
+  if (missing) labels.push('提价日期未记录')
+  return `${labels.join('；')}${dates.size ? '（北京时间）' : ''}`
+}
+
 export function recordStatusLabel(status: string): string {
   // 仅合并前端展示：后台待核验仍只核验、不重传，原始状态和执行证据保持不变。
   return ({ '已核验': '已提价', '待核验': '待处理', '待处理': '待处理' }[status] ?? status)
@@ -160,10 +195,6 @@ export function filterRecordItems(items: RecordItem[], status: RecordStatusFilte
       item.shop_name, item.key.shop_id].filter(Boolean).join('\n').toLocaleLowerCase()
     return haystack.includes(keyword)
   })
-}
-
-export function filterRecordItemsCount(items: RecordItem[], status: RecordStatusFilter, query: string): number {
-  return filterRecordItems(items, status, query).length
 }
 
 export const recordDepartments = ['Tiktok一部', 'Tiktok五部', 'Tiktok十二部', 'Tiktok二十二部'].map(name => ({ id: 'department:' + name, name }))

@@ -21,6 +21,7 @@ from test_api import client, login
 
 
 class RenamedSource(DemoAdapter):
+    # 当前规则下8个demo商品中仅非亏损样本不提交；销量、活动及未知历史不再阻断。
     suffix = ''
     waiting = True
     calls = 0
@@ -47,15 +48,15 @@ def test_sku_rename_cannot_bypass_unknown_or_verified_cooldown(context):
     enable(factory)
     service = PricingService(factory, source, cfg)
     service.run_batch('first')
-    assert source.calls == 4
+    assert source.calls == 7
     source.suffix = '-renamed'
     service.run_batch('renamed')
-    assert source.calls == 4
+    assert source.calls == 7
     source.waiting = False
     service.reconcile()
     source.suffix = '-renamed-again'
     service.run_batch('verified-renamed')
-    assert source.calls == 4
+    assert source.calls == 7
 
 
 def test_ambiguous_aliases_are_blocked_without_combining_loss_samples(context):
@@ -141,7 +142,7 @@ def test_midnight_stops_cached_submissions_and_queues_fresh_day(context, monkeyp
             assert queued[0].dedupe_key == f'daily:{today + timedelta(days=1)}'
         assert session.get(Batch, first).business_date == today.isoformat()
     worker.tick(clock[0].timestamp())
-    assert len(calls) == 4
+    assert len(calls) == 7
     assert all(decision_day == submit_day for decision_day, submit_day in calls)
     assert today + timedelta(days=1) in collected
 
@@ -154,7 +155,7 @@ def test_current_items_and_counts_omit_resolved_history_but_preserve_batches(cli
     state.service.run_batch('enabled')
     current = client.get('/api/items').json()
     verified = {row['key']['item_id'] for row in current if row['status'] == '已核验'}
-    assert len(verified) == 4
+    assert len(verified) == 7
     pending = client.get('/api/items?status=待处理').json()
     assert not any(row['key']['item_id'] in verified for row in pending)
     assert len(current) == 8
@@ -174,10 +175,10 @@ def test_current_items_keep_pending_execution_even_after_newer_blocked_record(cl
     source.suffix = '-renamed'
     second = service.run_batch('blocked')
     rows = client.get('/api/items?status=待核验').json()
-    assert len(rows) == 4
+    assert len(rows) == 7
     assert all(row['batch_id'] == first and row['execution']['state'] in {'accepted', 'unknown'} for row in rows)
     current = client.get('/api/items').json()
-    assert len(current) == 12  # 最新8条，加上仍未核验的旧4条。
+    assert len(current) == 15  # 最新8条，加上仍未核验的旧7条。
     assert all('target_id' in row for row in current)
     with state.factory() as session:
         assert session.get(Batch, second)
@@ -222,7 +223,7 @@ def test_migration_preserves_legacy_verified_cooldown_and_json_history(context):
     migrate_legacy(factory)
     source.suffix = '-after-migration'
     service.run_batch('renamed-after-migration')
-    assert source.calls == 4
+    assert source.calls == 7
     with factory() as session:
         assert {e.id: e.request for e in session.scalars(select(Execution))} == before
 
@@ -255,16 +256,16 @@ def test_migration_keeps_all_legacy_pending_until_each_is_reconciled(context):
     migrate_legacy(factory)
     source.suffix = '-new-alias'
     service.run_batch('after-migration')
-    assert source.calls == 4
+    assert source.calls == 7
     rejected = {first_id}
     source.lookup = lambda eid, *args: LookupResult('rejected') if eid in rejected else LookupResult('unknown')
     service.reconcile()
     service.run_batch('one-resolved')
-    assert source.calls == 4
+    assert source.calls == 7
     rejected.add(second_id)
     service.reconcile()
     service.run_batch('both-resolved')
-    assert source.calls == 5
+    assert source.calls == 8
 
 
 @pytest.mark.parametrize('cross_at', ['refresh', 'evaluation'])
@@ -343,7 +344,7 @@ def test_migration_uses_latest_guard_time_and_keeps_it_after_pending_rejection(c
     service.reconcile()
     source.suffix = '-renamed-after-rejection'
     service.run_batch('cooldown-after-legacy-rejection')
-    assert source.calls == 4
+    assert source.calls == 7
 
 
 def test_migration_unmappable_protected_guard_fails_without_dropping_history(context):
@@ -427,12 +428,12 @@ def test_execution_dependent_proposal_follows_terminal_outcome_without_rewriting
     pending = client.get('/api/items?status=待处理').json()
     if outcome == 'verified':
         assert not any(row['id'] in {r['id'] for r in affected} for row in pending)
-        assert client.get('/api/overview').json()['counts']['已核验'] == 4
+        assert client.get('/api/overview').json()['counts']['已核验'] == 7
     else:
         assert all(row in pending for row in affected)
         assert all(row['reason'] == '确认逐行拒绝' for row in affected)
     assert client.get(f'/api/batches/{blocked}').json() == historical_before
-    assert source.calls == 4
+    assert source.calls == 7
 
 
 def test_terminal_dependency_does_not_hide_newer_independent_mapping_exception(client):
@@ -459,7 +460,7 @@ def test_terminal_dependency_does_not_hide_newer_independent_mapping_exception(c
     assert affected[0]['batch_id'] == blocked
     assert affected[0]['decision']['reason_code'] == 'ambiguous_target_alias'
     assert affected[0]['status'] == '待处理'
-    assert source.calls == 4
+    assert source.calls == 7
 
 
 def test_current_projection_keeps_multiple_pending_dependencies_until_all_resolve(client):
@@ -494,7 +495,7 @@ def test_current_projection_keeps_multiple_pending_dependencies_until_all_resolv
     assert len(rows) == 2
     assert any(row['id'] == alias_item_id and row['status'] == '待核验' for row in rows)
     assert any(row['decision']['reason_code'] == 'pending_submission' for row in rows)
-    assert source.calls == 4
+    assert source.calls == 7
 
 
 def test_old_terminal_result_does_not_replace_new_external_pending_source(client):
@@ -516,4 +517,4 @@ def test_old_terminal_result_does_not_replace_new_external_pending_source(client
     rows = client.get('/api/items').json()
     assert len(rows) == 8
     assert all(row['batch_id'] == current_batch and row['decision']['reason_code'] == 'pending_submission' for row in rows)
-    assert source.calls == 4
+    assert source.calls == 7
