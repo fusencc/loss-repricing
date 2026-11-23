@@ -40,9 +40,10 @@ def run(path, execute=False):
         desired = (MoneyRatio(Decimal(authorization['upload_price'])) * MoneyRatio(online.marketing_price) / MoneyRatio(online.retail_price)).decimal()
         decision = manual_decision(snapshot, online, desired, authorization['reason'], correction_id, utcnow())
         if decision.upload_price != Decimal(authorization['upload_price']): raise ValueError('指定上传价与修正模型结果不一致')
+        price_check = online.profit_check.model.evaluate(MoneyRatio(desired))
         check = {'decision': decision.model_dump(mode='json'), 'authorization': authorization,
-            'full_profit': str(online.profit_check.model.profit_exact(MoneyRatio(desired)).decimal()),
-            'full_margin': str((online.profit_check.model.profit_exact(MoneyRatio(desired)) / MoneyRatio(desired)).decimal()),
+            'full_profit': str(price_check.profit.decimal()),
+            'full_margin': str(price_check.margin.decimal()),
             'submitted': False}
         write_verified(path.parent / 'pre-submit-check.json', check)
         print(json.dumps({'stage': 'preflight_passed', 'upload': str(decision.upload_price), 'expected_actual': str(desired),

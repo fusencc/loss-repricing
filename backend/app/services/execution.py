@@ -488,7 +488,7 @@ class PricingService:
                     if len(rows) != 1:
                         raise ValueError("保存的在线利润模型来源不唯一")
                     model = FeeModel.model_validate(rows[0]["profit_check"]["model"])
-                    margin_passed = model.meets_minimum_online_margin(MoneyRatio(result.actual_price))
+                    margin_passed = model.evaluate(MoneyRatio(result.actual_price)).meets_minimum_margin
                     upper = saved_price_limit(decision.trace)
                     minimum_margin_required = upper is None
                     price_limit_passed = upper is None or MoneyRatio(result.actual_price) <= upper

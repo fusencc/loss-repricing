@@ -20,7 +20,7 @@ def test_one_percent_discounted_upload(stock, mode):
 @pytest.mark.parametrize('price,passed', [('100',True),('99.999999999999999999999999',False),('101',True)])
 def test_exact_one_percent_boundary(price, passed):
     model=FeeModel(revenue_factor='.8',fixed_cost='79',version='test',verified=True)
-    assert model.meets_minimum_online_margin(MoneyRatio(Decimal(price))) is passed
+    assert model.evaluate(MoneyRatio(Decimal(price))).meets_minimum_margin is passed
 
 @pytest.mark.parametrize('factor',['0','.005','.01'])
 def test_no_finite_threshold_price_is_blocked(factor):

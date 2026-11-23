@@ -2,6 +2,7 @@ import copy
 import json
 from decimal import Decimal
 import pytest
+from app.domain.money import MoneyRatio
 
 
 def sources():
@@ -279,7 +280,7 @@ def test_erp_loss_is_priced_even_when_current_full_online_profit_is_positive(mod
     prepared = prepare_online_states(capture, targets, **inputs)
     assert not prepared['issues']
     state = OnlineState.model_validate(prepared['online'][0]['state'])
-    assert state.profit_check.model.profit(Decimal('100')) > 0
+    assert state.profit_check.model.evaluate(MoneyRatio(Decimal('100'))).profit.decimal() > 0
     # ERP 已给出 -1 CNY 的订单修正一次毛利；汇率 0.1 CNY/PHP，补亏实际价为 110 PHP。
     loss = SourceLine(row_id='O1', order_id='O1', source='loss_allocatable', key=state.key,
         main_sku=state.main_sku, quantity='1', loss_amount='-1', currency='CNY',

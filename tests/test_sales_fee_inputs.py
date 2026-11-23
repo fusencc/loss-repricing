@@ -1,6 +1,7 @@
 """销售系统费用输入的公式回归；全部为合成数据。"""
 from decimal import Decimal, localcontext
 import pytest
+from app.domain.money import MoneyRatio
 from app.adapters.sales_fee_model import compile_direct_fee
 
 
@@ -18,7 +19,7 @@ def test_direct_formula_retains_platform_commission_without_product_commission()
     result=compile_direct_fee(variant,rate,site='PH',company_cny_per_currency='0.1')
     # 21g => 首10g 5PHP + 两档4.5PHP = 14PHP；2+.3+1.3+1.4=5CNY。
     assert Decimal(result['proof']['freight_station'])==Decimal('14')
-    assert result['online_model'].profit(Decimal('100'))==Decimal('21.259')
+    assert result['online_model'].evaluate(MoneyRatio(Decimal('100'))).profit.decimal()==Decimal('21.259')
     assert 'model' not in result
 
 

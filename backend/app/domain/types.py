@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
@@ -77,6 +78,15 @@ class SourceLine(BaseModel):
     source_ref: StrictStr = ""
 
 
+@dataclass(frozen=True)
+class OnlineProfitResult:
+    """一次试价的站点币单件利润、利润率和 1% 门槛判定，均保留精确比值。"""
+
+    profit: MoneyRatio
+    margin: MoneyRatio | None
+    meets_minimum_margin: bool
+
+
 class FeeModel(BaseModel):
     """完整在线利润系数无量纲，固定成本按明确比值换成站点币，输出仍为站点币。"""
 
@@ -88,17 +98,17 @@ class FeeModel(BaseModel):
     version: StrictStr
     verified: bool = False
 
-    def profit(self, price: Decimal) -> Decimal:
-        """输入站点币实际售价，按所选仓配的完整费用参数计算在线利润。"""
-        return self.profit_exact(MoneyRatio(price)).decimal()
-
-    def profit_exact(self, price: MoneyRatio) -> MoneyRatio:
-        """G(P)=P×a-b；循环小数价格延迟除法，零毛利不能由近似尾差变成负值。"""
-        return price * MoneyRatio(self.revenue_factor) - MoneyRatio(self.fixed_cost, self.fixed_cost_divisor)
-
-    def meets_minimum_online_margin(self, price: MoneyRatio) -> bool:
-        """按精确比值比较 G(P) >= P×1%，不以显示取整或价格容差放行。"""
-        return price.numerator > 0 and self.profit_exact(price) >= price * MoneyRatio(ONLINE_PROFIT_MINIMUM_MARGIN)
+    def evaluate(self, price: MoneyRatio) -> OnlineProfitResult:
+        """用 BD 直发 AU / 海外仓 AV 的口径试算拟定营销价，利润率 = 收入保留比例 − 单件成本 / 营销价。"""
+        revenue_factor = MoneyRatio(self.revenue_factor)
+        station_cost = MoneyRatio(self.fixed_cost, self.fixed_cost_divisor)
+        if price.numerator <= 0:
+            # 参考上限可能压至零档位。保留其利润额用于诊断，利润率无定义，由算价规则拒绝。
+            return OnlineProfitResult(profit=price * revenue_factor - station_cost,
+                                      margin=None, meets_minimum_margin=False)
+        margin = revenue_factor - station_cost / price
+        return OnlineProfitResult(profit=price * margin, margin=margin,
+                                  meets_minimum_margin=margin >= MoneyRatio(ONLINE_PROFIT_MINIMUM_MARGIN))
 
 
 class ProfitCheckIssue(Enum):

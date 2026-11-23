@@ -1,6 +1,7 @@
 from datetime import timedelta
 from decimal import Decimal
 import pytest
+from app.domain.money import MoneyRatio
 from test_execution_safety import safety_context
 
 
@@ -22,7 +23,7 @@ def test_fixed_overseas_formula_retains_vat_without_product_commission():
     rate.update(vatRate='10', version='fixed-test-v1')
     result = compile_overseas_fee(variant, rate, site='PH', warehouse='WH-PH', company_cny_per_currency='0.1')
     # 2.5592 CNY × 1.1 / 0.1 = 28.1512 PHP；a = 1 - 35.0411%。
-    assert result['online_model'].profit(Decimal('100')) == Decimal('36.8077')
+    assert result['online_model'].evaluate(MoneyRatio(Decimal('100'))).profit.decimal() == Decimal('36.8077')
     assert 'model' not in result
 
 

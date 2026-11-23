@@ -407,8 +407,7 @@ def _decide(
         # 无参考时要求1%；有参考时优先上限，利润不足或需降价均不再拦截。
         initial_target = MoneyRatio(current) + station_ratio
         # 单独保存补亏候选价的站点币利润与利润率，供核对利润校正和参考限价前的状态。
-        initial_profit = profit_check.model.profit_exact(initial_target)
-        initial_margin = initial_profit / initial_target
+        initial_result = profit_check.model.evaluate(initial_target)
         minimum_actual = profit_check.minimum_actual_price()
         unlimited_target = max(initial_target, minimum_actual) if minimum_actual is not None else None
         target_ratio = unlimited_target
@@ -438,13 +437,13 @@ def _decide(
         rounded_ratio = MoneyRatio(upload_price) * marketing_discount_ratio
         error_ratio = (rounded_ratio - target_ratio).absolute()
         tolerance = allowed_error(key.site)
-        online_target_profit = profit_check.model.profit_exact(target_ratio)
-        online_rounded_profit = profit_check.model.profit_exact(rounded_ratio)
+        target_result = profit_check.model.evaluate(target_ratio)
+        rounded_result = profit_check.model.evaluate(rounded_ratio)
         # 下面的有限小数仅用于持久化/展示；分支仍使用精确比值，不给负毛利加容差。
         unit_loss, station_loss = unit_ratio.decimal(), station_ratio.decimal()
         target_actual, raw_upload = target_ratio.decimal(), raw_ratio.decimal()
         rounded_actual, error = rounded_ratio.decimal(), error_ratio.decimal()
-        target_profit, rounded_profit = online_target_profit.decimal(), online_rounded_profit.decimal()
+        target_profit, rounded_profit = target_result.profit.decimal(), rounded_result.profit.decimal()
     except DecimalException:
         return finish("invalid_calculation", "价格、汇率或费用模型超出可计算范围")
 
@@ -463,17 +462,15 @@ def _decide(
             "inventory_observed_at": profit_check.inventory_observed_at.isoformat(),
             "source_ref": profit_check.source_ref, "model": profit_check.model.model_dump(mode="json"),
             "initial_target": str(initial_target.decimal()),
-            "initial_profit": str(initial_profit.decimal()),
-            "initial_margin": str(initial_margin.decimal()),
+            "initial_profit": str(initial_result.profit.decimal()),
+            "initial_margin": str(initial_result.margin.decimal()) if initial_result.margin is not None else None,
             "break_even": str(minimum_actual.decimal()) if minimum_actual is not None else None,
             "correction_amount": str(online_profit_correction.decimal()) if online_profit_correction is not None else None,
             "adjusted": unlimited_target is not None and unlimited_target > initial_target,
             "minimum_margin": str(ONLINE_PROFIT_MINIMUM_MARGIN),
             "minimum_margin_required": minimum_margin_required,
-            "target_margin": (str((online_target_profit / target_ratio).decimal())
-                              if target_ratio.numerator > 0 else None),
-            "rounded_margin": (str((online_rounded_profit / rounded_ratio).decimal())
-                               if rounded_ratio.numerator > 0 else None),
+            "target_margin": str(target_result.margin.decimal()) if target_result.margin is not None else None,
+            "rounded_margin": str(rounded_result.margin.decimal()) if rounded_result.margin is not None else None,
         },
     })
     prices = {
@@ -486,8 +483,7 @@ def _decide(
         return finish("rounding_error", "站点价格档位导致实际价无效或超出误差容限", **prices)
     if upper is not None and rounded_ratio > upper:
         return finish('reference_price_exceeded', '进档后营销价超过参考上限，本轮不调', status='本轮不调', **prices)
-    if minimum_margin_required and (not profit_check.model.meets_minimum_online_margin(target_ratio)
-            or not profit_check.model.meets_minimum_online_margin(rounded_ratio)):
+    if minimum_margin_required and (not target_result.meets_minimum_margin or not rounded_result.meets_minimum_margin):
         return finish("online_profit_shortfall", "目标价或档位后在线利润率未达到1%", **prices)
     reason = ("已按参考价优先确定价格，预计在线利润已记录" if upper is not None else
               "补亏价格通过站点精度、库存对应完整在线利润率核验")

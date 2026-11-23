@@ -69,7 +69,7 @@ def compile_overseas_fee(variant, rate, *, site, warehouse, company_cny_per_curr
         raise ValueError('固定费率缺少版本')
     included_model = online_fee_model(total_rate_percent=total, fixed_cny=fixed, vat_percent=vat,
                                       cny_per_currency=quote, version=version)
-    included_percent = included_model.profit_exact(MoneyRatio(actual)) / MoneyRatio(actual) * MoneyRatio(Decimal(100))
+    included_percent = included_model.evaluate(MoneyRatio(actual)).margin * MoneyRatio(Decimal(100))
     # TODO(T-03)：列表利润率可能采用个人或店铺覆盖费率，待核实两者口径。当前显示值仅作对账。
     reported = variant.get('currentOverseasProfitMargin')
     return {'online_model':included_model,

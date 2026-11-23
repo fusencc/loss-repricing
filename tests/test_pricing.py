@@ -70,8 +70,8 @@ def single(*, line_fields=None, online_fields=None, snapshot_fields=None):
 def test_cny_fixed_cost_preserves_exact_break_even_and_returns_station_currency():
     from app.domain.money import MoneyRatio
     model=FeeModel(revenue_factor='1',fixed_cost='4',fixed_cost_divisor='3',version='cost-cny-quote',verified=True)
-    assert model.profit_exact(MoneyRatio(Decimal(4),Decimal(3)))==MoneyRatio(Decimal(0))
-    assert model.profit_exact(MoneyRatio(Decimal('1.34')))==MoneyRatio(Decimal('0.02'),Decimal(3))
+    assert model.evaluate(MoneyRatio(Decimal(4),Decimal(3))).profit==MoneyRatio(Decimal(0))
+    assert model.evaluate(MoneyRatio(Decimal('1.34'))).profit==MoneyRatio(Decimal('0.02'),Decimal(3))
     result=single(line_fields={'loss_amount':'-1','currency':'CNY'},
         online_fields={'retail_price':'1','profit_check':online(key()).profit_check.model_copy(update={'model':model})},
         snapshot_fields={'fx_rates':{'CNY':'1','MYR':'3'},'fx_rate_unit':'cny_per_currency',

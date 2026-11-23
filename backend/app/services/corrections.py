@@ -87,15 +87,15 @@ def manual_decision(snapshot, online, desired, reason, correction_id, now):
     if upper is not None and (target > upper or actual > upper):
         # 人工授权绑定明确价格，不能静默改成另一价格后执行旧授权。
         raise ValueError('人工指定价或进档后营销价超过同SKU参考上限，请修正价格')
-    if upper is None and (not profit_check.model.meets_minimum_online_margin(target)
-            or not profit_check.model.meets_minimum_online_margin(actual)):
+    rounded_check = profit_check.model.evaluate(actual)
+    if upper is None and (not profit_check.model.evaluate(target).meets_minimum_margin
+            or not rounded_check.meets_minimum_margin):
         raise ValueError("人工指定价的在线利润率未达到1%，请修正价格")
-    profit = profit_check.model.profit_exact(actual)
     if upload <= 0 or (actual-target).absolute() > MoneyRatio(allowed_error(key.site)):
         raise ValueError("修正价按站点档位舍入后超出实际售价误差")
     return Decision(key=key,status="待处理",ready=True,reason_code="manual_correction",
         reason="已授权人工修正："+reason,source_row_ids=[],current_actual=current,discount=discount.decimal(),
-        target_actual=desired,upload_price=upload,predicted_profit=profit.decimal(),upload_column=contract.upload_column,
+        target_actual=desired,upload_price=upload,predicted_profit=rounded_check.profit.decimal(),upload_column=contract.upload_column,
         trace={"formula_version":"manual-online-margin-reference-priority-v6","minimum_margin":str(ONLINE_PROFIT_MINIMUM_MARGIN),
                "minimum_margin_required":upper is None,"correction_id":correction_id,
                "business_date":today.isoformat(),"evaluated_at":now.isoformat(),

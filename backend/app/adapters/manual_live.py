@@ -295,7 +295,8 @@ class ManualLiveAdapter:
             actual = verify_price_evidence(a, intent['previous_log_ids'], log, detail['datas'], current, expected)
             full = FeeModel.model_validate(intent['decision']['trace']['online_rows'][0]['profit_check']['model'])
             upper = saved_price_limit(intent['decision']['trace'])
-            if upper is None and not full.meets_minimum_online_margin(MoneyRatio(actual)):
+            actual_check = full.evaluate(MoneyRatio(actual))
+            if upper is None and not actual_check.meets_minimum_margin:
                 raise ValueError('回读营销价在线利润率未达到1%')
             observed = utcnow()
             # 官方统计/最新成功价只作独立证据补充，不代替已绑定任务和当前平台价。
@@ -308,9 +309,9 @@ class ManualLiveAdapter:
                 log, current, observed, official, submitted_at=submitted_at)
             write_verified(self.directory / ('price-record-'+execution_id+'-'+uuid4().hex+'.json'), price_record)
             write_verified(self.directory / ('verified-'+execution_id+'.json'), {'log': log, 'current': current,
-                'actual_profit': str(full.profit_exact(MoneyRatio(actual)).decimal()),
+                'actual_profit': str(actual_check.profit.decimal()),
                 'minimum_margin_required': upper is None,
-                'online_margin_passed': full.meets_minimum_online_margin(MoneyRatio(actual)),
+                'online_margin_passed': actual_check.meets_minimum_margin,
                 'observed_at': observed.isoformat(),
                 'freshness_basis': '提交前不同价格+本次新增任务平台成功回执+提交后平台及公司价格一致；首次确认时间',
                 'platform_update_time': control['data'].get('update_time')})

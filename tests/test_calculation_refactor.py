@@ -48,7 +48,7 @@ def test_online_model_vat_quote_and_profit_are_hand_calculated():
     assert model.revenue_factor == Decimal('0.8')
     assert model.fixed_cost == Decimal(11)
     assert model.fixed_cost_divisor == Decimal(3)
-    assert model.profit_exact(MoneyRatio(Decimal(10))) == MoneyRatio(Decimal(13), Decimal(3))
+    assert model.evaluate(MoneyRatio(Decimal(10))).profit == MoneyRatio(Decimal(13), Decimal(3))
 
 
 def test_profit_validation_order_and_existing_messages():

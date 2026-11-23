@@ -29,7 +29,7 @@ def test_overseas_full_model_includes_marketing():
     assert result['proof']['fixed_cost_currency']=='CNY'
     current=MoneyRatio(Decimal('30.745'))
     target=current+MoneyRatio(Decimal('0.2949'),Decimal('0.1049'))
-    assert model.profit_exact(target)<MoneyRatio(Decimal(0))
+    assert model.evaluate(target).profit<MoneyRatio(Decimal(0))
     assert "model" not in result
 
 
