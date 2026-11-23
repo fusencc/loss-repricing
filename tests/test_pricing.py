@@ -37,8 +37,7 @@ def online(variant, **overrides):
         "profit_check": OnlineProfitCheck(overseas_stock="0",mode="direct",department="TEST",
             inventory_observed_at=NOW,source_ref="synthetic/profit",
             model=FeeModel(revenue_factor="1",fixed_cost="0",version="synthetic-online-v1",verified=True)),
-        "observed_at": NOW, "sales_7d": 20, "sales_basis": "erp_goods_warehouse_seven_days_reference", "sales_observed_at": NOW,
-        "sales_complete": True, "history_known": True,
+        "observed_at": NOW, "history_known": True,
         **overrides,
     })
 
@@ -210,12 +209,6 @@ def test_same_sku_and_row_id_in_different_stores_are_independent():
     assert results["02"].unit_loss == Decimal("0.8")
 
 
-@pytest.mark.parametrize(("units", "status", "ready"), [(20, "待处理", True), (21, "待处理", True)])
-def test_sales_quantity_is_reference_only(units, status, ready):
-    result = single(online_fields={"sales_7d": units})
-    assert (result.status, result.ready) == (status, ready)
-
-
 @pytest.mark.parametrize(
     ("age", "status", "ready"),
     [
@@ -261,10 +254,6 @@ def test_activity_restriction_is_suspended_without_changing_price_calculation():
     assert active.reason_code == baseline.reason_code
     assert active.upload_price == baseline.upload_price
     assert active.target_actual == baseline.target_actual
-
-
-def test_stale_reference_sales_do_not_block_price_calculation():
-    assert single(online_fields={'sales_observed_at':NOW-timedelta(days=1)}).ready
 
 
 def test_previous_day_fx_blocks_even_when_amounts_are_already_station_currency():

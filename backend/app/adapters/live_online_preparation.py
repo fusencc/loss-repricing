@@ -1,6 +1,6 @@
 """已绑定真实来源的在线输入准备；仅复用统一费用模型和规则，不计算第二套建议价。
 
-无归属或保护证据不生成乐观状态；销量仅作可缺失参考。72小时使用官方调价日志计数，本地档案仅用于未完成执行和人工保护。
+72小时保护使用官方调价日志计数，本地档案仅用于未完成执行和人工保护。
 站点步长和向上取整来自2026-11-11用户明确确认；税后价格列与当前模板核对。
 """
 from collections import defaultdict
@@ -18,11 +18,11 @@ from app.adapters.official_price_logs import recent_price_log_for
 from app.adapters.sales_price_reference import price_reference_for
 
 SCHEMAS={'sales':'sales-source-observations-v1','platform':'sales-platform-controls-v1',
-    'window':'erp-goods-sales-reference-v1','local_history':'local-live-price-history-v1',
+    'local_history':'local-live-price-history-v1',
     'fixed_fees':FEE_SCHEMA}
 
 
-def prepare_online_states(capture,targets,*,sales,platform,window,local_history,fixed_fees,official_history,
+def prepare_online_states(capture,targets,*,sales,platform,local_history,fixed_fees,official_history,
                           price_references=None):
     capture=dict(capture,synthetic=capture.get('synthetic',False),sample_only=capture.get('sample_only',False))
     if type(capture['synthetic']) is not bool or type(capture['sample_only']) is not bool:
@@ -103,12 +103,6 @@ def prepare_online_states(capture,targets,*,sales,platform,window,local_history,
                 # 三项营销字段都空时，须由已核实的无活动和现价一致凭证确认零折扣。
                 retail, actual = export_retail, export_actual
                 export_proof = {'ref': exported_row['export_ref'], 'values': export_values}
-            # 子SKU＋仓库参考值，精确仓库名匹配才填标量；其他仓库逐项保留在证据。
-            reference=window.get('records',{}).get(target['erp_sku'],{})
-            matches=[v for v in reference.get('warehouses',[]) if v.get('status')=='ok'
-                and v.get('storage_name')==key.warehouse]
-            quantity=matches[0]['quantity'] if reference.get('status')=='ok' and len(matches)==1 else None
-            sales_observed=source_time(reference['observed_at']) if reference.get('observed_at') else None
             allowed_binding={'configured_live_history_database','live_runtime_database'}
             if capture['synthetic']:allowed_binding.add('injected_synthetic_test')
             if (local_history.get('acquisition_complete') is not True
@@ -174,8 +168,6 @@ def prepare_online_states(capture,targets,*,sales,platform,window,local_history,
                 'profit_check':{'overseas_stock':None if stock is None else format(stock,'f'),'mode':mode,'department':department,
                     'inventory_observed_at':control['observed_at'],'source_ref':control['ref'],
                     'model':fee['online_model'].model_dump(mode='json')},'observed_at':control['observed_at'],
-                'sales_7d':quantity,'sales_basis':window['basis'],
-                'sales_observed_at':sales_observed.isoformat() if sales_observed else None,'sales_complete':quantity is not None,
                 'history_known':recent is not None,'last_increase_at':None,
                 'recent_price_log':recent.model_dump(mode='json') if recent else None,
                 'pending_submission':pending,'protected':protected,'activity_locked':control['company_activity_locked'],
@@ -185,7 +177,7 @@ def prepare_online_states(capture,targets,*,sales,platform,window,local_history,
                 'platform_observed_at':control.get('platform_price_observed_at'),
                 'current_components_observed_at':control['observed_at'],'bundle_completed_at':observed.isoformat(),
                 'sales_batch_export':export_proof,
-                'sales_reference':reference,'sales_observed_at':sales_observed.isoformat() if sales_observed else None,'evaluated_at':evaluated.isoformat()}
+                'evaluated_at':evaluated.isoformat()}
         except (ValueError,TypeError,KeyError,ArithmeticError) as error:
             result['issues'].append({'code':'live_online_state_pending','reason':str(error),'target':key.model_dump(mode='json')})
     warehouses=defaultdict(set)

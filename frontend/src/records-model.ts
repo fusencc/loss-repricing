@@ -83,6 +83,12 @@ export function recordStatusLabel(status: string): string {
   return ({ '已核验': '已提价', '待核验': '待处理', '待处理': '待处理' }[status] ?? status)
 }
 
+// 仅展示本条已保存的原因，不从销量、历史尝试或价格推导新的保护结论；空值明确未记录。
+export function recordStateReason(item: RecordItem): string {
+  if (item.status === '已核验') return '商品符合调价'
+  return typeof item.reason === 'string' && item.reason.trim() ? item.reason : '原因未记录'
+}
+
 export const recordDisplayStates = ['已核验', '待处理', '本轮不调'] as const
 
 // 汇总的是记录数量，不计算价格；同一显示状态合并后台两个互斥状态，避免隐藏待核验后漏计。

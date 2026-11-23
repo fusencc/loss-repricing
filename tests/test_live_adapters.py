@@ -38,8 +38,7 @@ ROW = {
 }
 ONLINE = {
     "product": PRODUCT, "main": "0003", "ccy": "MYR", "r": "20", "m": "10",
-    "seen": OBSERVED, "qty": 10,
-    "sales_basis": "erp_goods_warehouse_seven_days_reference", "sales_seen": OBSERVED, "full": True, "history": True,
+    "seen": OBSERVED, "history": True,
     "last": None, "pending": False, "protected": False, "locked": False, "sellable": True,
     "profit": {"overseas_stock":"0","mode":"direct","department":"TEST",
         "inventory_observed_at":OBSERVED,"source_ref":"synthetic/profit",
@@ -56,8 +55,7 @@ def contract():
     }
     online_fields = KEY_MAP | {
         "main_sku": "main", "currency": "ccy", "retail_price": "r", "marketing_price": "m",
-        "observed_at": "seen", "sales_7d": "qty", "sales_basis": "sales_basis",
-        "sales_observed_at": "sales_seen", "sales_complete": "full", "protected": "protected",
+        "observed_at": "seen", "protected": "protected",
         "activity_locked": "locked", "sellable": "sellable", "profit_check":"profit",
     }
     collection = {
@@ -836,8 +834,3 @@ def test_online_profit_http_contract_rejects_unapproved_or_coerced_proof(contrac
             online_state(raw,contract["collections"]["online"],{"MY":"synthetic-online-v1"})
 
 
-def test_missing_optional_sales_field_does_not_invalidate_http_online_record(contract, make_adapter):
-    row=dict(ONLINE);row.pop('qty')
-    snapshot=make_adapter(contract,with_source_rows(online=[row])).collect(DAY)
-    assert not snapshot.source_issues
-    assert len(snapshot.online)==1 and snapshot.online[0].sales_7d is None

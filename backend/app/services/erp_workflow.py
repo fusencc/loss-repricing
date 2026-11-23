@@ -14,7 +14,6 @@ from app.adapters.erp_rates import query_current_erp_fx
 from app.adapters.erp_detail_capture import capture_erp_details
 from app.adapters.erp_order_loss import prepare_order_losses
 from app.adapters.erp_order_headers import capture_order_headers
-from app.adapters.erp_goods_sales import capture_goods_sales
 from app.adapters.current_pricing_fees import capture_current_fees, refresh_daily_fees
 from app.adapters.sales_price_reference import capture_sku_price_references
 from app.adapters.erp_pricing import prepare_pricing
@@ -30,8 +29,8 @@ from app.services.erp_capture_store import load_capture, rebuild_clean_capture, 
 from app.services.erp_pricing import load_pricing_preview, save_pricing_preview
 from app.services.erp_seller_candidates import summarize_seller_candidates
 
-def capture_candidate_references(settings, capture, targets, *, progress=None):
-    """先执行必要的官方历史保护，再补可缺失的销量参考；无全店查询。"""
+def filter_candidate_history(settings, targets):
+    """按子商品查询近72小时官方历史；仅明确有调价记录时排除，未知继续。"""
     history = (capture_recent_price_changes(settings,[VariantKey.model_validate(t['key']) for t in targets])
         if targets else None)
     eligible, filtered = [], []
@@ -44,8 +43,7 @@ def capture_candidate_references(settings, capture, targets, *, progress=None):
             count,status=None,'history_unknown'
         filtered.append({'key':target['key'],'count':count,'status':status})
         if status!='history_protected':eligible.append(target)
-    reference=capture_goods_sales(settings,capture,eligible,progress=progress)
-    return history,eligible,reference,filtered
+    return history,eligible,filtered
 
 
 def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, progress=None):
@@ -139,8 +137,6 @@ def _evaluate_capture(settings, capture_id, *, replay, evidence=None, exports=No
     headers = None
     headers_ref = None
     headers_status = 'not_requested'
-    window_ref = None
-    window_status = 'not_requested'
     platform_ref = None
     platform_status = 'not_requested'
     local_history_ref = None
@@ -149,7 +145,6 @@ def _evaluate_capture(settings, capture_id, *, replay, evidence=None, exports=No
     fixed_fees_ref = None
     order_preparation = None
     online_preparation = None
-    window = None
     platform = None
     pricing_targets = []
     history_filter = []
@@ -191,7 +186,7 @@ def _evaluate_capture(settings, capture_id, *, replay, evidence=None, exports=No
                 sales_ref['sha256'] = sha256(content).hexdigest()
                 sales_status = 'saved' if sales['acquisition_complete'] else 'partial'
             order_preparation = prepare_order_losses(capture, native, sales, order_headers=headers)
-            # 完整性、归属冲突及整店挂起仍由同一准备器判定，再抓可能算价对象的七日窗口。
+            # 完整性、归属冲突及整店挂起仍由同一准备器判定，再按官方历史筛选可能算价对象。
             prepared = prepare_pricing(capture, order_preparation=order_preparation).report
             if len(prepared['evaluation_complete_sources']) == 4:
                 refs = prepared['references']
@@ -203,16 +198,9 @@ def _evaluate_capture(settings, capture_id, *, replay, evidence=None, exports=No
                         'erp_sku':order_preparation['proofs'][row['order_id']]['erp_sku'],'main_sku':row['main_sku']}
                     pricing_targets.append({'erp_shop':row['erp_shop'],'erp_sku':target['erp_sku'],
                         'main_sku':row['main_sku'],'key':row['target']})
-            official_history, pricing_targets, window, history_filter = capture_candidate_references(
-                settings,capture,pricing_targets,progress=progress)
+            official_history, pricing_targets, history_filter = filter_candidate_history(settings, pricing_targets)
             platform_targets = [{'erp_shop':t['erp_shop'],'product_id':t['key']['product_id'],
                 'item_id':t['key']['item_id']} for t in pricing_targets]
-            content = Path(window['artifact_file']).read_bytes()
-            window = json.loads(content)
-            window_ref = {key:window[key] for key in ('source_id','erp_capture_id','synthetic','sample_only',
-                'acquisition_complete','artifact_file','window_start','window_end')}
-            window_ref['sha256'] = sha256(content).hexdigest()
-            window_status = 'saved' if window['acquisition_complete'] else 'partial_reference'
             try:
                 platform = capture_platform_controls(settings,capture,platform_targets,progress=progress)
             except SourceUnavailable:
@@ -235,12 +223,12 @@ def _evaluate_capture(settings, capture_id, *, replay, evidence=None, exports=No
             'acquisition_complete','artifact_file')}
         local_history_ref['sha256'] = sha256(content).hexdigest()
         local_history_status = 'saved' if local_history['acquisition_complete'] else 'partial'
-        if pricing_targets and all(source is not None for source in (sales,platform,window,fixed_fees)):
+        if pricing_targets and all(source is not None for source in (sales,platform,fixed_fees)):
             # 参考不属于核心来源合同；其issues不合入在线准备或待处理清单。
             price_references = capture_sku_price_references(settings,capture,pricing_targets,
                 platform=platform,progress=progress)
             online_preparation = prepare_online_states(capture,pricing_targets,sales=sales,
-                platform=platform,window=window,local_history=local_history,fixed_fees=fixed_fees,
+                platform=platform,local_history=local_history,fixed_fees=fixed_fees,
                 official_history=official_history,price_references=price_references)
         try:
             current_fx = query_current_erp_fx(settings)
@@ -255,7 +243,7 @@ def _evaluate_capture(settings, capture_id, *, replay, evidence=None, exports=No
     report = save_pricing_preview(settings.runtime_dir, capture_id, evidence, exports=exports,
                                   current_fx=current_fx, sales_source=sales_ref, native_source=native_ref,
                                   order_preparation=order_preparation, order_headers_source=headers_ref,
-                                  sales_window_source=window_ref, local_history_source=local_history_ref, platform_source=platform_ref, online_preparation=online_preparation,fixed_fees_source=fixed_fees_ref)
+                                  local_history_source=local_history_ref, platform_source=platform_ref, online_preparation=online_preparation,fixed_fees_source=fixed_fees_ref)
     # 下游只消费已持久化并回读的报告，待提价保留完整 Decimal 文本和明细引用。
     report, digest = load_pricing_preview(settings.runtime_dir, capture_id, report['preview_id'])
     ready = [row for row in report['decisions'] if row['ready']]
@@ -286,8 +274,6 @@ def _evaluate_capture(settings, capture_id, *, replay, evidence=None, exports=No
         'sales_status': sales_status,
         'native_status': native_status,
         'order_headers_status': headers_status,
-        'sales_window_status': window_status,
-        'sales_policy':'optional_official_warehouse_reference',
         'history_filter':history_filter,
         'platform_status': platform_status,
         'online_prepared_records':len(online_preparation['online']) if online_preparation else 0,

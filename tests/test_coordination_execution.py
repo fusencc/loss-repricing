@@ -150,7 +150,7 @@ def test_manual_correction_ignores_reference_sales_differences(world):
     snapshot = adapter.collect(now.astimezone(BEIJING).date())
     online = snapshot.online[0]
     sibling = key.model_copy(update={"item_id": "SIBLING"})
-    snapshot.online.append(online.model_copy(update={"key": sibling, "sales_7d": 21}))
+    snapshot.online.append(online.model_copy(update={"key": sibling}))
 
     assert manual_decision(snapshot, online, Decimal("11"), "reason", "c1", utcnow()).ready
 

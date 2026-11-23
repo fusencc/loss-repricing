@@ -177,12 +177,6 @@ class OnlineState(BaseModel):
     # 当前费用模型用于补亏候选价、进档价及回读价的完整在线利润校验。
     profit_check: OnlineProfitCheck | None = None
     observed_at: AwareDatetime
-    sales_7d: StrictInt | None = None
-    # 开放接口为子SKU＋仓库参考销量；无明确日期边界，不参与保护或定价。
-    sales_basis: Literal['erp_goods_warehouse_seven_days_reference'] | None = None
-    sales_observed_at: AwareDatetime | None = None
-    # 参考销量缺失保持未知；调价历史仍须明确核实。
-    sales_complete: bool = False
     history_known: bool = False
     recent_price_log: RecentPriceLog | None = None
     # 只接受已确认生效的时间戳。提交结果未知由 pending_submission 独立锁定。
@@ -227,7 +221,7 @@ class CandidateSourceIssue(BaseModel):
 
 
 class OnlineSourceIssue(BaseModel):
-    """可定位的在线记录字段异常。主 SKU 是七天销量保护的共享范围。"""
+    """可定位的在线记录字段异常。主 SKU 用于关联来源异常的影响范围。"""
 
     source: Literal["online"]
     record_number: Annotated[StrictInt, Field(gt=0)]

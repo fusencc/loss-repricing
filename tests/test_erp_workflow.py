@@ -230,9 +230,9 @@ def test_live_order_preparation_archives_facts_without_inventing_online_state(tm
         save_pricing_preview(config.runtime_dir,capture_id,evidence=evidence,order_preparation=preparation)
 
 
-@pytest.mark.parametrize('source_name',['sales_window_source','local_history_source','platform_source','fixed_fees_source'])
+@pytest.mark.parametrize('source_name',['local_history_source','platform_source','fixed_fees_source'])
 @pytest.mark.parametrize('changed',[{'erp_capture_id':'OTHER'},{'sample_only':True},{'synthetic':False}])
-def test_window_and_own_history_refs_cannot_cross_capture_or_environment(tmp_path,source_name,changed):
+def test_source_refs_cannot_cross_capture_or_environment(tmp_path,source_name,changed):
     from app.services.erp_pricing import save_pricing_preview
     config,capture_id,_=inputs(tmp_path)
     source={'source_id':'SOURCE','erp_capture_id':capture_id,'synthetic':True,'sample_only':False,**changed}

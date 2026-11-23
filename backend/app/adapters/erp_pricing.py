@@ -270,10 +270,6 @@ class ReviewedOnlineState(OnlineState):
     fee_scope: Identifier
     profit_check: ReviewedOnlineProfitCheck | None = None
     observed_at: SourceTime
-    sales_7d: StrictInt | None = None
-    sales_basis: Literal["erp_goods_warehouse_seven_days_reference"] | None = None
-    sales_observed_at: SourceTime | None = None
-    sales_complete: StrictBool = False
     history_known: StrictBool
     last_increase_at: SourceTime | None
     pending_submission: StrictBool

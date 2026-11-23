@@ -150,7 +150,7 @@
       "type": "object"
     },
     "OnlineSourceIssue": {
-      "description": "可定位的在线记录字段异常。主 SKU 是七天销量保护的共享范围。",
+      "description": "可定位的在线记录字段异常。主 SKU 用于关联来源异常的影响范围。",
       "properties": {
         "source": {
           "const": "online",
@@ -226,6 +226,17 @@
           "default": null,
           "title": "Marketing Price"
         },
+        "sku_price_reference": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SkuPriceReference"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "fee_scope": {
           "title": "Fee Scope",
           "type": "string"
@@ -245,49 +256,6 @@
           "format": "date-time",
           "title": "Observed At",
           "type": "string"
-        },
-        "sales_7d": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Sales 7D"
-        },
-        "sales_basis": {
-          "anyOf": [
-            {
-              "const": "erp_goods_warehouse_seven_days_reference",
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Sales Basis"
-        },
-        "sales_observed_at": {
-          "anyOf": [
-            {
-              "format": "date-time",
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Sales Observed At"
-        },
-        "sales_complete": {
-          "default": false,
-          "title": "Sales Complete",
-          "type": "boolean"
         },
         "history_known": {
           "default": false,
@@ -373,6 +341,62 @@
         "observed_at"
       ],
       "title": "OnlineState",
+      "type": "object"
+    },
+    "PriceReferenceSample": {
+      "properties": {
+        "shop_name": {
+          "title": "Shop Name",
+          "type": "string"
+        },
+        "product_id": {
+          "title": "Product Id",
+          "type": "string"
+        },
+        "item_id": {
+          "title": "Item Id",
+          "type": "string"
+        },
+        "sales_7d": {
+          "minimum": 0,
+          "title": "Sales 7D",
+          "type": "integer"
+        },
+        "tax_inclusive_price": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "title": "Tax Inclusive Price"
+        },
+        "discount_percent": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 100.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "title": "Discount Percent"
+        }
+      },
+      "required": [
+        "shop_name",
+        "product_id",
+        "item_id",
+        "sales_7d",
+        "tax_inclusive_price",
+        "discount_percent"
+      ],
+      "title": "PriceReferenceSample",
       "type": "object"
     },
     "RecentPriceLog": {
@@ -470,6 +494,64 @@
         "version"
       ],
       "title": "SiteContract",
+      "type": "object"
+    },
+    "SkuPriceReference": {
+      "properties": {
+        "version": {
+          "const": "same-sku-top3-marketing-mean-v1",
+          "default": "same-sku-top3-marketing-mean-v1",
+          "title": "Version",
+          "type": "string"
+        },
+        "sku": {
+          "title": "Sku",
+          "type": "string"
+        },
+        "currency": {
+          "title": "Currency",
+          "type": "string"
+        },
+        "marketing_price": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "title": "Marketing Price"
+        },
+        "samples": {
+          "items": {
+            "$ref": "#/$defs/PriceReferenceSample"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "title": "Samples",
+          "type": "array"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "title": "Observed At",
+          "type": "string"
+        },
+        "source_ref": {
+          "title": "Source Ref",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sku",
+        "currency",
+        "marketing_price",
+        "samples",
+        "observed_at",
+        "source_ref"
+      ],
+      "title": "SkuPriceReference",
       "type": "object"
     },
     "SourceLine": {

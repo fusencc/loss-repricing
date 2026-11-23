@@ -44,7 +44,9 @@ test('compact log retains identity, status, three horizontal stage fields and up
   const original = structuredClone(row)
   const html = await render(row)
   assert.match(html, /SYNTHETIC-001/)
-  assert.match(html, /合成测试店铺 \/ PH \/ Tiktok/)
+  assert.match(html, /<p>合成测试店铺 \/ PH<\/p>/)
+  assert.doesNotMatch(html, /PH \/ Tiktok/)
+  assert.equal(row.key.platform, 'Tiktok')
   assert.match(html, /class="attention records-status"><i><\/i>待处理/)
   assert.equal((html.match(/data-stage=/g) ?? []).length, 3)
   assert.equal((html.match(/class="records-stage-field"/g) ?? []).length, 5)
@@ -83,7 +85,7 @@ test('upload is a peer price field and all execution statuses occupy a separate 
     row.status = status
     const original = structuredClone(row)
     const html = await render(row)
-    assert.match(html, new RegExp(`<div class="records-stage-field" data-field="uploaded-price"><dt>上传含税价</dt><dd><strong>18\\.24 PHP</strong></dd></div></dl>(?:<!--.*?-->)*<div class="records-log-state" aria-label="执行状态"><span class="${tone} records-status"><i></i>${label}</span></div>`))
+    assert.match(html, new RegExp(`<div class="records-stage-field" data-field="uploaded-price"><dt>上传含税价</dt><dd><strong>18\\.24 PHP</strong></dd></div></dl>(?:<!--.*?-->)*<div class="records-log-state" aria-label="执行状态"><span class="${tone} records-status"><i></i>${label}</span><p class="records-log-reason">${status === '已核验' ? '商品符合调价' : '原因未记录'}</p></div>`))
     assert.equal((html.match(/class="records-log-state"/g) ?? []).length, 1)
     assert.doesNotMatch(html, /<dl[^>]*>(?:(?!<\/dl>).)*records-log-state/s)
     assert.doesNotMatch(html, /<header class="records-log-heading">(?:(?!<\/header>).)*records-log-state/s)
@@ -91,8 +93,8 @@ test('upload is a peer price field and all execution statuses occupy a separate 
   }
   const { readFile } = await import('node:fs/promises')
   const css = await readFile(new URL('../src/records.css', import.meta.url), 'utf8')
-  assert.match(css, /\.records-log\{display:grid;grid-template-columns:minmax\(140px,\.85fr\) minmax\(0,4fr\) minmax\(76px,\.5fr\);align-items:start;/)
-  assert.match(css, /\.records-log-state\{grid-column:3;grid-row:1;align-self:start;justify-self:stretch;display:flex;justify-content:center;min-width:0\}/)
+  assert.match(css, /\.records-log\{display:grid;grid-template-columns:minmax\(140px,\.85fr\) minmax\(0,4fr\) minmax\(120px,\.85fr\);align-items:start;/)
+  assert.match(css, /\.records-log-state\{grid-column:3;grid-row:1;align-self:start;justify-self:stretch;display:flex;flex-direction:column;align-items:center;gap:7px;min-width:0\}/)
   assert.match(css, /\.records-log-stages\{display:grid;grid-template-columns:repeat\(5,minmax\(0,1fr\)\);align-items:start;/)
   assert.match(css, /@media\(max-width:900px\)\{[\s\S]*?\.records-log-state\{grid-column:2;grid-row:1\}[\s\S]*?\.records-log-stages\{grid-column:1\/-1;grid-row:2\}/)
   assert.match(css, /@media\(max-width:680px\)\{\s*\.records-log\{padding:12px 0;gap:10px\}\s*\.records-log-stages\{grid-template-columns:repeat\(2,minmax\(0,1fr\)\)\}/)
@@ -168,6 +170,55 @@ test('identity copy buttons expose distinct accessible names and missing IDs rem
   assert.match(missing, /SKU 未记录/)
   assert.match(missing, /商品ID：未记录/)
   assert.doesNotMatch(missing, /records-id-copy-button/)
+})
+
+test('saved reasons appear below the badge for pending and skipped records without using earlier attempts', async () => {
+  for (const status of ['待处理', '待核验', '本轮不调']) {
+    const row = item()
+    row.status = status
+    row.reason = '近72小时内有调价记录\n人工保护；来源待核实'
+    row.process = [{ reason: '旧尝试原因，不应替代当前原因' }]
+    const original = structuredClone(row)
+    const html = await render(row)
+    assert.match(html, /<p class="records-log-reason">近72小时内有调价记录\n人工保护；来源待核实<\/p>/)
+    assert.doesNotMatch(html, /旧尝试原因|商品符合调价/)
+    assert.deepEqual(row, original)
+  }
+})
+
+test('missing saved reasons are explicit and never inferred from other evidence', async () => {
+  for (const status of ['待处理', '待核验', '本轮不调']) {
+    for (const reason of [undefined, null, '', '   ']) {
+      const row = item()
+      Object.assign(row, { status, reason, seven_days_sales: 22 })
+      const html = await render(row)
+      assert.match(html, /<p class="records-log-reason">原因未记录<\/p>/)
+      assert.doesNotMatch(html, /三天调价保护|7天销量|商品符合调价/)
+    }
+  }
+})
+
+test('verified records use the requested fixed explanation and historical reasons stay unchanged', async () => {
+  const row = item()
+  row.status = '已核验'
+  row.reason = '保存的旧执行文案'
+  const html = await render(row)
+  assert.match(html, /<p class="records-log-reason">商品符合调价<\/p>/)
+  assert.doesNotMatch(html, /保存的旧执行文案/)
+  assert.equal(row.reason, '保存的旧执行文案')
+})
+
+test('saved historical threshold reasons are displayed as text, escaped, and never re-evaluated', async () => {
+  const row = item()
+  row.status = '本轮不调'
+  row.reason = '历史原因：7天销量>21；<script>不执行</script>'
+  const html = await render(row)
+  assert.match(html, /历史原因：7天销量&gt;21；&lt;script&gt;不执行&lt;\/script&gt;/)
+  assert.doesNotMatch(html, /<script>/)
+  const { readFile } = await import('node:fs/promises')
+  const css = await readFile(new URL('../src/records.css', import.meta.url), 'utf8')
+  assert.match(css, /\.records-log-state \.records-log-reason\{[^}]*white-space:pre-wrap;overflow-wrap:anywhere/)
+  assert.match(css, /grid-template-columns:minmax\(0,1fr\) minmax\(0,\.8fr\)/)
 })
 
 test('optional reference evidence and price-cap explanation remain accessible', async () => {

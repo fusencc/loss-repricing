@@ -27,14 +27,12 @@ def sources():
         'company_activity_locked':True,'current_variants':[variant],
         'data':{'id':'P1','product_status':'ACTIVATE','status':'ACTIVATE','is_not_for_sale':False,'skus':[{
             'id':'I1','seller_sku':'S1','price':{'sale_price':'61.49','currency':'PHP'},'status_info':{'status':'NORMAL'}}]}}]}
-    window={'schema_version':'erp-goods-sales-reference-v1','source_id':'WINDOW',**flags,
-        'basis':'erp_goods_warehouse_seven_days_reference','records':{'S1':{'sku':'S1','status':'ok','observed_at':flags['completed_at'],'warehouses':[{'storage_name':'WH-PH','quantity':0,'status':'ok'}]}}}
     local={'schema_version':'local-live-price-history-v1','source_id':'LOCAL',**flags,
         'acquisition_complete':True,'archive_binding':'injected_synthetic_test','executions':[],'guards':[],'protections':[]}
     rate['vatRate']='0'
     fixed={'schema_version':'sales-daily-pricing-fees-v2','source_id':'FIXED',**flags,'acquisition_complete':True,'artifact_file':'synthetic-fees.json','daily_source':{'version':'synthetic','checked_at':flags['queried_at']},
         'config':{'version':'fixed-test-v1','overseas':{'PH':rate},'public':{},'departments':{},'freight':{}}}
-    return capture,[target],{'sales':sales,'platform':platform,'window':window,
+    return capture,[target],{'sales':sales,'platform':platform,
         'local_history':local,'fixed_fees':fixed,'official_history':{
             'schema_version':'official-recent-price-v1','basis':'official_type_2_completion_time','synthetic':True,
             'source_id':'OFFICIAL','artifact_file':'synthetic.json','completed_at':flags['completed_at'],
@@ -42,13 +40,13 @@ def sources():
             'records':{'I1':{'status':'ok','count':0},'I2':{'status':'ok','count':0}}}}
 
 
-def test_live_online_uses_actual_platform_price_explicit_activity_exact_fee_and_verified_zero_window():
+def test_live_online_uses_actual_platform_price_explicit_activity_exact_fee_and_official_history():
     from app.adapters.live_online_preparation import prepare_online_states
     c,t,s=sources();r=prepare_online_states(c,t,**s)
     assert not r['issues'] and len(r['online'])==1
     state=r['online'][0]['state']
     assert state['activity_locked'] is True and state['sellable'] is True
-    assert state['history_known'] and state['sales_complete'] and state['sales_7d']==0
+    assert state['history_known'] and state['recent_price_log']['count']==0
     assert state['protected'] is False and state['pending_submission'] is False
     assert state['profit_check']['model']['fixed_cost_divisor']=='0.1042'
     assert r['contracts'][0]['contract']['rounding']=='ROUND_UP'
@@ -76,12 +74,15 @@ def test_foreign_sample_source_cannot_be_joined_to_live_bundle():
     with pytest.raises(ValueError):prepare_online_states(c,t,**s)
 
 
-def test_missing_reference_sales_does_not_block_pricing_preparation():
+def test_online_preparation_needs_no_warehouse_sales_source():
     from app.adapters.live_online_preparation import prepare_online_states
-    c,t,s=sources();s['window']['records']={}
+    c,t,s=sources()
     r=prepare_online_states(c,t,**s)
     assert len(r['online'])==1 and not r['issues']
-    assert r['online'][0]['state']['sales_7d'] is None
+    assert set(r['references'])=={'sales','platform','local_history','fixed_fees','official_price_history','proofs'}
+    proof=next(iter(r['references']['proofs'].values()))
+    assert set(proof)=={'fee','fixed_fee_source','platform_observed_at','current_components_observed_at',
+        'bundle_completed_at','sales_batch_export','evaluated_at'}
 
 
 @pytest.mark.parametrize('payload', [None, {}, {'schema_version': 'wrong'},

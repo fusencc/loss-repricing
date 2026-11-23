@@ -202,7 +202,6 @@ def test_incomplete_snapshot_dates_and_online_states_fail_without_inventing_valu
 def test_online_price_cannot_be_observed_before_its_change(source_files):
     capture, evidence = source_files
     evidence["online"][0]["state"]["last_changed_at"] = "2026-11-09T14:55:00+08:00"
-    evidence["online"][1]["state"]["sales_7d"] = 5
     report = preview_pricing(capture, evidence)
     decisions = {row["key"]["item_id"]: row for row in report["decisions"]}
     assert decisions["0001001"]["reason_code"] == "stale_online"

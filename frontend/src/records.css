@@ -55,7 +55,7 @@
 .records-search input:focus-visible{outline:2px solid currentColor;outline-offset:2px}
 
 /* 商品身份、同层价格字段、独立执行状态三列；价格只展示已保存金额。 */
-.records-log{display:grid;grid-template-columns:minmax(140px,.85fr) minmax(0,4fr) minmax(76px,.5fr);align-items:start;gap:12px 18px;padding:14px 0;border-bottom:1px solid var(--r-line)}
+.records-log{display:grid;grid-template-columns:minmax(140px,.85fr) minmax(0,4fr) minmax(120px,.85fr);align-items:start;gap:12px 18px;padding:14px 0;border-bottom:1px solid var(--r-line)}
 .records-log:last-child{border-bottom:0}
 .records-log-heading{display:flex;flex-direction:column;align-items:flex-start;gap:9px;min-width:0}
 .records-log-heading>div:first-child{min-width:0}
@@ -70,7 +70,9 @@
 .records-id-copy-button:focus-visible{outline:2px solid var(--r-mint);outline-offset:3px}
 .records-id-copy-button:disabled{cursor:wait}
 /* 状态是价格明细之外的独立列，顶部对齐并在本列居中；不使用位移或绝对定位覆盖金额。 */
-.records-log-state{grid-column:3;grid-row:1;align-self:start;justify-self:stretch;display:flex;justify-content:center;min-width:0}
+.records-log-state{grid-column:3;grid-row:1;align-self:start;justify-self:stretch;display:flex;flex-direction:column;align-items:center;gap:7px;min-width:0}
+/* 原因是本条保存的说明；保留换行、允许长文本断行，始终占用自身网格高度。 */
+.records-log-state .records-log-reason{margin:0;width:100%;font-size:11px;line-height:1.6;color:var(--r-muted);white-space:pre-wrap;overflow-wrap:anywhere}
 /* 毛利、阶段价和上传价使用同层字段及统一标签/金额样式，宽屏保持同一顶线。 */
 .records-log-stages{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));align-items:start;gap:10px 16px;margin:0;min-width:0;max-width:100%}
 .records-stage-field{min-width:0}
@@ -80,7 +82,7 @@
 .records-log-target dd,.records-change-up{color:var(--r-mint)}
 .records-log>.sku-price-reference{grid-column:1/-1;margin:0;font-size:12px}
 @media(max-width:900px){
-  .records-log{grid-template-columns:minmax(0,1fr) minmax(76px,auto);gap:10px 14px}
+  .records-log{grid-template-columns:minmax(0,1fr) minmax(0,.8fr);gap:10px 14px}
   .records-log-heading{grid-column:1;grid-row:1}
   .records-log-state{grid-column:2;grid-row:1}
   .records-log-stages{grid-column:1/-1;grid-row:2}

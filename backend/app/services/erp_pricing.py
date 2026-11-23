@@ -85,7 +85,7 @@ def _public_preview(artifact):
     return report
 
 
-def save_pricing_preview(runtime_dir, capture_id, evidence=None, *, exports=None, current_fx=None, sales_source=None, native_source=None, order_preparation=None, order_headers_source=None, sales_window_source=None, local_history_source=None, platform_source=None, online_preparation=None, fixed_fees_source=None):
+def save_pricing_preview(runtime_dir, capture_id, evidence=None, *, exports=None, current_fx=None, sales_source=None, native_source=None, order_preparation=None, order_headers_source=None, local_history_source=None, platform_source=None, online_preparation=None, fixed_fees_source=None):
     capture = load_capture(runtime_dir, capture_id)
     if sales_source is not None and (
         sales_source['erp_capture_id'] != capture_id
@@ -105,7 +105,7 @@ def save_pricing_preview(runtime_dir, capture_id, evidence=None, *, exports=None
         or (order_preparation is not None and order_preparation['references']['native_source'] != native_source['source_id'])
     ):
         raise ValueError('原生明细来源与采集、样本或订单准备引用不一致')
-    for label, source in (('七日销量',sales_window_source),('本程序真实提价历史',local_history_source),('平台现态',platform_source),('当前费用',fixed_fees_source)):
+    for label, source in (('本程序真实提价历史',local_history_source),('平台现态',platform_source),('当前费用',fixed_fees_source)):
         if source is not None and (source['erp_capture_id'] != capture_id
                 or source['synthetic'] != bool(capture.get('synthetic', False))
                 or source['sample_only'] != bool(capture.get('sample_only', False))):
@@ -118,7 +118,7 @@ def save_pricing_preview(runtime_dir, capture_id, evidence=None, *, exports=None
     ):
         raise ValueError('订单归属来源与采集、样本或订单准备引用不一致')
     if online_preparation is not None:
-        for name, source in (('sales',sales_source),('platform',platform_source),('window',sales_window_source),
+        for name, source in (('sales',sales_source),('platform',platform_source),
                              ('local_history',local_history_source),('fixed_fees',fixed_fees_source)):
             expected = source['source_id'] if source else None
             if online_preparation['references'].get(name) != expected:
@@ -133,8 +133,6 @@ def save_pricing_preview(runtime_dir, capture_id, evidence=None, *, exports=None
         artifact['references']['fixed_fees']=fixed_fees_source
     if platform_source is not None:
         artifact['references']['platform_current_state'] = platform_source
-    if sales_window_source is not None:
-        artifact['references']['sales_window'] = sales_window_source
     if local_history_source is not None:
         artifact['references']['local_price_history'] = local_history_source
     if order_headers_source is not None:

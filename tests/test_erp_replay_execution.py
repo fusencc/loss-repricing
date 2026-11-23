@@ -198,7 +198,6 @@ def test_preview_batch_preserves_partial_failure_and_independent_verification(re
     client, evidence, now = replay
     app = client.app
     factory = app.state.factory
-    evidence["online"][1]["state"]["sales_7d"] = 5
     report, snapshot = load_demo_input(client, evidence, now, monkeypatch)
     expected = {row["key"]["item_id"]: row for row in report["decisions"] if row["ready"]}
     assert set(expected) == {"0001001", "0001002"}

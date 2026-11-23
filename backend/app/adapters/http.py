@@ -18,7 +18,7 @@ from app.adapters.base import LookupResult, SourceUnavailable, SubmitResult
 from app.adapters.excel import VAT_UPLOAD_COLUMNS, XLSX_MIME, price_upload_workbook
 from app.adapters.normalization import (
     FX_FIELDS, LINE_CONSTANTS, LINE_FIELDS, LOOKUP_FIELDS, LOOKUP_OPTIONAL, ONLINE_CONSTANTS,
-    ONLINE_FIELDS, ONLINE_OPTIONAL, SAFE_LABEL, fx_rates, identity_text, mapped, money, online_state, read_path, source_line,
+    ONLINE_FIELDS, SAFE_LABEL, fx_rates, identity_text, mapped, money, online_state, read_path, source_line,
     source_record_issue, source_stamp, source_time, valid_path, variant_key,
 )
 from app.adapters.sales_auth import SalesAuth
@@ -167,7 +167,7 @@ def _check_collection(name, spec, services):
         if not valid_path(spec.get("records_path")):
             raise ValueError("缺少记录列表路径")
         if name == "online":
-            _fields(spec, ONLINE_FIELDS, ONLINE_OPTIONAL, static=ONLINE_CONSTANTS)
+            _fields(spec, ONLINE_FIELDS, static=ONLINE_CONSTANTS)
         else:
             _fields(spec, LINE_FIELDS, static=LINE_CONSTANTS)
         _check_pagination(spec)

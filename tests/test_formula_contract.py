@@ -31,9 +31,7 @@ def sample(*, loss="-2", quantity="1", basis="unit", currency="CNY", current="10
                             profit_check=OnlineProfitCheck(overseas_stock="0",mode="direct",department="TEST",
                                 inventory_observed_at=NOW,source_ref="synthetic/profit",
                                 model=FeeModel(revenue_factor=factor,fixed_cost=cost,version="synthetic-online-v1",verified=True)),
-                            observed_at=NOW, sales_7d=0, sales_complete=True, history_known=True,
-                            sales_basis="erp_goods_warehouse_seven_days_reference",
-                            sales_observed_at=NOW)],
+                            observed_at=NOW, history_known=True)],
         contracts={"MY": SiteContract(site="MY", verified=True, price_step=step, rounding=rounding,
                                       upload_column="税后价格", version="synthetic-v1", warehouses=["direct"])},
         complete_sources=["loss_allocatable", "loss_pending", "blocked_allocatable", "blocked_pending"],
@@ -205,8 +203,8 @@ def test_published_snapshot_schema_matches_confirmation_defaults():
 
     schema = json.loads((Path(__file__).resolve().parents[1] / "docs" / "snapshot.schema.json").read_text(encoding="utf-8"))
     current = Snapshot.model_json_schema()
-    for model, field in [("SourceLine", "allocation_reliable"), ("OnlineState", "sales_complete"),
-                         ("OnlineState", "history_known")]:
+    assert schema == current
+    for model, field in [("SourceLine", "allocation_reliable"), ("OnlineState", "history_known")]:
         assert schema["$defs"][model]["properties"][field]["default"] is False
         assert schema["$defs"][model]["properties"][field] == current["$defs"][model]["properties"][field]
     assert schema["$defs"]["SiteContract"] == current["$defs"]["SiteContract"]

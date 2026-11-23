@@ -5,7 +5,7 @@ import { formatDecimal } from './decimal-display.ts'
 import SkuPriceReferenceView from './SkuPriceReference.vue'
 import RecordIdCopy from './RecordIdCopy.vue'
 import { recordPrice, recordTone, recordStatusLabel, recordDisplayStates,
-  changeLabel, isPositiveChange, filterRecordItems, stagePriceLabel, recordStageLabel,
+  changeLabel, isPositiveChange, filterRecordItems, stagePriceLabel, recordStageLabel, recordStateReason,
   type RecordStatusFilter,
   type SellerGroup } from './records-model'
 
@@ -52,7 +52,7 @@ const searchInput = ref<HTMLInputElement | null>(null)
         <header class="records-log-heading">
           <div>
             <h3><RecordIdCopy v-if="item.key.sku" :value="item.key.sku" label="SKU" /><template v-else>SKU 未记录</template></h3>
-            <p>{{ item.shop_name || item.key.shop_id }} / {{ item.key.site }} / {{ item.key.platform }}</p>
+            <p>{{ item.shop_name || item.key.shop_id }} / {{ item.key.site }}</p>
             <!-- key.item_id 是规范身份中的具体商品 ID；不拿产品 ID 或主 SKU 补齐，缺失只影响展示。 -->
             <p><RecordIdCopy v-if="item.key.item_id" :value="item.key.item_id" label="商品ID" prefix="商品ID：" /><template v-else>商品ID：未记录</template></p>
           </div>
@@ -85,7 +85,10 @@ const searchInput = ref<HTMLInputElement | null>(null)
         </dl>
 
         <!-- 执行状态独立占最右列，不与上传价堆叠；请求金额不等同于受理或实际生效。 -->
-        <div class="records-log-state" aria-label="执行状态"><span class="records-status" :class="recordTone(item.status)"><i></i>{{ recordStatusLabel(item.status) }}</span></div>
+        <div class="records-log-state" aria-label="执行状态">
+          <span class="records-status" :class="recordTone(item.status)"><i></i>{{ recordStatusLabel(item.status) }}</span>
+          <p class="records-log-reason">{{ recordStateReason(item) }}</p>
+        </div>
         <SkuPriceReferenceView :reference="item.decision?.sku_price_reference" :price-limit="item.decision?.price_limit" />
       </article>
       <p v-if="!visibleItems.length" class="records-log-empty" role="status">

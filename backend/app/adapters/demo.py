@@ -56,8 +56,7 @@ class DemoAdapter:
                 profit_check=OnlineProfitCheck(overseas_stock="0",mode="direct",department="DEMO",
                     inventory_observed_at=now,source_ref="synthetic-online-profit-v1",
                     model=FeeModel(revenue_factor="0.9",fixed_cost=fixed,version="demo-online-v1",verified=True)),
-                observed_at=now, sales_7d=21 if scenario == "protected" else 6, sales_complete=True,
-                sales_basis="erp_goods_warehouse_seven_days_reference", sales_observed_at=now,
+                observed_at=now,
                 history_known=scenario != "history", activity_locked=scenario == "activity"))
         # 模拟来源也反映自己已生效的价格，避免下一轮把固定样本旧价误判为人工修改。
         for row in online:

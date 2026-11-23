@@ -112,7 +112,6 @@ def test_midnight_stops_cached_submissions_and_queues_fresh_day(context, monkeyp
         for online in snapshot.online:
             online.observed_at = clock[0]
             online.profit_check.inventory_observed_at = clock[0]
-            online.sales_observed_at = clock[0]
         return snapshot
     def submit(execution_id, decision):
         calls.append((decision.trace['business_date'], clock[0].astimezone(BEIJING).date().isoformat()))
@@ -288,7 +287,6 @@ def test_rollover_during_refresh_preserves_selected_target(context, monkeypatch,
         for state in snapshot.online:
             state.observed_at = clock[0]
             state.profit_check.inventory_observed_at = clock[0]
-            state.sales_observed_at = clock[0]
         if len(collections) == 2 and cross_at == 'refresh':
             clock[0] += timedelta(seconds=2)
         return snapshot

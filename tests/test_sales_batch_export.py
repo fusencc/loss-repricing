@@ -64,7 +64,7 @@ def test_export_download_verifies_coverage_and_uses_original_headers(tmp_path):
             _export_file(client, Auth(), [first, '1234567890123456703'], '集团二部')
 
 
-def test_erp_goods_sales_are_only_requested_after_official_history_passes(monkeypatch):
+def test_official_history_filters_candidates_before_online_preparation(monkeypatch):
     from types import SimpleNamespace
 
     from app.services import erp_workflow
@@ -82,17 +82,12 @@ def test_erp_goods_sales_are_only_requested_after_official_history_passes(monkey
         assert [key.item_id for key in keys] == ['protected', 'allowed']
         return 'official-source'
 
-    def reference(settings, capture, targets, **kwargs):
-        calls.append('erp-sales')
-        assert targets == [allowed]
-        return 'sales-source'
-
     monkeypatch.setattr(erp_workflow, 'capture_recent_price_changes', recent)
     monkeypatch.setattr(erp_workflow, 'recent_price_log_for',
                         lambda _, key: SimpleNamespace(count=int(key.item_id == 'protected')))
-    monkeypatch.setattr(erp_workflow, 'capture_goods_sales', reference)
-    _, eligible, _, filtered = erp_workflow.capture_candidate_references({}, {}, [protected, allowed])
-    assert calls == ['official-history', 'erp-sales']
+    source, eligible, filtered = erp_workflow.filter_candidate_history({}, [protected, allowed])
+    assert source == 'official-source'
+    assert calls == ['official-history']
     assert eligible == [allowed]
     assert [row['status'] for row in filtered] == ['history_protected', 'passed']
 
@@ -113,7 +108,7 @@ def test_batch_prices_are_used_only_when_current_platform_confirms_them():
     ])
     report = prepare_online_states(capture, targets, **inputs)
     assert report['online'][0]['state']['marketing_price'] == '61.49'
-    assert report['online'][0]['state']['sales_7d'] == 0  # ERP 按仓销量，与导出参考列口径独立。
+    assert not report['issues']
     exported['含vat价格'] = '60'
     report = prepare_online_states(capture, targets, **inputs)
     assert not report['online']

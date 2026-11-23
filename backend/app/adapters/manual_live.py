@@ -20,7 +20,6 @@ from app.adapters.normalization import money
 from app.adapters.sales_auth import ORIGIN, SalesAuth
 from app.adapters.sales_capture import capture_sales_sources, _json_values
 from app.adapters.sales_platform_capture import capture_platform_controls
-from app.adapters.erp_goods_sales import capture_goods_sales
 from app.adapters.current_pricing_fees import capture_current_fees, refresh_daily_fees
 from app.adapters.sales_price_reference import capture_sku_price_references
 from app.adapters.live_online_preparation import prepare_online_states
@@ -182,12 +181,10 @@ class ManualLiveAdapter:
         from app.adapters.official_price_logs import recent_price_log_for
         if recent_price_log_for(official_history,k).count != 0:
             raise ValueError('近72小时已有调价日志，本轮不调')
-        eligible = [target]
-        window = capture_goods_sales(self.settings, capture, eligible, client=self.client)
         history = capture_local_price_history(self.settings, capture)
         fixed = capture_current_fees(self.settings, capture, platform, client=self.client)
         fx = query_current_erp_fx(self.settings)
-        for name, source in [('sales',sales),('platform',platform),('window',window),('history',history),('fixed',fixed),('fx',fx)]:
+        for name, source in [('sales',sales),('platform',platform),('history',history),('fixed',fixed),('fx',fx)]:
             write_verified(self.directory / (capture['capture_id']+'-'+name+'.json'), source)
         if not platform.get('acquisition_complete') or len(platform['records']) != 1: raise ValueError('当前来源未完整')
         control = platform['records'][0]
@@ -201,7 +198,7 @@ class ManualLiveAdapter:
         price_references = capture_sku_price_references(self.settings,capture,[target],
             platform=prepared_platform,client=self.client)
         prepared = prepare_online_states(capture, [target], sales=sales, platform=prepared_platform,
-            window=window, local_history=history, fixed_fees=fixed, official_history=official_history,
+            local_history=history, fixed_fees=fixed, official_history=official_history,
             price_references=price_references)
         write_verified(self.directory / (capture['capture_id']+'-preparation.json'), {'preparation': prepared, 'activity': activity, 'authorization': a})
         if prepared['issues'] or len(prepared['online']) != 1: raise ValueError(str(prepared['issues']))

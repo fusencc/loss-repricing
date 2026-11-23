@@ -4,13 +4,6 @@ import pytest
 from test_execution_safety import safety_context
 
 
-def test_stale_optional_sales_do_not_block():
-    from test_pricing import single, NOW
-    result = single(online_fields={'sales_basis': 'erp_goods_warehouse_seven_days_reference',
-                                   'sales_observed_at': NOW - timedelta(days=1)})
-    assert result.ready
-
-
 def test_legacy_company_observations_are_not_the_official_count_source():
     from test_live_online_preparation import sources
     from app.adapters.live_online_preparation import prepare_online_states

@@ -40,8 +40,7 @@ class SyntheticAdapter:
                                                  inventory_observed_at=self.clock[0], source_ref="synthetic-inventory",
                                                  model=dict(revenue_factor="1", fixed_cost="0",
                                                             version="synthetic-online-v1", verified=True)),
-                               observed_at=self.clock[0], sales_7d=6, history_known=True, sales_complete=True,
-                               sales_basis="erp_goods_warehouse_seven_days_reference", sales_observed_at=self.clock[0]))
+                               observed_at=self.clock[0], history_known=True))
         return Snapshot.model_validate(dict(
             as_of=self.clock[0], business_date=day, fx_date=day, fx_rates={"CNY": "1", "MYR": "0.6"},
             lines=lines, online=online,

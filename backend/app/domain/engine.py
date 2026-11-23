@@ -49,7 +49,7 @@ def fx_ratio(snapshot: Snapshot, loss_currency: str, station_currency: str) -> M
 def conflicting_main_sku_scopes(
     online: Iterable[OnlineState], now: datetime,
 ) -> set[tuple[str, str, Site, str]]:
-    """只核对当日商品主SKU归属冲突；参考销量的差异不影响定价。"""
+    """核对当日商品主SKU归属冲突。"""
     today = now.astimezone(BEIJING).date()
     scopes_by_target = defaultdict(set)
     for state in online:
@@ -219,7 +219,6 @@ def _decide(
         "source_rows": [row.model_dump(mode="json") for row in rows],
         "online_rows": [state.model_dump(mode="json") for state in states],
         "site_contract": contract.model_dump(mode="json") if contract else None,
-        "sales_policy": "optional_reference_only",
         "warnings": list(dict.fromkeys(warning for state in states if state.profit_check
                                        for warning in state.profit_check.warnings())),
     }
@@ -342,7 +341,6 @@ def _decide(
         if elapsed < timedelta(hours=72):
             return finish("recent_increase", "距离上次确认生效不足 72 小时", status="本轮不调")
 
-    # 2026-11-17用户取消销量保护：开放接口仓库销量仅供参考，缺失不阻断。
     # 2026-11-20用户暂停活动限制：参加活动不再拦截算价；营销价、折扣及有效价核验保持不变。
     if not online.sellable:
         warn("not_sellable", "子 SKU 当前不可售，仅告警")

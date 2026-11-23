@@ -62,6 +62,17 @@ def ceiling(amount, currency='MYR'):
     return reference([sample(s,1,amount,'0') for s in 'ABC']).model_copy(update={'currency':currency})
 
 
+def test_online_state_retains_only_top3_sample_sales():
+    from test_pricing import online, key
+
+    state = online(key(), sku_price_reference=ceiling('10.5'))
+    payload = state.model_dump(mode='json')
+    removed = {'sales_7d', 'sales_basis', 'sales_observed_at', 'sales_complete'}
+    assert removed.isdisjoint(type(state).model_fields)
+    assert removed.isdisjoint(payload)
+    assert all(sample['sales_7d'] == 1 for sample in payload['sku_price_reference']['samples'])
+
+
 def test_reference_caps_the_target_marketing_price():
     from test_pricing import single
     result=single(online_fields={'sku_price_reference':ceiling('10.50')})

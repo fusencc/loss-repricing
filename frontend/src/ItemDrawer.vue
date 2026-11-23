@@ -27,7 +27,7 @@ const traceLabels: Record<string, string> = {
   fx_rates: '本日汇率（每 1 CNY）', complete_sources: '已齐备的候选来源',
   source_versions: '来源版本', source_rows: '原始候选行', online_rows: '在线快照',
   warnings: '计算告警', source_issues: '来源异常记录', online_profit: '在线利润校验依据',
-  site_contract: '站点接口合同', sales_window: '仓库七日参考销量',
+  site_contract: '站点接口合同',
   sku_price_reference: '同 SKU Top3 营销参考价',
   price_limit: '参考价上限与压减',
   excluded_source_rows: '排除的候选行', candidate_unit_losses: '候选单件亏损（原币）',

@@ -397,8 +397,6 @@
       "marketing_price": "10",
       "fee_scope": "normal",
       "observed_at": "2026-11-05T03:33:10.203250Z",
-      "sales_7d": 6,
-      "sales_complete": true,
       "history_known": true,
       "last_increase_at": null,
       "pending_submission": false,
@@ -417,9 +415,7 @@
           "version": "synthetic-online-v1",
           "verified": true
         }
-      },
-      "sales_basis": "erp_goods_warehouse_seven_days_reference",
-      "sales_observed_at": "2026-11-05T03:33:10.203250Z"
+      }
     },
     {
       "key": {
@@ -437,8 +433,6 @@
       "marketing_price": "10",
       "fee_scope": "normal",
       "observed_at": "2026-11-05T03:33:10.203250Z",
-      "sales_7d": 6,
-      "sales_complete": true,
       "history_known": true,
       "last_increase_at": null,
       "pending_submission": false,
@@ -457,9 +451,7 @@
           "version": "synthetic-online-v1",
           "verified": true
         }
-      },
-      "sales_basis": "erp_goods_warehouse_seven_days_reference",
-      "sales_observed_at": "2026-11-05T03:33:10.203250Z"
+      }
     },
     {
       "key": {
@@ -477,8 +469,6 @@
       "marketing_price": "10",
       "fee_scope": "normal",
       "observed_at": "2026-11-05T03:33:10.203250Z",
-      "sales_7d": 21,
-      "sales_complete": true,
       "history_known": true,
       "last_increase_at": null,
       "pending_submission": false,
@@ -497,9 +487,7 @@
           "version": "synthetic-online-v1",
           "verified": true
         }
-      },
-      "sales_basis": "erp_goods_warehouse_seven_days_reference",
-      "sales_observed_at": "2026-11-05T03:33:10.203250Z"
+      }
     },
     {
       "key": {
@@ -517,8 +505,6 @@
       "marketing_price": "10",
       "fee_scope": "normal",
       "observed_at": "2026-11-05T03:33:10.203250Z",
-      "sales_7d": 6,
-      "sales_complete": true,
       "history_known": true,
       "last_increase_at": null,
       "pending_submission": false,
@@ -537,9 +523,7 @@
           "version": "synthetic-online-v1",
           "verified": true
         }
-      },
-      "sales_basis": "erp_goods_warehouse_seven_days_reference",
-      "sales_observed_at": "2026-11-05T03:33:10.203250Z"
+      }
     },
     {
       "key": {
@@ -557,8 +541,6 @@
       "marketing_price": "100000",
       "fee_scope": "normal",
       "observed_at": "2026-11-05T03:33:10.203250Z",
-      "sales_7d": 6,
-      "sales_complete": true,
       "history_known": true,
       "last_increase_at": null,
       "pending_submission": false,
@@ -577,9 +559,7 @@
           "version": "synthetic-online-v1",
           "verified": true
         }
-      },
-      "sales_basis": "erp_goods_warehouse_seven_days_reference",
-      "sales_observed_at": "2026-11-05T03:33:10.203250Z"
+      }
     },
     {
       "key": {
@@ -597,8 +577,6 @@
       "marketing_price": "10",
       "fee_scope": "normal",
       "observed_at": "2026-11-05T03:33:10.203250Z",
-      "sales_7d": 6,
-      "sales_complete": true,
       "history_known": false,
       "last_increase_at": null,
       "pending_submission": false,
@@ -617,9 +595,7 @@
           "version": "synthetic-online-v1",
           "verified": true
         }
-      },
-      "sales_basis": "erp_goods_warehouse_seven_days_reference",
-      "sales_observed_at": "2026-11-05T03:33:10.203250Z"
+      }
     },
     {
       "key": {
@@ -637,8 +613,6 @@
       "marketing_price": "10",
       "fee_scope": "normal",
       "observed_at": "2026-11-05T03:33:10.203250Z",
-      "sales_7d": 6,
-      "sales_complete": true,
       "history_known": true,
       "last_increase_at": null,
       "pending_submission": false,
@@ -657,9 +631,7 @@
           "version": "synthetic-online-v1",
           "verified": true
         }
-      },
-      "sales_basis": "erp_goods_warehouse_seven_days_reference",
-      "sales_observed_at": "2026-11-05T03:33:10.203250Z"
+      }
     },
     {
       "key": {
@@ -677,8 +649,6 @@
       "marketing_price": "10",
       "fee_scope": "normal",
       "observed_at": "2026-11-05T03:33:10.203250Z",
-      "sales_7d": 6,
-      "sales_complete": true,
       "history_known": true,
       "last_increase_at": null,
       "pending_submission": false,
@@ -697,9 +667,7 @@
           "version": "synthetic-online-v1",
           "verified": true
         }
-      },
-      "sales_basis": "erp_goods_warehouse_seven_days_reference",
-      "sales_observed_at": "2026-11-05T03:33:10.203250Z"
+      }
     }
   ],
   "contracts": {

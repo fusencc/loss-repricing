@@ -21,7 +21,6 @@ ONLINE_FIELDS = KEY_FIELDS | {
     "protected", "activity_locked", "sellable",
     "profit_check",
 }
-ONLINE_OPTIONAL = frozenset({"sales_7d", "sales_basis", "sales_observed_at", "sales_complete"})
 FX_FIELDS = frozenset({"fx_date", "rates"})
 LOOKUP_FIELDS = KEY_FIELDS | {"actual_price", "currency", "observed_at", "price_basis"}
 LOOKUP_OPTIONAL = frozenset({"effective_at", "row_status", "task_id", "execution_id"})
@@ -29,7 +28,7 @@ LOOKUP_OPTIONAL = frozenset({"effective_at", "row_status", "task_id", "execution
 LINE_CONSTANTS = {"basis", "allocation_reliable", "fee_scope", "abnormal"} | KEY_FIELDS
 ONLINE_CONSTANTS = {"fee_scope"} | KEY_FIELDS
 BOOL_FIELDS = {
-    "allocation_reliable", "abnormal", "sales_complete",
+    "allocation_reliable", "abnormal",
     "protected", "activity_locked", "sellable",
 }
 CURRENCY = re.compile(r"[A-Z]{3}")
@@ -181,21 +180,7 @@ def source_line(record, spec, source):
 
 
 def online_state(record, spec, profit_versions):
-    values = mapped(record, {k:v for k,v in spec["field_map"].items() if k not in ONLINE_OPTIONAL}, spec.get("constants"))
-    # 2026-11-17：销量仅作参考，缺字段/坏数量不能升级为在线身份异常并挂起其他商品。
-    reference = {}
-    try:
-        for name,path in spec["field_map"].items():
-            if name in ONLINE_OPTIONAL:reference[name]=read_path(record,path)
-        if reference:
-            if (type(reference.get('sales_7d')) is not int or reference['sales_7d']<0
-                    or reference.get('sales_basis')!='erp_goods_warehouse_seven_days_reference'
-                    or type(reference.get('sales_complete')) is not bool):
-                raise ValueError('参考销量无效')
-            reference['sales_observed_at']=source_time(reference.get('sales_observed_at'))
-    except (KeyError,IndexError,TypeError,ValueError):
-        reference={'sales_7d':None,'sales_basis':None,'sales_observed_at':None,'sales_complete':False}
-    values.update(reference)
+    values = mapped(record, spec["field_map"], spec.get("constants"))
     _validate_common(values)
     # 通用live来源不证明近期调价；待PricingService查询官方计数及本地未完成任务锁。
     values.update(history_known=False, last_increase_at=None, pending_submission=False)
