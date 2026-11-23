@@ -1,6 +1,7 @@
 from collections.abc import Iterator
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
+from enum import Enum
 from hashlib import sha256
 import json
 from typing import Annotated, Any, Literal
@@ -100,6 +101,12 @@ class FeeModel(BaseModel):
         return price.numerator > 0 and self.profit_exact(price) >= price * MoneyRatio(ONLINE_PROFIT_MINIMUM_MARGIN)
 
 
+class ProfitCheckIssue(Enum):
+    STOCK_MODE = "海外仓库存与利润校验仓配不一致"
+    SOURCE = "库存日期、部门或利润公式来源未确认"
+    MODEL = "在线利润模型未确认或不能计算在线利润校正额"
+
+
 class OnlineProfitCheck(BaseModel):
     """按当前海外库存选择仓配的完整在线利润校验证据。
 
@@ -118,24 +125,32 @@ class OnlineProfitCheck(BaseModel):
         """缺库存是经授权的选模假设，告警留证但不作为待处理原因。"""
         return ["海外库存缺失，已按直发模型计算，请核实库存"] if self.overseas_stock is None else []
 
-    def problem(self, now, business_date, *, minimum_margin_required=True):
+    def validation_issue(
+        self, now: datetime, business_date: date, *, minimum_margin_required: bool = True,
+    ) -> ProfitCheckIssue | None:
         from .engine import BEIJING
         # 2026-11-20用户确认：缺库存用直发；负数和仓配冲突仍阻断。
         selected = "overseas" if self.overseas_stock is not None and self.overseas_stock > 0 else "direct"
         if (self.overseas_stock is not None and self.overseas_stock < 0) or self.mode != selected:
-            return "海外仓库存与利润校验仓配不一致"
+            return ProfitCheckIssue.STOCK_MODE
         if (not self.department.strip() or not self.source_ref.strip()
                 or self.inventory_observed_at > now
                 or self.inventory_observed_at.astimezone(BEIJING).date() != business_date):
-            return "库存日期、部门或利润公式来源未确认"
+            return ProfitCheckIssue.SOURCE
         if (not self.model.verified or not self.model.version.strip() or self.model.fixed_cost < 0
                 or (minimum_margin_required and self.model.revenue_factor <= ONLINE_PROFIT_MINIMUM_MARGIN)):
-            return "在线利润模型未确认或不能计算在线利润校正额"
+            return ProfitCheckIssue.MODEL
         return None
 
-    def minimum_actual_price(self):
-        """完整在线利润率达到1%的最低实际价：b/(a-m)，用于求在线利润校正额。"""
-        return MoneyRatio(self.model.fixed_cost, self.model.fixed_cost_divisor) / (MoneyRatio(self.model.revenue_factor) - MoneyRatio(ONLINE_PROFIT_MINIMUM_MARGIN))
+    def minimum_actual_price(self) -> MoneyRatio | None:
+        """求满足 (a - m) × P ≥ b 的价格下限。无正价能达到时返回 None。"""
+        factor = self.model.revenue_factor
+        if factor == ONLINE_PROFIT_MINIMUM_MARGIN and self.model.fixed_cost == 0:
+            return MoneyRatio(Decimal(0))  # 每个正价都恰好达到 1%。
+        if factor <= ONLINE_PROFIT_MINIMUM_MARGIN:
+            return None
+        station_cost = MoneyRatio(self.model.fixed_cost, self.model.fixed_cost_divisor)
+        return station_cost / (MoneyRatio(factor) - MoneyRatio(ONLINE_PROFIT_MINIMUM_MARGIN))
 
 
 class RecentPriceLog(BaseModel):
@@ -179,6 +194,13 @@ class OnlineState(BaseModel):
     # 接口确实提供时才映射；缺失不推断没有人工改价，也不猜测操作者。
     price_version: StrictStr | None = None
     last_changed_at: AwareDatetime | None = None
+
+    def actual_price_and_discount(self) -> tuple[Decimal, MoneyRatio] | None:
+        """缺营销价时按含税零售价成交。有效成交比例 P/R 保留精确分数。"""
+        actual = self.marketing_price if self.marketing_price is not None else self.retail_price
+        if actual <= 0 or actual > self.retail_price:
+            return None
+        return actual, MoneyRatio(actual, self.retail_price)
 
 
 class SiteContract(BaseModel):

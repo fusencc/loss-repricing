@@ -153,7 +153,7 @@ def build_parser():
         *[f'  {name:22} {label}' for name, label in SOURCE_LABELS.items()],
         '',
         '说明：',
-        '  · 不指定 --source 时抓四类；指定 --salesperson 时仅两类亏损（禁止发货尚无已验证销售员筛选）。',
+        '  · 默认抓四类来源；--salesperson 按销售员筛选所选来源的候选名单和财务明细。',
         '  · 默认每类只导出前 20 笔财务（试抓）；加 --all 才全量。',
         '  · 凭据来自项目 .env，不会写入 output。',
         '',
@@ -198,8 +198,6 @@ def main(argv=None):
         parser.error('--batch-size 须在 1 至 1000 之间')
     if args.salesperson is not None and not args.salesperson.strip():
         parser.error('--salesperson 不能为空')
-    if args.source and args.salesperson and SOURCES[args.source][0] == 'blocked':
-        parser.error('禁止发货来源尚无已验证的销售员筛选；请改用亏损来源或不指定 --salesperson')
     if args.request_interval is not None and not 0 <= args.request_interval <= 300:
         parser.error('--request-interval 须在 0 至 300 秒之间')
 
@@ -214,10 +212,7 @@ def main(argv=None):
     run_dir.mkdir(parents=True, mode=0o700)
     settings = settings.model_copy(update={'runtime_dir': run_dir})
 
-    selected = [args.source] if args.source else [
-        name for name, (kind, _) in SOURCES.items()
-        if args.salesperson is None or kind == 'loss'
-    ]
+    selected = [args.source] if args.source else list(SOURCES)
     meta = {
         'run_id': run_id,
         'started_at': datetime.now(timezone.utc).isoformat(),

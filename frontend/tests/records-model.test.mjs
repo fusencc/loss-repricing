@@ -78,19 +78,21 @@ test('stage table formats saved amounts with sign and unit, never inventing zero
   assert.equal(isIncrease(null), false)
 })
 
-test('dialog stages use wrapping horizontal fields with saved price and secondary changes', async () => {
+test('dialog stages use wrapping horizontal fields with saved price and original margin', async () => {
   const { readFile } = await import('node:fs/promises')
   const source = await readFile(new URL('../src/SellerRecordLogs.vue', import.meta.url), 'utf8')
   const css = await readFile(new URL('../src/records.css', import.meta.url), 'utf8')
-  assert.match(source, /<dl v-if="item\.decision\?\.stages" class="records-log-stages"/)
-  assert.match(source, /<dt>\{\{ stage\.label \}\}<\/dt>/)
+  assert.match(source, /<dl class="records-log-stages"/)
+  assert.match(source, /<template v-if="item\.decision\?\.stages">/)
   assert.match(source, /<strong>\{\{ stagePriceLabel\(stage, item\.decision\.stages\.currency\) \}\}<\/strong>/)
-  assert.match(source, /<small class="records-stage-change">/)
+  assert.match(source, /<dt>修正一次毛利<\/dt>/)
+  assert.doesNotMatch(source, /records-stage-change|stageChangeLabel|stagePercentLabel/)
   assert.doesNotMatch(source, /<table|在线利润率导致的变动|stageProfitChangeLabel|stage\.profit_change_cny|records-stage-formula|公式：/)
   assert.doesNotMatch(css, /records-stage-table|records-stage-formula/)
   assert.match(css, /\.records-log\{display:grid;grid-template-columns:/)
-  assert.match(css, /\.records-log-stages\{display:grid;grid-template-columns:repeat\(auto-fit,minmax\(min\(135px,100%\),1fr\)\)/)
-  assert.match(css, /\.records-stage-change\{display:flex;flex-wrap:wrap;/)
+  assert.match(css, /\.records-log-stages\{display:grid;grid-template-columns:repeat\(5,minmax\(0,1fr\)\)/)
+  assert.match(css, /\.records-log-stages\{grid-template-columns:repeat\(2,minmax\(0,1fr\)\)\}/)
+  assert.doesNotMatch(css, /records-stage-change/)
 })
 
 test('records use the requested business labels and four fixed departments', async () => {

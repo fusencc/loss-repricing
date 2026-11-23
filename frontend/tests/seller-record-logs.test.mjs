@@ -14,7 +14,7 @@ after(async () => { await server?.close() })
 
 const item = () => ({
   id: 'compact-log', seller: { id: 'synthetic-seller', name: '测试销售员' }, status: '待核验',
-  key: { sku: 'SYNTHETIC-001', shop_id: 'SHOP-001', site: 'PH', platform: 'Tiktok' },
+  key: { sku: 'SYNTHETIC-001', item_id: '000123', product_id: 'PARENT-999', shop_id: 'SHOP-001', site: 'PH', platform: 'Tiktok' },
   shop_name: '合成测试店铺', first_margin: { amount: '-2.346', currency: 'CNY' },
   decision: { current_actual: '10', target_actual: '14.567', upload_price: '18.234',
     price_change: '4.567', trace: { station_currency: 'PHP' },
@@ -47,43 +47,71 @@ test('compact log retains identity, status, three horizontal stage fields and up
   assert.match(html, /合成测试店铺 \/ PH \/ Tiktok/)
   assert.match(html, /class="attention records-status"><i><\/i>待处理/)
   assert.equal((html.match(/data-stage=/g) ?? []).length, 3)
-  assert.equal((html.match(/class="records-stage-field"/g) ?? []).length, 3)
+  assert.equal((html.match(/class="records-stage-field"/g) ?? []).length, 5)
   assert.doesNotMatch(html, /<table|<thead|<tbody|<tr|scope="col"/)
-  assert.match(html, /<dt>① 原实际营销价<\/dt><dd><strong>10 PHP<\/strong>/)
-  assert.match(html, /<dt>② 补亏损<\/dt><dd><strong>12\.35 PHP<\/strong>/)
-  assert.match(html, /<dt>③ 利润校验<\/dt><dd><strong>14\.57 PHP<\/strong>/)
-  assert.match(html, /<header class="records-log-heading">.*原修正一次毛利：-2\.35 CNY.*<\/header>/s)
-  assert.match(html, /class="records-log-prices records-log-uploads"><div><dt>上传含税价<\/dt><dd>18\.24 PHP<\/dd><\/div><\/dl>/)
+  assert.match(html, /<dt>原实际营销价<\/dt><dd><strong>10 PHP<\/strong>/)
+  assert.match(html, /<dt>补毛利亏<\/dt><dd><strong>12\.35 PHP<\/strong>/)
+  assert.match(html, /<dt>利润校验变动<\/dt><dd><strong>14\.57 PHP<\/strong>/)
+  assert.match(html, /<header class="records-log-heading">.*商品ID：000123.*<\/header>/s)
+  assert.doesNotMatch(html, /<header class="records-log-heading">(?:(?!<\/header>).)*修正一次毛利/s)
+  assert.match(html, /data-field="first-margin"><dt>修正一次毛利<\/dt><dd><strong>-2\.35 CNY<\/strong>/)
+  assert.equal((html.match(/<dt>修正一次毛利<\/dt>/g) ?? []).length, 1)
+  assert.equal((html.match(/上传含税价/g) ?? []).length, 1)
+  assert.match(html, /class="records-stage-field" data-field="uploaded-price"><dt>上传含税价<\/dt><dd><strong>18\.24 PHP<\/strong><\/dd><\/div><\/dl>/)
   assert.doesNotMatch(html, /折合人民币|1\.75 元|建议上传价|18\.23 PHP/)
-  for (const text of ['10 PHP', '12.35 PHP', '14.57 PHP', '+0.27 元', '+18%']) {
+  for (const text of ['10 PHP', '12.35 PHP', '14.57 PHP']) {
     assert.ok(html.includes(text), `missing saved display: ${text}`)
   }
-  assert.match(html, /<dl class="records-log-stages" aria-label="三阶段价格明细">/)
-  assert.match(html, /class="records-stage-change"/)
-  assert.match(html, /比上一环节增加/)
-  assert.match(html, /涨幅/)
+  assert.match(html, /<dl class="records-log-stages" aria-label="毛利与价格明细">/)
+  assert.doesNotMatch(html, /records-stage-change|比上一环节增加|涨幅|\+0\.27 元|\+18%/)
+  const { readFile } = await import('node:fs/promises')
+  const source = await readFile(new URL('../src/SellerRecordLogs.vue', import.meta.url), 'utf8')
+  const css = await readFile(new URL('../src/records.css', import.meta.url), 'utf8')
+  assert.doesNotMatch(source, /stageChangeLabel|stagePercentLabel|isIncrease|records-stage-change/)
+  assert.doesNotMatch(css, /records-stage-change/)
   assert.doesNotMatch(html, /records-stage-table|可横向滚动/)
   assert.doesNotMatch(html, /records-stage-formula|公式：|P＋Δ|在线利润率导致的变动|999\.99/)
   assert.deepEqual(row, original)
 })
 
-test('all log statuses use the independent right-side area without changing their labels', async () => {
+test('upload is a peer price field and all execution statuses occupy a separate rightmost top-aligned column', async () => {
   for (const [status, tone, label] of [
     ['已核验', 'verified', '已提价'], ['待核验', 'attention', '待处理'],
     ['待处理', 'attention', '待处理'], ['本轮不调', 'neutral', '本轮不调'],
   ]) {
     const row = item()
     row.status = status
+    const original = structuredClone(row)
     const html = await render(row)
-    assert.match(html, new RegExp(`</header>\\s*<div class="records-log-state"><span class="${tone} records-status"><i></i>${label}</span></div>`))
+    assert.match(html, new RegExp(`<div class="records-stage-field" data-field="uploaded-price"><dt>上传含税价</dt><dd><strong>18\\.24 PHP</strong></dd></div></dl>(?:<!--.*?-->)*<div class="records-log-state" aria-label="执行状态"><span class="${tone} records-status"><i></i>${label}</span></div>`))
+    assert.equal((html.match(/class="records-log-state"/g) ?? []).length, 1)
+    assert.doesNotMatch(html, /<dl[^>]*>(?:(?!<\/dl>).)*records-log-state/s)
     assert.doesNotMatch(html, /<header class="records-log-heading">(?:(?!<\/header>).)*records-log-state/s)
+    assert.deepEqual(row, original)
   }
   const { readFile } = await import('node:fs/promises')
   const css = await readFile(new URL('../src/records.css', import.meta.url), 'utf8')
-  assert.match(css, /\.records-log-state\{grid-column:4;grid-row:1;justify-self:end\}/)
-  assert.match(css, /@media\(max-width:900px\)\{[\s\S]*\.records-log-heading\{grid-column:1;grid-row:1\}\s*\.records-log-state\{grid-column:2\}/)
-  assert.match(css, /\.records-log\{grid-template-columns:minmax\(0,1fr\) auto;padding:12px/)
-  assert.match(css, /\.records-log-stages,\.records-log>\.records-log-prices\{grid-column:1\/-1\}/)
+  assert.match(css, /\.records-log\{display:grid;grid-template-columns:minmax\(140px,\.85fr\) minmax\(0,4fr\) minmax\(76px,\.5fr\);align-items:start;/)
+  assert.match(css, /\.records-log-state\{grid-column:3;grid-row:1;align-self:start;justify-self:stretch;display:flex;justify-content:center;min-width:0\}/)
+  assert.match(css, /\.records-log-stages\{display:grid;grid-template-columns:repeat\(5,minmax\(0,1fr\)\);align-items:start;/)
+  assert.match(css, /@media\(max-width:900px\)\{[\s\S]*?\.records-log-state\{grid-column:2;grid-row:1\}[\s\S]*?\.records-log-stages\{grid-column:1\/-1;grid-row:2\}/)
+  assert.match(css, /@media\(max-width:680px\)\{\s*\.records-log\{padding:12px 0;gap:10px\}\s*\.records-log-stages\{grid-template-columns:repeat\(2,minmax\(0,1fr\)\)\}/)
+  assert.doesNotMatch(css, /records-log-uploads|records-log-prices/)
+  assert.doesNotMatch(css, /\.records-log-state\{[^}]*(?:position:|transform:|margin:|top:)/)
+})
+
+test('long saved upload amounts remain a single peer field with a separate status', async () => {
+  const row = item()
+  row.execution.uploaded_price = '12345678901234567890.236'
+  const original = structuredClone(row)
+  const html = await render(row)
+  assert.match(html, /data-field="uploaded-price"><dt>上传含税价<\/dt><dd><strong>12345678901234567890\.24 PHP<\/strong><\/dd><\/div><\/dl>/)
+  assert.match(html, /<div class="records-log-state" aria-label="执行状态">/)
+  assert.deepEqual(row, original)
+  const { readFile } = await import('node:fs/promises')
+  const css = await readFile(new URL('../src/records.css', import.meta.url), 'utf8')
+  assert.match(css, /\.records-stage-field\{min-width:0\}/)
+  assert.match(css, /\.records-stage-field dd\{margin:0;overflow-wrap:anywhere\}/)
 })
 
 test('records without stage evidence keep their existing saved two-price display', async () => {
@@ -102,9 +130,44 @@ test('missing upload and ERP margin evidence are not replaced by other saved val
   row.corrected_first_margin = { amount: '-999.11', currency: null }
   row.execution = { uploaded_price: null, actual_price: '987.65' }
   const html = await render(row)
-  assert.match(html, /原修正一次毛利：未记录/)
-  assert.match(html, /<dt>上传含税价<\/dt><dd>未记录<\/dd>/)
+  assert.match(html, /<dt>修正一次毛利<\/dt><dd><strong>未记录<\/strong>/)
+  assert.match(html, /<dt>上传含税价<\/dt><dd><strong>未记录<\/strong><\/dd>/)
   assert.doesNotMatch(html, /18\.23 PHP|987\.65|999\.11/)
+})
+
+test('missing concrete item IDs stay optional and never use parent IDs or SKU as replacements', async () => {
+  for (const missing of [undefined, null, '']) {
+    const row = item()
+    row.key.item_id = missing
+    const html = await render(row)
+    assert.match(html, /商品ID：未记录/)
+    assert.doesNotMatch(html, /商品ID：(PARENT-999|SYNTHETIC-001)|子SKU：/)
+    assert.match(html, /data-stage="original"/)
+    assert.match(html, /<dt>上传含税价<\/dt><dd><strong>18\.24 PHP<\/strong><\/dd>/)
+  }
+})
+
+test('identity copy buttons expose distinct accessible names and missing IDs remain plain text', async () => {
+  const html = await render(item())
+  assert.match(html, /<h3>.*<button type="button" class="records-id-copy-button" aria-label="复制SKU：SYNTHETIC-001" title="点击复制SKU"/s)
+  assert.match(html, /aria-label="复制商品ID：000123" title="点击复制商品ID"/)
+  assert.match(html, /<span>商品ID：000123<\/span>/)
+  assert.doesNotMatch(html, /records-id-copy-feedback|aria-live|已复制。|复制失败/)
+  const { readFile } = await import('node:fs/promises')
+  const source = await readFile(new URL('../src/RecordIdCopy.vue', import.meta.url), 'utf8')
+  const css = await readFile(new URL('../src/records.css', import.meta.url), 'utf8')
+  assert.match(source, /import \{ ElMessage \} from 'element-plus'/)
+  assert.match(source, /ElMessage\(await copyRecordId\(props\.value, props\.label, navigator\.clipboard\)\)/)
+  assert.match(source, /finally\s*\{\s*copying\.value = false/)
+  assert.doesNotMatch(source, /feedback|setTimeout|setInterval|aria-live/)
+  assert.doesNotMatch(css, /records-id-copy-feedback/)
+  const row = item()
+  row.key.sku = ''
+  row.key.item_id = ''
+  const missing = await render(row)
+  assert.match(missing, /SKU 未记录/)
+  assert.match(missing, /商品ID：未记录/)
+  assert.doesNotMatch(missing, /records-id-copy-button/)
 })
 
 test('optional reference evidence and price-cap explanation remain accessible', async () => {

@@ -175,7 +175,7 @@ def _desktop_logger(output):
 def desktop_main():
     parser = argparse.ArgumentParser(description='本人账号 ERP 批量取数：TikTok / 集团二部 / 四类候选')
     parser.add_argument('--username', help='本人ERP账号；不传则交互输入')
-    parser.add_argument('--salesperson', help='指定销售员姓名，如杨颖；指定时只抓两类亏损')
+    parser.add_argument('--salesperson', help='按销售员姓名筛选所选来源，默认四类，如莫雯舒')
     parser.add_argument('--source', choices=SOURCES, help='仅抓指定来源；默认抓四类')
     parser.add_argument('--output', type=Path, default=Path(__file__).resolve().parent/'output')
     mode = parser.add_mutually_exclusive_group()

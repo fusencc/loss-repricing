@@ -44,6 +44,8 @@
 .records-log-search-icon{position:absolute;right:9px;width:14px;height:14px;color:var(--r-faint);pointer-events:none}
 .records-log-title{display:flex;align-items:baseline;flex-wrap:wrap;gap:3px 12px}
 .records-log-title h2{margin:0;min-width:0;overflow-wrap:anywhere}
+/* 弹窗标题行右侧下载入口复用首页按钮样式，靠右并与标题基线对齐。 */
+.records-log-title .records-log-download{margin-left:auto;align-self:center;flex:none}
 .records-log-count{font-size:11px;color:var(--r-faint)}
 .records-log-empty{margin:0;padding:38px 20px;text-align:center;font-size:13px;color:var(--r-muted)}
 @media(max-width:680px){.records-log-filter{padding:12px 19px}.records-log-search input{width:100%}.records-log-search{flex:1}}
@@ -52,41 +54,40 @@
 .records-search input{width:min(190px,38vw);min-width:0;height:28px;padding:0 8px;border:1px solid var(--r-line);border-radius:6px;background:transparent;color:inherit;font:inherit;font-size:12px}
 .records-search input:focus-visible{outline:2px solid currentColor;outline-offset:2px}
 
-/* 日志沿用首页横向紧凑行：商品身份、三阶段价格、毛利与上传价并排；只展示已保存金额。 */
-.records-log{display:grid;grid-template-columns:minmax(140px,.85fr) minmax(0,3fr) minmax(130px,.8fr) auto;align-items:start;gap:12px 18px;padding:14px 0;border-bottom:1px solid var(--r-line)}
+/* 商品身份、同层价格字段、独立执行状态三列；价格只展示已保存金额。 */
+.records-log{display:grid;grid-template-columns:minmax(140px,.85fr) minmax(0,4fr) minmax(76px,.5fr);align-items:start;gap:12px 18px;padding:14px 0;border-bottom:1px solid var(--r-line)}
 .records-log:last-child{border-bottom:0}
 .records-log-heading{display:flex;flex-direction:column;align-items:flex-start;gap:9px;min-width:0}
 .records-log-heading>div:first-child{min-width:0}
 .records-log-heading h3{font-size:14px;font-weight:500;line-height:1.5;overflow-wrap:anywhere}
 .records-log-heading p{color:var(--r-muted);font-size:11px;margin-top:5px;overflow-wrap:anywhere}
-/* 状态是每条记录独立的最右列；窄屏保留在商品身份右侧，不落到左侧信息下方。 */
-.records-log-state{grid-column:4;grid-row:1;justify-self:end}
-/* 阶段复用首页字段层级：弱化名称、突出已保存金额，增额和涨幅作为次级数据；空间不足时按字段换行。 */
-.records-log-stages{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(135px,100%),1fr));gap:10px 16px;margin:0;min-width:0;max-width:100%}
+/* 原生按钮支持键盘与读屏；保留原始文本可选中，复制反馈使用统一消息浮层，不占用商品身份区域。 */
+.records-id-copy{display:block;min-width:0}
+.records-id-copy-button{display:inline-flex;align-items:baseline;gap:5px;max-width:100%;padding:0;border:0;border-radius:3px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;user-select:text}
+.records-id-copy-button>span{min-width:0;overflow-wrap:anywhere}
+.records-id-copy-button svg{width:12px;height:12px;flex:none;align-self:center;color:var(--r-muted)}
+.records-id-copy-button:hover{color:var(--r-mint)}
+.records-id-copy-button:focus-visible{outline:2px solid var(--r-mint);outline-offset:3px}
+.records-id-copy-button:disabled{cursor:wait}
+/* 状态是价格明细之外的独立列，顶部对齐并在本列居中；不使用位移或绝对定位覆盖金额。 */
+.records-log-state{grid-column:3;grid-row:1;align-self:start;justify-self:stretch;display:flex;justify-content:center;min-width:0}
+/* 毛利、阶段价和上传价使用同层字段及统一标签/金额样式，宽屏保持同一顶线。 */
+.records-log-stages{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));align-items:start;gap:10px 16px;margin:0;min-width:0;max-width:100%}
 .records-stage-field{min-width:0}
 .records-stage-field dt{font-size:11px;color:var(--r-muted);margin-bottom:3px}
 .records-stage-field dd{margin:0;overflow-wrap:anywhere}
 .records-stage-field strong{font-family:"Bahnschrift","Segoe UI",sans-serif;font-size:15px;font-weight:500;color:var(--r-mint);line-height:1.5}
-.records-stage-change{display:flex;flex-wrap:wrap;gap:2px 8px;margin-top:4px;font-size:10px;color:var(--r-muted)}
-.records-log-prices{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:0;min-width:0}
-.records-log-prices dt{font-size:11px;color:var(--r-muted);margin-bottom:3px}
-.records-log-prices dd{font-family:"Bahnschrift","Segoe UI",sans-serif;font-size:14px;font-weight:400;overflow-wrap:anywhere;line-height:1.5}
 .records-log-target dd,.records-change-up{color:var(--r-mint)}
-.records-log-uploads{grid-template-columns:minmax(0,1fr);gap:7px}
-.records-log-uploads>div{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
-.records-log-uploads dt{flex:none;margin:0}
-.records-log-uploads dd{text-align:right}
 .records-log>.sku-price-reference{grid-column:1/-1;margin:0;font-size:12px}
 @media(max-width:900px){
-  .records-log{grid-template-columns:minmax(0,1fr) minmax(130px,.3fr);gap:10px 14px}
+  .records-log{grid-template-columns:minmax(0,1fr) minmax(76px,auto);gap:10px 14px}
   .records-log-heading{grid-column:1;grid-row:1}
-  .records-log-state{grid-column:2}
+  .records-log-state{grid-column:2;grid-row:1}
+  .records-log-stages{grid-column:1/-1;grid-row:2}
   .records-log-heading p{margin-top:3px}
 }
-/* 窄屏让价格字段占满可用宽度并自然换行，不保留独立阶段表格或横向滚动。 */
+/* 窄屏价格字段在独立明细行中等宽换行，状态仍在最右顶部，不挤到上传价下方。 */
 @media(max-width:680px){
-  .records-log{grid-template-columns:minmax(0,1fr) auto;padding:12px 0;gap:10px}
-  .records-log-stages,.records-log>.records-log-prices{grid-column:1/-1}
-  .records-log-uploads>div{justify-content:flex-start}
-  .records-log-uploads dd{font-size:13px}
+  .records-log{padding:12px 0;gap:10px}
+  .records-log-stages{grid-template-columns:repeat(2,minmax(0,1fr))}
 }

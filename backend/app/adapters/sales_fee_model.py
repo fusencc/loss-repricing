@@ -1,17 +1,15 @@
-"""用户固定BD表费用公式：费率用于库存对应完整在线利润。
+"""将仓配、库存、成本及费率来源转换为定价模型，并保留计算证据。
 
-ERP 订单修正一次毛利由财务导出直接提供；本模块只构建新售价的完整在线利润模型。
-
-当前费率由current_pricing_fees绑定本轮版本；库存、成本、重量与报价由
-当前来源提供。未知成本、多个有效海外仓或分项不完整时不生成模型。
+当前费率由 current_pricing_fees 绑定本轮版本，销售系统物流模板提供直发运费档位。
+ERP 订单修正一次毛利来自财务导出。此处构建新售价的完整在线利润模型。
 """
 from decimal import Decimal
 import json
 
 from app.adapters.normalization import money
 from app.domain.engine import SITE_CURRENCIES
+from app.domain.fee_calculation import direct_freight, online_fee_model
 from app.domain.money import MoneyRatio
-from app.domain.types import FeeModel
 
 PERCENT_FIELDS = ('costOfCapital','procedureRate','platformRate','returnRate',
                   'warehouseStorageRate','marketingRate','otherRate')
@@ -65,22 +63,15 @@ def compile_overseas_fee(variant, rate, *, site, warehouse, company_cny_per_curr
     if total != MoneyRatio(money(rate.get('totalRate'))) or costs != MoneyRatio(money(rate.get('totalCost'))):
         raise ValueError('海外仓费率分项与公司合计不一致')
     fixed = costs + _nonnegative(procurement[0]) + _nonnegative(freight[0])
-    all_factor = (MoneyRatio(Decimal(100)) - total) * MoneyRatio(Decimal('0.01'))
-    # 2026-11-19用户明确移除公开计划佣金；VAT仍作用在固定成本上。
-    # 平台基础费率保留，不能把移除额外佣金当成免除平台费用。
-    # 不采用工作簿的缓存利润率；表中12%/12.5%目标也不覆盖本程序统一利润率门槛。
-    vat = _nonnegative(rate.get('vatRate')) * MoneyRatio(Decimal('0.01'))
-    taxed_fixed = fixed * (MoneyRatio(Decimal(1)) + vat)
+    vat = _nonnegative(rate.get('vatRate'))
     version = rate.get('version')
     if not isinstance(version, str) or not version.strip():
         raise ValueError('固定费率缺少版本')
-    included_model = FeeModel(revenue_factor=all_factor.decimal(), fixed_cost=taxed_fixed.decimal(),
-        fixed_cost_divisor=quote, version=version)
+    included_model = online_fee_model(total_rate_percent=total, fixed_cny=fixed, vat_percent=vat,
+                                      cny_per_currency=quote, version=version)
     included_percent = included_model.profit_exact(MoneyRatio(actual)) / MoneyRatio(actual) * MoneyRatio(Decimal(100))
-    # 11/12明确使用部门统一费率，而列表显示值可能使用个人/店铺覆盖费率。
-    # 显示值只保留作对账，不能据其倒推成本或要求与部门模型强行相等。
+    # TODO(T-03)：列表利润率可能采用个人或店铺覆盖费率，待核实两者口径。当前显示值仅作对账。
     reported = variant.get('currentOverseasProfitMargin')
-    included_model.verified = True
     return {'online_model':included_model,
         'proof':{'version':version,'fixed_cost_currency':'CNY','company_quote_unit':'CNY/'+variant['currency'],
             'company_quote':format(quote,'f'),'fixed_cost':format(fixed.numerator,'f'),
@@ -89,15 +80,15 @@ def compile_overseas_fee(variant, rate, *, site, warehouse, company_cny_per_curr
             'recalculated_including_marketing_percent':str(included_percent.decimal()),
             'vat_percent':str(rate['vatRate']),
             'rate_source':rate.get('rate_source'),
-            'fixed_rate_ref':rate.get('source_ref'), 'source_cells':rate.get('source_cells'),
+            'fee_source_ref':rate.get('source_ref'),
             'warehouse':warehouse}}
 
 
 def compile_direct_fee(variant, rate, *, site, company_cny_per_currency):
-    """固定BD表AU/AE公式：g重量分档，跨境运费先按站点币计，再折为CNY成本。
+    """销售系统首续重物流：g重量分档，跨境运费先按站点币计，再折为CNY成本。
 
     TH类目VAT复用当前在线父商品字段；SG缺公共费率即关闭，不猜税率或运费。
-    公式没有使用AD固定运费；配置非0时要求先明确公式，不能悄悄丢掉。
+    公式没有使用额外固定运费；配置非0时要求先明确公式，不能悄悄丢掉。
     """
     if site not in SITE_CURRENCIES or variant.get('currency') != SITE_CURRENCIES[site]:
         raise ValueError('直发币种与站点不一致')
@@ -109,28 +100,26 @@ def compile_direct_fee(variant, rate, *, site, company_cny_per_currency):
     weight = _positive(variant.get('localWeight'))
     freight = rate['freight']
     base_weight = _positive(freight['base_weight_g'])
-    excess = MoneyRatio(weight) - MoneyRatio(base_weight)
-    steps = ((excess / MoneyRatio(Decimal(10))).round_to_step(Decimal(1), 'ROUND_UP')
-             if excess > MoneyRatio(Decimal(0)) else Decimal(0))
-    freight_station = _nonnegative(freight['base_price']) + MoneyRatio(steps) * _nonnegative(freight['per_10g_price'])
+    freight_station = direct_freight(weight, base_weight, _nonnegative(freight['base_price']),
+                                     _nonnegative(freight['step_price']), _positive(freight['step_weight_g']))
     if money(rate.get('fixedFreight')) != 0:
-        raise ValueError('固定运费非0，须确认其在BD直发公式中的位置')
+        # TODO(T-04)：待确认非零固定运费在直发公式中的位置后，再支持这类配置。
+        raise ValueError('固定运费非0，须确认其在直发公式中的位置')
     fixed = (_nonnegative(variant.get('costPrice')) + _nonnegative(rate.get('packageFee'))
              + _nonnegative(rate.get('warehouseCost')) + freight_station * MoneyRatio(quote))
-    vat = _nonnegative(rate.get('vatRate')) * MoneyRatio(Decimal('0.01'))
-    fixed = fixed * (MoneyRatio(Decimal(1)) + vat)
+    vat = _nonnegative(rate.get('vatRate'))
     # 完整在线利润包含营销费与基础平台佣金；不叠加公开计划佣金。
     rates = _sum(_nonnegative(rate.get(k)) for k in
         ('procedureRate', 'commissionRate', 'returnRate', 'otherRate', 'marketingRate'))
-    full_factor = MoneyRatio(Decimal(1)) - rates * MoneyRatio(Decimal('0.01'))
     version = rate['version']
     if not isinstance(version, str) or not version.strip():
         raise ValueError('固定费率缺少版本')
-    online = FeeModel(revenue_factor=full_factor.decimal(), fixed_cost=fixed.decimal(),
-                     fixed_cost_divisor=quote, version=version, verified=True)
+    online = online_fee_model(total_rate_percent=rates, fixed_cny=fixed, vat_percent=vat,
+                              cny_per_currency=quote, version=version)
     return {'online_model': online,
-        'proof': {'version': version, 'mode': 'direct', 'source_cells': rate.get('source_cells'),
-                  'fixed_rate_ref': rate.get('source_ref'), 'weight_g': str(weight),
+        'proof': {'version': version, 'mode': 'direct',
+                  'logistics_source': rate.get('logistics_source'), 'department_source': rate.get('department_source'),
+                  'fee_source_ref': rate.get('source_ref'), 'weight_g': str(weight),
                   'freight_station': str(freight_station.decimal()), 'fixed_cost_currency': 'CNY',
                   'company_quote': str(quote), 'vat_percent': str(rate['vatRate']),
                   'rate_source': rate.get('rate_source')}}

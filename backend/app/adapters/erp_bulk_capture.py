@@ -112,7 +112,7 @@ def _workbook(content, fields):
         raise SourceUnavailable('ERP下载文件损坏或XLSX结构无效') from None
 
 
-def _scope(records, bloc, *, expected_status=None, department=None):
+def _scope(records, bloc, *, expected_status=None, department=None, salesperson=None):
     if any(not isinstance(r.get('平台'), str) or r['平台'].casefold() != 'tiktok'
            or (expected_status is not None and r.get('订单状态') != expected_status) or r.get('集团') != bloc for r in records):
         raise SourceUnavailable('ERP导出范围与TikTok/订单状态/集团筛选不一致')
@@ -122,6 +122,8 @@ def _scope(records, bloc, *, expected_status=None, department=None):
         for row in records
     ):
         raise SourceUnavailable('ERP导出包含部门缺失或与指定部门不一致的订单')
+    if salesperson is not None and any(row.get('销售员') != salesperson for row in records):
+        raise SourceUnavailable('ERP导出销售员字段缺失或与指定销售员不一致')
 
 
 @contextmanager
@@ -258,8 +260,12 @@ def write_comparison_workbook(folder, financial_paths, loss_path, *, filename='�
     return result
 
 
-def _blocked_ids(post, group):
+def _blocked_ids(post, group, *, salesperson=None):
     """列表确认 jzfh=1；异步按条件导出实测会混入非禁止发货订单。"""
+    if salesperson is not None:
+        seller_id = group['filters'].get('shopUsernameid')
+        if not isinstance(seller_id, str) or not seller_id or seller_id != seller_id.strip():
+            raise SourceUnavailable('ERP禁止发货名单缺少有效的销售员ID')
     ids = {}
     # 2026-11-11两类真实读取已验证limit=10000，分别一次返回2467/4431条且等于total。
     # 单页取得常见业务范围，避免跨16秒请求间隔时订单状态变化导致名单漂移；
@@ -283,6 +289,10 @@ def _blocked_ids(post, group):
                     or str(row.get('platform')).casefold() != 'tiktok'
                     or str(row.get('jzfh')) != '1' or str(row.get('status')) != str(group['status'])):
                 raise SourceUnavailable('ERP禁止发货名单存在重复订单、无效订单号或范围不符')
+            # ERP 订单页按 shopUsernameid 查询，列表「销售员」返回姓名 shopUsername。
+            # 每页先验归属再使用名单，包括试抓额度之外的订单。
+            if salesperson is not None and row.get('shopUsername') != salesperson:
+                raise SourceUnavailable('ERP禁止发货名单销售员字段缺失或与指定销售员不一致')
             ids[order] = {key: row[key] for key in ('shopid', 'shopname')
                           if isinstance(row.get(key), str) and row[key].strip()}
         if len(ids) == total:
@@ -322,10 +332,7 @@ def capture_erp_bulk(settings, *, source=None, client=None, max_polls=EXPORT_POL
         raise ValueError('未知的ERP候选来源')
     if department is not None and department not in ERP_DEPARTMENTS:
         raise ValueError('未知的ERP采集部门')
-    if salesperson is not None and source is not None and SOURCES[source][0] == 'blocked':
-        raise ValueError('禁止发货来源尚无已验证的销售员筛选')
-    sources = [source] if source else [name for name, (kind, _) in SOURCES.items()
-                                       if salesperson is None or kind == 'loss']
+    sources = [source] if source else list(SOURCES)
     if settings.erp_capture_platform.casefold() != 'tiktok':
         raise ValueError('当前批量下载仅支持TikTok')
     if type(max_polls) is not int or max_polls < 1:
@@ -402,13 +409,11 @@ def capture_erp_bulk(settings, *, source=None, client=None, max_polls=EXPORT_POL
             group['files'].append(_save_xlsx(folder, f'{name}-loss-orders.xlsx', raw))
             losses, count = _workbook(raw, LOSS_FIELDS)
             _scope(losses, settings.erp_capture_bloc, expected_status=STATUS_LABELS[group['status']],
-                   department=department)
-            if salesperson is not None and any(r.get('销售员') != salesperson for r in losses):
-                raise SourceUnavailable('ERP亏损池销售员字段缺失或与指定销售员不一致')
+                   department=department, salesperson=salesperson)
             group.update(loss_rows=losses, total=len(losses), loss_column_count=count)
             ids = list(dict.fromkeys(r['订单编号'] for r in losses))
         else:
-            ids = _blocked_ids(post, group)
+            ids = _blocked_ids(post, group, salesperson=salesperson)
         group.update(candidate_order_ids=ids, list_complete=True)
 
     def download_finance(post, download, group, batch):
@@ -454,7 +459,7 @@ def capture_erp_bulk(settings, *, source=None, client=None, max_polls=EXPORT_POL
                     batch['downloaded_at'] = datetime.now(timezone.utc).isoformat()
                     group['files'].append(_save_xlsx(folder, f"{name}-order-finance-{batch['number']:03d}.xlsx", raw))
                     orders, count = _workbook(raw, BUSINESS_FIELDS)
-                    _scope(orders, settings.erp_capture_bloc, department=department)
+                    _scope(orders, settings.erp_capture_bloc, department=department, salesperson=salesperson)
                     scope = finance_batch_scope(batch['order_ids'], [row['订单编号'] for row in orders])
                     batch['scope_check'] = scope
                     missing = scope['missing']
@@ -541,8 +546,12 @@ def capture_erp_bulk(settings, *, source=None, client=None, max_polls=EXPORT_POL
                 matches = [u for u in users if isinstance(u, dict) and u.get('userName') == salesperson]
                 if len(matches) != 1:
                     raise SourceUnavailable('销售员不存在或同名选项不唯一，请核实ERP下拉选项')
-                result['salesperson'] = {'name':salesperson, 'id':matches[0].get('userID')}
-                emit(f'已确认销售员：{salesperson}；按销售员条件下载亏损池。')
+                seller_id = matches[0].get('userID')
+                result['salesperson'] = {'name': salesperson, 'id': seller_id}
+                for group in groups:
+                    if group['kind'] == 'blocked':
+                        group['filters']['shopUsernameid'] = seller_id
+                emit(f'已确认销售员：{salesperson}，按所选来源读取该销售员的订单。')
             if department is None:
                 for group in groups:
                     with record_group_errors(group):

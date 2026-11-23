@@ -21,7 +21,7 @@ from app.adapters.sales_auth import ORIGIN, SalesAuth
 from app.adapters.sales_capture import capture_sales_sources, _json_values
 from app.adapters.sales_platform_capture import capture_platform_controls
 from app.adapters.erp_goods_sales import capture_goods_sales
-from app.adapters.current_pricing_fees import capture_current_fees
+from app.adapters.current_pricing_fees import capture_current_fees, refresh_daily_fees
 from app.adapters.sales_price_reference import capture_sku_price_references
 from app.adapters.live_online_preparation import prepare_online_states
 from app.adapters.erp_rates import query_current_erp_fx
@@ -172,6 +172,7 @@ class ManualLiveAdapter:
         a, k = self.authorization, self.key
         validate_authorization(a, k, money(a['upload_price']))
         if business_date.isoformat() != a['business_date']: raise ValueError('单次授权已跨日')
+        refresh_daily_fees(self.settings, client=self.client)
         capture = {'capture_id': 'manual-' + uuid4().hex, 'synthetic': False, 'sample_only': True, 'queried_at': utcnow().isoformat(),
             'groups': [{'rows': [{'orderid': 'explicit-manual-price', 'fields': {'item ID': k.product_id}}]}]}
         target = {'key': k.model_dump(mode='json'), 'erp_shop': a['shop_name'], 'main_sku': a['main_sku'], 'erp_sku': k.sku}

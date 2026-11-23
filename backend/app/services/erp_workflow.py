@@ -15,7 +15,7 @@ from app.adapters.erp_detail_capture import capture_erp_details
 from app.adapters.erp_order_loss import prepare_order_losses
 from app.adapters.erp_order_headers import capture_order_headers
 from app.adapters.erp_goods_sales import capture_goods_sales
-from app.adapters.current_pricing_fees import capture_current_fees
+from app.adapters.current_pricing_fees import capture_current_fees, refresh_daily_fees
 from app.adapters.sales_price_reference import capture_sku_price_references
 from app.adapters.erp_pricing import prepare_pricing
 from app.services.local_price_history import capture_local_price_history
@@ -103,6 +103,8 @@ def _run_workflow(settings, *, department=None, capture_id=None, evidence=None, 
         rebuild_clean_capture(settings.runtime_dir, capture_id)
         return _evaluate_capture(settings, capture_id, replay=True, evidence=evidence, exports=exports, progress=progress)
 
+    # 每日任务启动前统一检查费用；各部门共用持久缓存，不逐批重查。
+    refresh_daily_fees(settings)
     collected = capture_erp_bulk(settings, department=department, progress=progress)
     saved = save_capture(settings.runtime_dir, collected)
     capture_id = saved['capture_id']

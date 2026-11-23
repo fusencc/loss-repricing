@@ -30,7 +30,7 @@
 导入命令：
 
 ```bash
-.venv/bin/python scripts/import_pricing_fees.py /mnt/d/钉钉/BD项目流程跟进表V2.xlsx --output runtime/fixed-pricing-fees.json
+# 当前费用与物流由每日销售系统快照提供，不再执行旧表导入。
 ```
 
 11/19按用户要求核对陈波当天消息后，真实运行的费率改为每轮从销售系统读取，合同为`sales-current-pricing-fees-v1`。常规及人工入口统一使用海外仓固定费率、直发公共费用及部门兜底费率，不读取个人/店铺覆盖，不回退旧BD表费率。原件、哈希、修改时间和本轮观察时间存入`current-fee-sources`。`LR_FIXED_FEE_CONFIG_PATH`（默认`LR_RUNTIME_DIR/fixed-pricing-fees.json`）仅继续提供物流价卡及其独立版本。TH直发VAT仍复用当前父商品，见[VAT来源规格](superpowers/specs/2026-11-16-th-vat-source-design.md)。

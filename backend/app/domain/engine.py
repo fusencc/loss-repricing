@@ -32,6 +32,20 @@ SITE_ERRORS = {
 }
 
 
+def fx_ratio(snapshot: Snapshot, loss_currency: str, station_currency: str) -> MoneyRatio | None:
+    """按快照的原始报价换算亏损币到站点币。同币种也须有有效报价。"""
+    from_rate = snapshot.fx_rates.get(loss_currency)
+    to_rate = snapshot.fx_rates.get(station_currency)
+    if from_rate is None or from_rate <= 0 or to_rate is None or to_rate <= 0:
+        return None
+    if loss_currency == station_currency:
+        return MoneyRatio(Decimal(1))
+    # 每单位原币折多少 CNY 时取亏损币报价 / 站点币报价。反向报价交换分子分母。
+    if snapshot.fx_rate_unit == 'cny_per_currency':
+        return MoneyRatio(from_rate, to_rate)
+    return MoneyRatio(to_rate, from_rate)
+
+
 def conflicting_main_sku_scopes(
     online: Iterable[OnlineState], now: datetime,
 ) -> set[tuple[str, str, Site, str]]:
@@ -353,20 +367,19 @@ def _decide(
         return finish("unverified_online_profit", "缺少库存分流、部门费率及完整在线利润公式", status="本轮不调")
     upper = reference_upper_price(price_reference, station_currency)
     minimum_margin_required = upper is None
-    if problem := profit_check.problem(now, snapshot.business_date,
-                                       minimum_margin_required=minimum_margin_required):
-        warn("unverified_online_profit", problem)
-        return finish("unverified_online_profit", problem, status="本轮不调")
+    if issue := profit_check.validation_issue(now, snapshot.business_date,
+                                              minimum_margin_required=minimum_margin_required):
+        warn("unverified_online_profit", issue.value)
+        return finish("unverified_online_profit", issue.value, status="本轮不调")
 
-    from_rate = snapshot.fx_rates.get(loss_currency)
-    to_rate = snapshot.fx_rates.get(station_currency)
-    if from_rate is None or from_rate <= 0 or to_rate is None or to_rate <= 0:
+    conversion = fx_ratio(snapshot, loss_currency, station_currency)
+    if conversion is None:
         return finish("invalid_fx", "亏损原币或站点币缺少正数汇率")
 
-    retail = online.retail_price
-    current = online.marketing_price if online.marketing_price is not None else retail
-    if retail <= 0 or current <= 0 or current > retail:
+    observed_prices = online.actual_price_and_discount()
+    if observed_prices is None:
         return finish("invalid_current_price", "当前含 VAT 零售价或实际营销价无效")
+    current, marketing_discount_ratio = observed_prices
 
     try:
         valid_losses = {}
@@ -391,24 +404,11 @@ def _decide(
         selected = min(valid_losses, key=lambda row_id: (valid_losses[row_id], row_id))
         unit_ratio = valid_losses[selected]
 
-        # 原币/CNY报价用站点汇率/亏损币汇率；CNY/原币报价用亏损币汇率/站点汇率。
-        # ERP当前配置直接传原报价及单位，不把50位展示倒数回读为业务输入。
-        # 保留精确 Decimal 比值直到档位与毛利判定，避免1/3等近似值少算一档。
-        rate_numerator, rate_denominator = (
-            (from_rate, to_rate) if snapshot.fx_rate_unit == 'cny_per_currency' else (to_rate, from_rate)
-        )
-        station_ratio = (unit_ratio if loss_currency == station_currency
-                         else unit_ratio * MoneyRatio(rate_numerator, rate_denominator))
+        station_ratio = unit_ratio * conversion
         # 11/12会议后段：先直接补亏，再只复算库存选定仓配的完整在线利润。
         # 无参考时要求1%；有参考时优先上限，利润不足或需降价均不再拦截。
         initial_target = MoneyRatio(current) + station_ratio
-        if profit_check.model.revenue_factor > ONLINE_PROFIT_MINIMUM_MARGIN:
-            minimum_actual = profit_check.minimum_actual_price()
-        elif (profit_check.model.revenue_factor == ONLINE_PROFIT_MINIMUM_MARGIN
-              and profit_check.model.fixed_cost == 0):
-            minimum_actual = MoneyRatio(Decimal(0))
-        else:
-            minimum_actual = None  # 费用模型无法达到1%，仍可按参考上限调整。
+        minimum_actual = profit_check.minimum_actual_price()
         unlimited_target = max(initial_target, minimum_actual) if minimum_actual is not None else None
         target_ratio = unlimited_target
         # 不可达的1%价格不伪造校正额；上限压减单列，不记成负校正额。
@@ -416,25 +416,25 @@ def _decide(
         maximum_upload = None
         if upper is not None:
             # 用户确认参考为硬上限，先向下取可上传档位，防止进档后突破营销均价。
-            maximum_upload = (upper * MoneyRatio(retail) / MoneyRatio(current)).round_to_step(
+            maximum_upload = (upper / marketing_discount_ratio).round_to_step(
                 contract.price_step, 'ROUND_DOWN')
-            maximum_actual = MoneyRatio(maximum_upload) * MoneyRatio(current) / MoneyRatio(retail)
+            maximum_actual = MoneyRatio(maximum_upload) * marketing_discount_ratio
             target_ratio = (min(unlimited_target, maximum_actual)
                             if unlimited_target is not None else maximum_actual)
             trace['price_limit'] = describe_price_limit(upper, unlimited_target, target_ratio)
-        discount = MoneyRatio(current, retail).decimal()
+        discount = marketing_discount_ratio.decimal()
         # 含 VAT 上传价 = T×R/P；按精确商余数舍入，可支持0.025档位及半档边界。
-        raw_ratio = target_ratio * MoneyRatio(retail) / MoneyRatio(current)
+        raw_ratio = target_ratio / marketing_discount_ratio
         upload_price = raw_ratio.round_to_step(contract.price_step, contract.rounding)
 
         # 能达到1%时先保留利润档位；参考上限始终优先，允许压到利润下限以下。
         if minimum_actual is not None:
-            floor_upload = (minimum_actual * MoneyRatio(retail) / MoneyRatio(current)).round_to_step(
+            floor_upload = (minimum_actual / marketing_discount_ratio).round_to_step(
                 contract.price_step, "ROUND_UP")
             upload_price = max(upload_price, floor_upload)
         if maximum_upload is not None:
             upload_price = min(upload_price, maximum_upload)
-        rounded_ratio = MoneyRatio(upload_price) * MoneyRatio(current) / MoneyRatio(retail)
+        rounded_ratio = MoneyRatio(upload_price) * marketing_discount_ratio
         error_ratio = (rounded_ratio - target_ratio).absolute()
         tolerance = allowed_error(key.site)
         online_target_profit = profit_check.model.profit_exact(target_ratio)
@@ -448,8 +448,8 @@ def _decide(
         return finish("invalid_calculation", "价格、汇率或费用模型超出可计算范围")
 
     trace.update({
-        "loss_fx_rate": str(from_rate),
-        "station_fx_rate": str(to_rate),
+        "loss_fx_rate": str(snapshot.fx_rates[loss_currency]),
+        "station_fx_rate": str(snapshot.fx_rates[station_currency]),
         "raw_upload_price": str(raw_upload),
         "exact_target_actual": {"numerator": str(target_ratio.numerator), "denominator": str(target_ratio.denominator)},
         "rounded_actual": str(rounded_actual),

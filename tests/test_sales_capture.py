@@ -59,7 +59,7 @@ def test_readonly_capture_deduplicates_scope_and_archives_exact_money(tmp_path):
     assert result['acquisition_complete']
     assert result['summary']=={'requested_products':2,'products':2,'variants':2,'shops':1}
     assert result['variants'][0]['priceIncludeVat']=='12.1234567890123456789'
-    assert result['fee_policy'] == 'user_fixed_configuration'
+    assert result['fee_policy'] == 'sales_daily_configuration'
     assert not {'department_rates','overseas_rates','public_rates'} & result.keys()
     assert result['synthetic'] is True and result['pricing_ready'] is False
     assert result['erp_capture_id']=='erp-capture-test'

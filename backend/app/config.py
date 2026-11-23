@@ -37,7 +37,6 @@ class Settings(BaseSettings):
     erp_capture_request_interval_seconds: float = Field(default=16, ge=0, le=300)
     # 网页后端暂无批量销量开放合同；串行读取并限制请求频率，后续改用批量/增量来源。
     sales_request_interval_seconds: float = Field(default=2, ge=0, le=30)
-    fixed_fee_config_path: Path | None = None  # 未指定时使用runtime_dir/fixed-pricing-fees.json。
     # 日志只保存脱敏技术事件，独立于业务证据；DEBUG也不记录接口正文或凭据。
     log_level: str = Field(default="INFO", pattern=r"^(DEBUG|INFO|WARNING|ERROR|CRITICAL)$")
     log_max_bytes: int = Field(default=20 * 1024 * 1024, ge=4096, le=100 * 1024 * 1024)

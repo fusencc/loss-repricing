@@ -6,8 +6,8 @@ import pytest
 from app.adapters.erp_order_loss import _warehouse_matches
 from app.adapters.live_online_preparation import prepare_online_states
 from app.domain.types import OnlineProfitCheck
-from test_fixed_pricing_fees import direct_source
-from test_live_online_preparation import sources
+from test_sales_fee_inputs import direct_source
+from test_live_online_preparation import sources, configure_direct
 from test_online_profit_check import check
 from test_pricing import NOW, single
 
@@ -25,11 +25,7 @@ def test_missing_stock_prepares_direct_model_without_fabricating_zero(stock):
         variant['overseasStockSum'] = stock
     _, rate = direct_source()
     config = inputs['fixed_fees']['config']
-    config['public'] = {'SHOPPH': {k: rate[k] for k in
-        ('vatRate', 'procedureRate', 'commissionRate', 'warehouseCost')}}
-    config['departments'] = {'D1': {'PH': {k: rate[k] for k in
-        ('returnRate', 'otherRate', 'marketingRate', 'packageFee', 'fixedFreight')}}}
-    config['freight'] = {'PH': rate['freight']}
+    configure_direct(config,rate,'PH')
     result = prepare_online_states(capture, targets, **inputs)
     assert not result['issues'] and len(result['online']) == 1
     evidence = result['online'][0]['state']['profit_check']

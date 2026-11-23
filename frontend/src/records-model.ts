@@ -120,6 +120,12 @@ export function isIncrease(value: string | null | undefined): boolean {
   return !/^[-+]?0(\.0+)?$/.test(value)
 }
 
+// 日志名称只在展示层调整；保留后台阶段键、金额和「参考价优先」等证据语义，不回写历史。
+export function recordStageLabel(stage: RecordStage): string {
+  const label = stage.label.replace(/^[\u2460-\u2462]\s*/, '')
+  return ({ '补亏损': '补毛利亏', '利润校验': '利润校验变动' }[label] ?? label)
+}
+
 export function stagePriceLabel(stage: RecordStage, currency: string | null | undefined): string {
   if (stage.price == null) return '未记录'
   return `${formatDecimal(stage.price)} ${currency ?? '币种未记录'}`

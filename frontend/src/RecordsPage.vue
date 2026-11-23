@@ -4,6 +4,7 @@ import { Download, Search } from '@element-plus/icons-vue'
 import { api, errorMessage, timeLabel } from './api'
 import { groupBySeller, recordTone, recordStatusLabel, recordStatusCount, recordDisplayStates, recordDepartments, type RecordData, type SellerGroup } from './records-model'
 import { formatDecimal } from './decimal-display'
+import { downloadSellerExcel } from './records-download'
 import SellerRecordLogs from './SellerRecordLogs.vue'
 import RecordsDots from './RecordsDots.vue'
 import './records.css'
@@ -16,6 +17,7 @@ const data = ref<RecordData | null>(null)
 const loading = ref(true)
 const refreshing = ref(false)
 const error = ref('')
+const downloadError = ref('')
 const dialogOpen = ref(false)
 const logHitCount = ref<number | null>(null)
 const logTotal = computed(() => activeSeller.value?.items.length ?? 0)
@@ -79,23 +81,13 @@ function openSeller(group: SellerGroup, event: MouseEvent) {
   dialogOpen.value = true
 }
 
-function downloadSeller(group: SellerGroup) {
-  const records = group.items.map(item => ({
-    sku: item.key.sku, shop: item.shop_name || item.key.shop_id,
-    site: item.key.site, platform: item.key.platform,
-    first_margin: item.first_margin, currency: item.decision?.trace.station_currency ?? null,
-    current_price: item.decision?.current_actual ?? null,
-    target_price: item.decision?.target_actual ?? null,
-    uploaded_price: item.execution?.uploaded_price ?? null,
-    status: item.status, updated_at: item.updated_at, synthetic: item.synthetic,
-  }))
-  const file = new Blob([JSON.stringify({ seller: group.name, department: departmentName.value, records }, null, 2)], { type: 'application/json' })
-  const url = URL.createObjectURL(file)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = `${group.name.replace(/[\\/:*?"<>|]/g, '_')}-提价记录.json`
-  link.click()
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+async function downloadSeller(group: SellerGroup) {
+  downloadError.value = ''
+  try {
+    await downloadSellerExcel(group, departmentName.value)
+  } catch {
+    downloadError.value = 'Excel 下载未成功，请重试。'
+  }
 }
 
 function restoreFocus() {
@@ -131,6 +123,7 @@ onUnmounted(() => { ++request; controller?.abort(); window.clearInterval(timer) 
       </div>
       <p v-if="error" class="records-error motion-reveal" role="alert"><strong>{{ data ? '更新未成功，以下保留最近读取的数据。' : '暂时无法读取记录。' }}</strong>{{ error }}。可切换部门或刷新页面，系统也会自动重试。</p>
 
+      <p v-if="downloadError" class="records-error" role="alert">{{ downloadError }}</p>
       <section id="records-list" class="records-glass" :aria-busy="loading">
         <div class="records-panel-heading">
           <h2>销售员提价记录</h2>
@@ -159,7 +152,7 @@ onUnmounted(() => { ++request; controller?.abort(); window.clearInterval(timer) 
             <!-- 上传价取最近记录的持久提交意图，使用持久化十进制文本并限制展示为两位小数；不以建议价或回读价代替，也不表示已经生效。 -->
             <td class="records-upload-cell"><span class="records-mobile-label">上传价</span><strong>{{ formatDecimal(group.latest.execution?.uploaded_price ?? (group.latest.execution ? '未记录' : '未提交')) }}</strong><small v-if="group.latest.execution?.uploaded_price != null">{{ group.latest.decision?.trace.station_currency || '币种未记录' }}</small></td>
             <td class="records-progress-cell"><div class="records-status-list"><template v-for="state in states" :key="state"><span v-if="recordStatusCount(group.counts, state)" class="records-status" :class="recordTone(state)"><i></i>{{ recordStatusLabel(state) }} {{ recordStatusCount(group.counts, state) }}</span></template></div></td>
-            <td class="records-time-cell"><div class="records-row-end"><time :datetime="group.latest.updated_at">{{ timeLabel(group.latest.updated_at) }}</time><button type="button" class="records-download" title="下载个人数据" aria-label="下载个人数据" @click.stop="downloadSeller(group)"><Download aria-hidden="true" /></button></div></td>
+            <td class="records-time-cell"><div class="records-row-end"><time :datetime="group.latest.updated_at">{{ timeLabel(group.latest.updated_at) }}</time><button type="button" class="records-download" title="下载Excel" aria-label="下载Excel" @click.stop="downloadSeller(group)"><Download aria-hidden="true" /></button></div></td>
           </tr></tbody>
         </table>
       </section>
@@ -172,7 +165,9 @@ onUnmounted(() => { ++request; controller?.abort(); window.clearInterval(timer) 
           <span class="records-log-count" role="status" aria-atomic="true">
             共 {{ logTotal }} 条记录<span v-if="logHitCount !== null && logHitCount !== logTotal">，当前筛选命中 {{ logHitCount }} 条</span>
           </span>
+          <button v-if="activeSeller" type="button" class="records-download records-log-download" title="下载Excel" aria-label="下载Excel" @click.stop="downloadSeller(activeSeller)"><Download aria-hidden="true" /></button>
         </div>
+        <p v-if="downloadError" class="records-error" role="alert">{{ downloadError }}</p>
       </template>
       <SellerRecordLogs v-if="activeSeller" :seller="activeSeller" @hit-count="logHitCount = $event" />
     </el-dialog>

@@ -11,7 +11,7 @@ from app.adapters.erp_order_loss import _bound, _warehouse_matches
 from app.adapters.erp_pricing import LiveOnlinePreparation, MappedKey, ReviewedOnlineState
 from app.adapters.normalization import money, source_time
 from app.adapters.sales_fee_model import compile_overseas_fee, compile_direct_fee
-from app.adapters.current_pricing_fees import select_current_rate
+from app.adapters.current_pricing_fees import select_current_rate, SCHEMA as FEE_SCHEMA
 from app.domain.engine import BEIJING, SITE_CURRENCIES
 from app.domain.types import VariantKey
 from app.adapters.official_price_logs import recent_price_log_for
@@ -19,7 +19,7 @@ from app.adapters.sales_price_reference import price_reference_for
 
 SCHEMAS={'sales':'sales-source-observations-v1','platform':'sales-platform-controls-v1',
     'window':'erp-goods-sales-reference-v1','local_history':'local-live-price-history-v1',
-    'fixed_fees':'sales-current-pricing-fees-v1'}
+    'fixed_fees':FEE_SCHEMA}
 
 
 def prepare_online_states(capture,targets,*,sales,platform,window,local_history,fixed_fees,official_history,

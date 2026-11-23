@@ -42,6 +42,11 @@ class SkuPriceReference(BaseModel):
     source_ref: StrictStr
 
 
+def _top_three_mean(samples: list[PriceReferenceSample]) -> MoneyRatio:
+    total = sum((_marketing_ratio(sample) for sample in samples), MoneyRatio(Decimal(0)))
+    return total / MoneyRatio(Decimal(3))
+
+
 def calculate_price_reference(samples: list[PriceReferenceSample], *, sku: str,
                               currency: str, observed_at: datetime,
                               source_ref: str) -> SkuPriceReference | None:
@@ -59,9 +64,8 @@ def calculate_price_reference(samples: list[PriceReferenceSample], *, sku: str,
     if len(ranked) < 3:
         return None
     selected = ranked[:3]
-    total = sum((_marketing_ratio(s) for s in selected), MoneyRatio(Decimal(0)))
     return SkuPriceReference(sku=sku, currency=currency,
-        marketing_price=(total / MoneyRatio(Decimal(3))).decimal(),
+        marketing_price=_top_three_mean(selected).decimal(),
         samples=selected, observed_at=observed_at, source_ref=source_ref)
 
 
@@ -69,8 +73,7 @@ def reference_upper_price(reference: SkuPriceReference | None, currency: str) ->
     """上限按三条来源精确比值取均值，避免循环小数展示值导致少进一档。"""
     if reference is None or reference.currency != currency:
         return None
-    total = sum((_marketing_ratio(s) for s in reference.samples), MoneyRatio(Decimal(0)))
-    return total / MoneyRatio(Decimal(3))
+    return _top_three_mean(reference.samples)
 
 
 def describe_price_limit(upper: MoneyRatio, before: MoneyRatio | None, after: MoneyRatio) -> dict:

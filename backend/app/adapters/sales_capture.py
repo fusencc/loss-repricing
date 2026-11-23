@@ -1,7 +1,7 @@
 """按ERP父产品候选读取销售来源原件；不把原始字段冒充完整定价快照。
 
 合同依据：当前销售前端及真实只读响应，读取父产品、逐父产品变体和费用币种报价。
-2026-11-13起费用仅使用用户固定表，不再查询动态个人、店铺或部门费率。
+费用由每日销售系统配置采集器统一保存，此处不重复查询费用。
 这里保留原币、百分数及空值，不推断销量窗口、保护或费用模型审核状态。
 """
 from datetime import datetime, timezone
@@ -74,7 +74,7 @@ def capture_sales_sources(settings, capture, *, client=None, page_size=100, prod
         'sample_only':bool(capture.get('sample_only', False)),
         'queried_at':datetime.now(timezone.utc).isoformat(), 'pricing_ready':False,
         'requested_product_ids':requested, 'missing_product_hint_orders':sorted(missing_hints),
-        'products':[], 'variants':[], 'issues':[], 'files':[], 'fee_policy':'user_fixed_configuration',
+        'products':[], 'variants':[], 'issues':[], 'files':[], 'fee_policy':'sales_daily_configuration',
         'currency_rates':[], 'currency_rate_unit':'cny_per_currency', 'read_retries':[],
         'shop_sites':{}, 'shop_site_contract':SHOP_SITE_CONTRACT,
     }
@@ -223,7 +223,7 @@ def capture_sales_sources(settings, capture, *, client=None, page_size=100, prod
                         issue('currency_rate', 'currency_rate_missing_or_invalid', currency=currency)
             except _Issue as error:
                 issue('currency_rate', error.code)
-        # 2026-11-13费率改由用户固定Excel导入；不查询部门、个人、店铺或公共费用覆盖。
+        # 费用由每日统一配置采集器提供；本商品采集器不查询费率。
     finally:
         private_request.reset(context)
         if owned:

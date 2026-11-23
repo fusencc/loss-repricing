@@ -92,7 +92,7 @@ class CaptureGroup(BaseModel):
     rows: list[FinanceRow]
     batches: list[ExportBatch]
 
-    def scope_bloc(self, department=None):
+    def scope_bloc(self, department=None, salesperson=None):
         kind, expected_status = SOURCES[self.source]
         if self.status != expected_status or self.filters.get("status") != expected_status:
             return None
@@ -103,13 +103,19 @@ class CaptureGroup(BaseModel):
             department not in ERP_DEPARTMENTS or self.filters.get(department_key) != department
         ):
             return None
+        # 同一销售员在亏损池用姓名，在禁止发货列表用 ERP 人员 ID。
+        # 每组按实际请求字段核对，缺失条件的集团名单不能计入个人范围。
+        if salesperson is not None:
+            if not salesperson.name or salesperson.name != salesperson.name.strip():
+                return None
+            key, value = ("username", salesperson.name) if kind == "loss" else ("shopUsernameid", salesperson.id)
+            if self.filters.get(key) != value:
+                return None
+            extra_scope.add(key)
         filter_keys = set(self.filters) - extra_scope
         if kind == "loss":
-            if "username" in self.filters and (not isinstance(self.filters["username"], str)
-                    or not self.filters["username"] or self.filters["username"] != self.filters["username"].strip()):
-                return None
             if (
-                (filter_keys - {"username"}) != {"platform", "bloc", "status", "financecheck"}
+                filter_keys != {"platform", "bloc", "status", "financecheck"}
                 or str(self.filters.get("platform", "")).casefold() != "tiktok"
                 or self.filters.get("financecheck") != "3"
             ):
@@ -124,7 +130,7 @@ class CaptureGroup(BaseModel):
             bloc = self.filters.get("blocs")
         return bloc if isinstance(bloc, str) and bloc.strip() else None
 
-    def finance_coverage(self, bloc, department=None):
+    def finance_coverage(self, bloc, department=None, salesperson=None):
         ids = set(self.candidate_order_ids)
         row_ids = {row.orderid for row in self.rows}
         list_known = self.list_complete and self.total == len(ids) == len(self.candidate_order_ids)
@@ -132,7 +138,7 @@ class CaptureGroup(BaseModel):
             bloc is not None and row_ids <= ids
             and all(row.fields.order_id == row.orderid and row.fields.bloc == bloc
                     and row.fields.platform.casefold() == "tiktok"
-                    and ("username" not in self.filters or row.fields.salesperson == self.filters["username"])
+                    and (salesperson is None or row.fields.salesperson == salesperson.name)
                     and (department is None or (row.fields.department or "").casefold() == department.casefold())
                     for row in self.rows)
         )
@@ -470,17 +476,12 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
     fx = evidence.fx if evidence else current_fx
     evaluated_at = evidence.evaluated_at if evidence else (current_fx.queried_at if current_fx else (live.observed_at if live else None))
 
-    scope_by_source = {source: group.scope_bloc(capture.department) for source, group in groups.items()}
+    scope_by_source = {
+        source: group.scope_bloc(capture.department, capture.salesperson) for source, group in groups.items()
+    }
     scope_blocs = set(scope_by_source.values())
     blocked_platforms = {str(group.filters.get("ptid")) for group in groups.values() if group.source.startswith("blocked_")}
-    # 按销售员采集必须保留采集器确认的身份，且所有来源使用同一筛选；
-    # 财务行另逐行核对销售员，不能把个人范围与集团全量来源混合。
-    selectors = {group.filters.get('username') if isinstance(group.filters.get('username'), str)
-                 else None for group in groups.values()}
-    person_scope_matches = (selectors == {None} and capture.salesperson is None) or (
-        capture.salesperson is not None and selectors == {capture.salesperson.name})
-    scope_matches = (len(scope_blocs) == 1 and None not in scope_blocs and len(blocked_platforms) <= 1
-                     and person_scope_matches)
+    scope_matches = len(scope_blocs) == 1 and None not in scope_blocs and len(blocked_platforms) <= 1
 
     memberships = defaultdict(dict)
     order_finance = defaultdict(list)
@@ -695,7 +696,8 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
         online_states.append(state)
 
     finance_coverage = {
-        source: group.finance_coverage(scope_by_source[source], capture.department) for source, group in groups.items()
+        source: group.finance_coverage(scope_by_source[source], capture.department, capture.salesperson)
+        for source, group in groups.items()
     }
     any_known_issue = any(known_issue for _, known_issue in finance_coverage.values())
     complete_sources = [

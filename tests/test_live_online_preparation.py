@@ -23,7 +23,7 @@ def sources():
         'currency_rates':[{'name':'CNY','rate':'1'},{'name':'PHP','rate':'0.1042'}]}
     platform={'schema_version':'sales-platform-controls-v1','source_id':'PLATFORM',**flags,'records':[{
         'erp_shop':'SHOPPH','product_id':'P1','observed_at':flags['completed_at'],'ref':'PLATFORM/1',
-        'company_parent':{'shopName':'SHOPPH','shopId':'SHOP-ID','productId':'P1','bloc':'GROUP','department':'D1','localMainSku':'M1','productStatus':4},
+        'company_parent':{'shopName':'SHOPPH','shopId':'SHOP-ID','productId':'P1','bloc':'GROUP','department':'D1','localMainSku':'M1','productStatus':4,'mainlandId':1},
         'company_activity_locked':True,'current_variants':[variant],
         'data':{'id':'P1','product_status':'ACTIVATE','status':'ACTIVATE','is_not_for_sale':False,'skus':[{
             'id':'I1','seller_sku':'S1','price':{'sale_price':'61.49','currency':'PHP'},'status_info':{'status':'NORMAL'}}]}}]}
@@ -32,7 +32,7 @@ def sources():
     local={'schema_version':'local-live-price-history-v1','source_id':'LOCAL',**flags,
         'acquisition_complete':True,'archive_binding':'injected_synthetic_test','executions':[],'guards':[],'protections':[]}
     rate['vatRate']='0'
-    fixed={'schema_version':'sales-current-pricing-fees-v1','source_id':'FIXED',**flags,'acquisition_complete':True,'artifact_file':'synthetic-fees.json',
+    fixed={'schema_version':'sales-daily-pricing-fees-v2','source_id':'FIXED',**flags,'acquisition_complete':True,'artifact_file':'synthetic-fees.json','daily_source':{'version':'synthetic','checked_at':flags['queried_at']},
         'config':{'version':'fixed-test-v1','overseas':{'PH':rate},'public':{},'departments':{},'freight':{}}}
     return capture,[target],{'sales':sales,'platform':platform,'window':window,
         'local_history':local,'fixed_fees':fixed,'official_history':{
@@ -226,12 +226,12 @@ def test_no_overseas_inventory_never_uses_overseas_fee_as_direct_formula():
     s["platform"]["records"][0]["current_variants"][0]["overseasStockSum"]=0
     result=prepare_online_states(c,t,**s)
     assert not result["online"]
-    assert "本轮当前费用未覆盖" in result["issues"][0]["reason"]
+    assert "店铺属性缺少唯一配置" in result["issues"][0]["reason"]
 
 
 def test_th_online_vat_flows_into_profit_model_without_new_source():
     from app.adapters.live_online_preparation import prepare_online_states
-    from test_fixed_pricing_fees import direct_source
+    from test_sales_fee_inputs import direct_source
     c,targets,inputs=sources()
     targets[0]['key']['site']='TH'
     control=inputs['platform']['records'][0]
@@ -242,10 +242,7 @@ def test_th_online_vat_flows_into_profit_model_without_new_source():
     inputs['sales']['currency_rates']=[{'name':'CNY','rate':'1'},{'name':'THB','rate':'0.1'}]
     _,rate=direct_source()
     config=inputs['fixed_fees']['config']
-    config['public']={'SHOPPH':{k:rate[k] for k in ('vatRate','procedureRate','commissionRate','warehouseCost')}}
-    config['public']['SHOPPH']['vatRate']=None
-    config['departments']={'D1':{'TH':{k:rate[k] for k in ('returnRate','otherRate','marketingRate','packageFee','fixedFreight')}}}
-    config['freight']={'TH':rate['freight']}
+    configure_direct(config,rate,'TH')
     result=prepare_online_states(c,targets,**inputs)
     assert not result['issues']
     state=result['online'][0]['state']
@@ -265,7 +262,7 @@ def test_erp_loss_is_priced_even_when_current_full_online_profit_is_positive(mod
     from app.adapters.normalization import source_time
     from app.domain.engine import evaluate
     from app.domain.types import OnlineState, SiteContract, Snapshot, SourceLine
-    from test_fixed_pricing_fees import direct_source
+    from test_sales_fee_inputs import direct_source
 
     capture, targets, inputs = sources()
     control = inputs['platform']['records'][0]
@@ -277,11 +274,7 @@ def test_erp_loss_is_priced_even_when_current_full_online_profit_is_positive(mod
         _, rate = direct_source()
         variant.update(overseasStockSum=0, localWeight='21', costPrice='2')
         config = inputs['fixed_fees']['config']
-        config['public'] = {'SHOPPH': {k: rate[k] for k in
-            ('vatRate', 'procedureRate', 'commissionRate', 'warehouseCost')}}
-        config['departments'] = {'D1': {'PH': {k: rate[k] for k in
-            ('returnRate', 'otherRate', 'marketingRate', 'packageFee', 'fixedFreight')}}}
-        config['freight'] = {'PH': rate['freight']}
+        configure_direct(config,rate,'PH')
     prepared = prepare_online_states(capture, targets, **inputs)
     assert not prepared['issues']
     state = OnlineState.model_validate(prepared['online'][0]['state'])
@@ -308,3 +301,16 @@ def test_unknown_official_history_still_prepares_online_state():
     assert len(result['online'])==1 and not result['issues']
     state=result['online'][0]['state']
     assert state['history_known'] is False and state['recent_price_log'] is None
+
+
+def configure_direct(config, rate, site):
+    config['shops']=[{'shopName':'SHOPPH','site':site,'mainlandId':1,'shop3pf':1,'property':'铺货店铺'}]
+    config['public']=[{'id':t,'platform':'TIKTOK','site':site,'rateType':t,'associationCategory':False,
+        'shopMainland':-1,'shop3pf':-1,'shopProperty':'全部','rateFormat':1 if t==4 else 0,
+        'currency':'RMB' if t==4 else '', 'expense':rate[f]}
+        for t,f in [(0,'vatRate'),(1,'procedureRate'),(2,'commissionRate'),(4,'warehouseCost')]]
+    config['departments']=[{'departmentName':'D1','siteCode':site,'mainlandId':1,'shop3pf':1,
+        **{k:rate[k] for k in ('returnRate','otherRate','marketingRate','packageFee','fixedFreight')}}]
+    config['freight']=[{'id':1,'siteCode':site,'mainlandId':1,'shop3pf':1,'priceType':1,'fixedFreight':'0',
+        'firstWeight':rate['freight']['base_weight_g'],'firstAmount':rate['freight']['base_price'],
+        'secondWeight':rate['freight']['step_weight_g'],'secondAmount':rate['freight']['step_price']}]

@@ -71,16 +71,16 @@ def manual_decision(snapshot, online, desired, reason, correction_id, now):
         raise ValueError("站点仓配上传合同尚未确认")
     if not desired.is_finite() or desired <= 0 or online.retail_price <= 0:
         raise ValueError("实际售价必须为有限正数")
-    current = online.marketing_price if online.marketing_price is not None else online.retail_price
-    if current <= 0 or current > online.retail_price:
+    observed_prices = online.actual_price_and_discount()
+    if observed_prices is None:
         raise ValueError("折扣数据无效")
-    discount = MoneyRatio(current) / MoneyRatio(online.retail_price)
+    current, discount = observed_prices
     profit_check = online.profit_check
     if profit_check is None:
         raise ValueError("缺少库存分流、部门费率及完整在线利润公式")
     upper = reference_upper_price(online.sku_price_reference, online.currency)
-    if problem := profit_check.problem(now, today, minimum_margin_required=upper is None):
-        raise ValueError(problem)
+    if issue := profit_check.validation_issue(now, today, minimum_margin_required=upper is None):
+        raise ValueError(issue.value)
     target = MoneyRatio(desired)
     upload = (target / discount).round_to_step(contract.price_step, contract.rounding)
     actual = MoneyRatio(upload) * discount
