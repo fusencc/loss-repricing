@@ -27,8 +27,9 @@ def test_bad_roster_stops_before_login(settings, monkeypatch, value):
         workflow.run_workflow(settings)
 
 
-def test_roster_only_passes_named_people_to_every_department(settings, monkeypatch):
+def test_roster_only_passes_people_to_their_confirmed_department(settings, monkeypatch):
     monkeypatch.setattr(workflow, 'ERP_ROSTER_NAMES', (' 甲 ', '乙', '甲'))
+    monkeypatch.setattr(workflow, 'ERP_ROSTER_DEPARTMENTS', {'甲': 'Tiktok一部', '乙': 'Tiktok五部'})
     calls = []
     def run(settings, *, department, salesperson, **kwargs):
         calls.append((department, salesperson))
@@ -37,11 +38,20 @@ def test_roster_only_passes_named_people_to_every_department(settings, monkeypat
         return {'status':'completed', 'ready_prices':0, 'execution_allowed':False}
     monkeypatch.setattr(workflow, '_run_workflow', run)
     result = workflow.run_workflow(settings, roster_date=DAY)
-    assert calls == [(department, name) for department in workflow.ERP_DEPARTMENTS for name in ['甲', '乙']]
+    assert calls == [('Tiktok一部', '甲'), ('Tiktok五部', '乙')]
     assert result['salespersons'] == ['甲', '乙']
     assert result['roster_date'] == str(DAY)
     assert result['status'] == 'needs_attention'
     assert not result['execution_allowed']
+
+
+@pytest.mark.parametrize('departments', [{}, {'甲': '未确认部门'}])
+def test_roster_without_valid_department_stops_before_login(settings, monkeypatch, departments):
+    monkeypatch.setattr(workflow, 'ERP_ROSTER_NAMES', ('甲',))
+    monkeypatch.setattr(workflow, 'ERP_ROSTER_DEPARTMENTS', departments)
+    monkeypatch.setattr(workflow, '_session', lambda *_: pytest.fail('部门归属无效不得登录'))
+    with pytest.raises(ValueError, match='缺少有效部门归属'):
+        workflow.run_workflow(settings)
 
 
 def test_explicit_date_mismatch_stops(settings, monkeypatch):
