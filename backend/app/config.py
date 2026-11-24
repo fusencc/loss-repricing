@@ -60,10 +60,11 @@ class Settings(BaseSettings):
     public_base_url: str = ""
     notification_mode: str = "live"
     ding_tk_morning_log_folder: str = ""  # TK亏损提价日志目录。
-    ding_tk_drive_space_id: str = ""
+    ding_drive_space_id: str = ""
     ding_tk_drive_parent_id: str = ""
-    ding_tk_drive_operator_userid: str = ""
+    ding_drive_operator_userid: str = ""
     ding_cancellation_log_folder: str = ""  # 作废订单日志目录。
+    ding_cancellation_drive_parent_id: str = ""
 
     @model_validator(mode="after")
     def production_settings(self):

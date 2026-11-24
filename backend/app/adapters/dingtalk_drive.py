@@ -1,4 +1,5 @@
 """使用预算归档已采用的企业存储接口，发布亏损提价项目自己的日志。"""
+from contextlib import contextmanager
 from hashlib import sha256
 import json
 from urllib.parse import urlsplit
@@ -8,23 +9,12 @@ from app.services.erp_capture_store import write_verified
 from app.services.store import stamp
 
 
-def publish_tk_workbook(config, filename):
-    folder = config.ding_tk_morning_log_folder
-    space = config.ding_tk_drive_space_id
-    parent = config.ding_tk_drive_parent_id
-    operator = config.ding_tk_drive_operator_userid
+@contextmanager
+def drive_folder(config, folder, parent):
+    space = config.ding_drive_space_id
+    operator = config.ding_drive_operator_userid
     if not (space.isdecimal() and parent.isdecimal() and parent != '0' and operator):
         raise ValueError('缺少钉盘目录或企业应用操作人配置')
-    receipt = filename.with_suffix('.receipt.json')
-    if receipt.exists():
-        if json.loads(receipt.read_text(encoding='utf-8'))['folder_id'] != folder:
-            raise ValueError('现有上传回执属于其他目录')
-        return
-
-    raw = filename.read_bytes()
-    intent = filename.with_suffix('.publish-intent.json')
-    if intent.exists():
-        raise RuntimeError('上次钉盘提交结果待核验，禁止自动重传')
     ding = DingTalkClient(config)
     try:
         user = ding._post('topapi/v2/user/get', {'userid': operator})
@@ -33,9 +23,9 @@ def publish_tk_workbook(config, filename):
             raise RuntimeError('钉盘操作人无法通过企业应用解析')
         token = ding._token()
 
-        def request(method, path, payload):
+        def request(method, path, payload=None, params=None):
             response = ding.http.request(
-                method, 'https://api.dingtalk.com' + path, params={'unionId': union_id},
+                method, 'https://api.dingtalk.com' + path, params={'unionId': union_id, **(params or {})},
                 json=payload, headers={'x-acs-dingtalk-access-token': token}, timeout=45)
             if not response.is_success:
                 raise RuntimeError(f'钉盘企业存储接口返回 HTTP {response.status_code}')
@@ -48,6 +38,51 @@ def publish_tk_workbook(config, filename):
         if (target.get('type') != 'FOLDER' or str(target.get('spaceId')) != space
                 or str(target.get('id')) != parent or target.get('uuid') != folder):
             raise RuntimeError('钉盘目录与部署配置不一致')
+        yield ding, request, inspect
+    finally:
+        ding.close()
+
+
+def find_drive_workbook(config, folder, parent, name):
+    path = f'/v1.0/storage/spaces/{config.ding_drive_space_id}/dentries'
+    matches, cursors = [], set()
+    params = {'parentId': parent, 'maxResults': 50}
+    with drive_folder(config, folder, parent) as (_, request, inspect):
+        while True:
+            page = request('GET', path, params=params)
+            matches.extend(item for item in page['dentries'] if item.get('name') == name)
+            cursor = page.get('nextToken')
+            if not cursor:
+                break
+            if cursor in cursors:
+                raise RuntimeError('钉盘目录分页未核对完整')
+            cursors.add(cursor)
+            params['nextToken'] = cursor
+        if len(matches) > 1:
+            raise RuntimeError('钉盘存在多份同名上午日志')
+        if matches:
+            row = inspect(matches[0]['id'])
+            if (row.get('name') != name or str(row.get('parentId')) != parent
+                    or str(row.get('spaceId')) != config.ding_drive_space_id):
+                raise RuntimeError('钉盘文件与目标目录不一致')
+            return {'type': row['type'], 'nodeId': row['uuid']}
+    return None
+
+
+def publish_drive_workbook(config, filename, folder, parent):
+    space = config.ding_drive_space_id
+    receipt = filename.with_suffix('.receipt.json')
+    if receipt.exists():
+        record = json.loads(receipt.read_text(encoding='utf-8'))
+        if record['folder_id'] != folder:
+            raise ValueError('现有上传回执属于其他目录')
+        return record
+
+    raw = filename.read_bytes()
+    intent = filename.with_suffix('.publish-intent.json')
+    if intent.exists():
+        raise RuntimeError('上次钉盘提交结果待核验，禁止自动重传')
+    with drive_folder(config, folder, parent) as (ding, request, inspect):
         base = f'/v2.0/storage/spaces/files/{folder}'
         info = request('POST', base + '/uploadInfos/query', {
             'protocol': 'HEADER_SIGNATURE', 'option': {
@@ -75,7 +110,7 @@ def publish_tk_workbook(config, filename):
         if (row.get('uuid') != committed['uuid'] or row.get('name') != filename.name or row.get('size') != len(raw)
                 or str(row.get('spaceId')) != space or str(row.get('parentId')) != parent):
             raise RuntimeError('钉盘文件回执与本次发布不一致')
-        write_verified(receipt, {'node_id': row['uuid'], 'folder_id': folder, 'name': filename.name,
-                                 'sha256': digest, 'published_at': stamp()})
-    finally:
-        ding.close()
+        record = {'node_id': row['uuid'], 'folder_id': folder, 'name': filename.name,
+                  'sha256': digest, 'published_at': stamp()}
+        write_verified(receipt, record)
+        return record

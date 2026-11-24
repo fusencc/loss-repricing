@@ -122,9 +122,10 @@ def publish_morning_log(config, filename):
     if config.ding_tk_morning_log_folder:
         if config.ding_tk_morning_log_folder == config.ding_cancellation_log_folder:
             raise ValueError('TK亏损提价与作废订单日志必须使用各自的钉盘目录')
-        if config.ding_tk_drive_space_id:
-            from app.adapters.dingtalk_drive import publish_tk_workbook
-            publish_tk_workbook(config, filename)
+        if config.ding_drive_space_id:
+            from app.adapters.dingtalk_drive import publish_drive_workbook
+            publish_drive_workbook(config, filename, config.ding_tk_morning_log_folder,
+                                   config.ding_tk_drive_parent_id)
         else:
             publish_workbook(config.ding_tk_morning_log_folder, filename)
 
@@ -159,7 +160,15 @@ def check_cancellation_log(config, day):
     directory = config.runtime_dir / 'cancellation-logs' / day.isoformat()
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     name = f'{day.month}.{day.day}上午运行日志.xlsx'
-    entry = find_workbook(folder, directory, name)
+    if config.ding_drive_space_id:
+        from app.adapters.dingtalk_drive import find_drive_workbook
+        entry = find_drive_workbook(config, folder, config.ding_cancellation_drive_parent_id, name)
+    else:
+        entry = find_workbook(folder, directory, name)
+    return save_cancellation_lookup(day, directory, folder, name, entry)
+
+
+def save_cancellation_lookup(day, directory, folder, name, entry):
     if entry and (entry.get('type') != 'FILE' or not entry.get('nodeId')):
         raise RuntimeError('同名作废日志没有可核实的文件节点')
     result = {'business_date': day.isoformat(), 'name': name, 'folder_id': folder,
@@ -197,6 +206,14 @@ def sync_cancellation_log(config, day):
                 raise ValueError('作废订单日志的运行日期与上午文件日期不一致')
         finally:
             workbook.close()
+    if config.ding_drive_space_id:
+        existing = check_cancellation_log(config, day)
+        if existing['status'] == 'found':
+            return existing
+        from app.adapters.dingtalk_drive import publish_drive_workbook
+        record = publish_drive_workbook(config, filename, folder, config.ding_cancellation_drive_parent_id)
+        return save_cancellation_lookup(day, filename.parent, folder, filename.name,
+                                        {'type': 'FILE', 'nodeId': record['node_id']})
     publish_workbook(folder, filename)
     return check_cancellation_log(config, day)
 
