@@ -4,12 +4,10 @@ from hashlib import sha256, scrypt
 import secrets
 import hmac
 import json
-from uuid import uuid4
 from sqlalchemy import select
 from app.models.coordination import UserAccount, Ownership, TargetControl
 from app.domain.types import VariantKey
 from app.services.store import stamp
-from app.db import transaction
 
 @dataclass(frozen=True)
 class Principal:
@@ -131,14 +129,6 @@ def automation_gate(session,key,authorization=None,locked=None):
     if control and (control.mode!='auto' or control.handback_pending): return False,'人工接管或交回后等待重新取数'
     if authorization is not None and authorization!=authorization_snapshot(session,key,locked):return False,'管理状态或归属版本已变化，原自动方案失效'
     return True,''
-
-def ensure_demo_ownership(factory,keys):
-    with transaction(factory) as session:
-        for key in keys:
-            k=VariantKey.model_validate(key)
-            sk=scope_key(k.platform,k.shop_id,k.site)
-            if not session.scalar(select(Ownership).where(Ownership.scope_key==sk)):
-                session.add(Ownership(id=str(uuid4()),scope_key=sk,platform=k.platform,shop_id=k.shop_id,site=k.site,owner_id='admin',autonomous=True,version=1))
 
 def baseline_from_item(item):
     # 唯一价格依据是评估时存储的在线原始行；不能从建议目标价反推现价。

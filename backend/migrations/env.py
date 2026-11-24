@@ -6,11 +6,8 @@ from app import models
 
 config = get_settings()
 target_metadata = Base.metadata
+config.runtime_dir.mkdir(parents=True, exist_ok=True)
 url = config.database_url
-if url == "sqlite:///runtime/loss-repricing.db":
-    config.runtime_dir.mkdir(parents=True, exist_ok=True)
-    url = f"sqlite:///{config.runtime_dir / 'loss-repricing.db'}"
-
 if context.is_offline_mode():
     context.configure(url=url, target_metadata=target_metadata, literal_binds=True)
     with context.begin_transaction():

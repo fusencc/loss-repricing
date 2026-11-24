@@ -433,7 +433,7 @@ def capture_erp_bulk(settings, *, source=None, client=None, web_session=None, ma
                        'total':None,'error':None,'failed_pages':[],'files':[],'pages':[],
                        'list_complete':False,'stage':'not_attempted','batches':[],
                        'status_discrepancies':[],'missing_order_ids':[]})
-    result = {'source_version':'erp-web-bulk-four-20261124','source_kind':'erp_web_backend',
+    result = {'source_version':'erp-web-bulk-four-20261109','collection_policy_version':'verified-pages-20261124','source_kind':'erp_web_backend',
               'sample_only':max_orders is not None,'selection_complete':False,
               'acquisition_mode':'bulk_download','queried_at':now.isoformat(),'groups':groups,
               'details':[],'capture_complete':False,'pricing_ready':False,'stopped_by_rate_limit':False,

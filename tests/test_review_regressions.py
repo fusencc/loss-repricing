@@ -8,7 +8,7 @@ from sqlalchemy import select
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from app.adapters.base import LookupResult, SubmitResult
-from app.adapters.demo import DemoAdapter
+from fake_adapter import DemoAdapter
 from app.domain.engine import evaluate
 from app.domain.types import VariantKey
 from app.models import Batch, Item, Execution, VariantGuard, Job
@@ -150,6 +150,7 @@ def test_midnight_stops_cached_submissions_and_queues_fresh_day(context, monkeyp
 def test_current_items_and_counts_omit_resolved_history_but_preserve_batches(client):
     login(client)
     state = client.app.state
+    state.adapter = state.service.adapter = DemoAdapter(state.config.runtime_dir)
     first = state.service.run_batch('held')
     enable(state.factory)
     state.service.run_batch('enabled')

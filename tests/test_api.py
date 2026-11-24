@@ -23,7 +23,7 @@ def test_admin_required_and_wrong_password_rejected(client):
     login(client)
     result = client.get("/api/overview")
     assert result.status_code == 200
-    assert result.json()["mode"] == "demo"
+    assert result.json()["mode"] == "live"
     assert "session_secret" not in result.text and "test-local-password" not in result.text
 
 
@@ -37,7 +37,7 @@ def test_settings_protections_and_job_contract(client):
     assert client.get("/api/protections").json()[0]["active"] is True
     assert client.delete(f"/api/protections/{protection_id}").status_code == 200
     assert client.get("/api/protections").json() == []
-    job = client.post("/api/demo/run").json()
+    job = client.post("/api/batches/run").json()
     assert client.get(f"/api/jobs/{job['job_id']}").json()["state"] == "queued"
 
 
@@ -52,27 +52,17 @@ def test_logout_invalidates_browser_cookie(client):
     assert client.post("/api/auth/logout").status_code == 200
     assert client.get("/api/auth/me").status_code == 401
 
-def test_demo_entry_runs_with_coordination_in_a_fresh_database(tmp_path):
-    from app.worker import Worker
+def test_demo_entry_removed(client):
+    login(client)
+    assert client.post("/api/demo/run").status_code == 404
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, adapter_mode="demo")
 
-    config = Settings(
-        _env_file=None, adapter_mode="demo", coordination_required=True,
-        live_submit_enabled=False, ding_enabled=False, notification_mode="demo",
-        runtime_dir=tmp_path, database_url=f"sqlite:///{tmp_path / 'api.db'}",
-        admin_password="test-local-password", session_secret="test-session-secret-32-characters-long",
-    )
-    with TestClient(create_app(config)) as client:
-        login(client)
-        app = client.app
-        response = client.post("/api/demo/run")
-        assert response.status_code == 200
-        worker = Worker(app.state.factory, app.state.service)
-        worker.tick()
-        job = client.get(f"/api/jobs/{response.json()['job_id']}").json()
-        assert job["state"] == "done"
-        batch = client.get(f"/api/batches/{job['batch_id']}").json()
-        assert batch["mode"] == "demo" and batch["summary"]["已核验"] >= 1
-        worker.tick()
-        inbox = client.get("/api/notifications").json()
-        assert len(inbox) == 2 and all(notice["delivery_state"] == "demo" for notice in inbox)
-        assert any(notice["summary"].get("kind") == "warning" for notice in inbox)
+def test_default_live_storage_is_separate_from_file_reconciliation(tmp_path):
+    live = Settings(_env_file=None, runtime_dir=tmp_path)
+    file = Settings(_env_file=None, runtime_dir=tmp_path, adapter_mode="file")
+    assert live.database_url == f"sqlite:///{tmp_path / 'live-history.db'}"
+    assert file.database_url == f"sqlite:///{tmp_path / 'file-reconciliation.db'}"
+    assert not live.live_submit_enabled and not live.ding_enabled
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, notification_mode="demo")

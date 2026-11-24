@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from decimal import Decimal
-from app.adapters.demo import DemoAdapter
+from fake_adapter import DemoAdapter
 from app.domain.types import Snapshot
 
 

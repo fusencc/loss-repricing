@@ -7,6 +7,7 @@ import { formatDecimal } from './decimal-display'
 import { downloadSellerExcel } from './records-download'
 import SellerRecordLogs from './SellerRecordLogs.vue'
 import RecordsDots from './RecordsDots.vue'
+import repricingLogo from './assets/repricing-logo.png'
 import './records.css'
 
 defineProps<{ mode: string }>()
@@ -110,7 +111,7 @@ onUnmounted(() => { ++request; controller?.abort(); window.clearInterval(timer) 
     <main class="records-shell">
       <header class="records-header motion-page">
         <div>
-          <div class="records-title"><img class="records-mark" src="/repricing-logo.png" alt="" aria-hidden="true" /><h1>提价日志</h1></div>
+          <div class="records-title"><img class="records-mark" :src="repricingLogo" alt="" aria-hidden="true" /><h1>提价日志</h1></div>
         </div>
         <div class="records-header-end">
           <nav class="records-departments" aria-label="切换部门"><button v-for="entry in departments" :key="entry.id" type="button" :aria-pressed="department === entry.id" :class="{ active: department === entry.id }" aria-controls="records-list" @click="changeDepartment(entry.id)">{{ entry.name }}</button></nav>
@@ -152,7 +153,7 @@ onUnmounted(() => { ++request; controller?.abort(); window.clearInterval(timer) 
             <!-- 上传价取最近记录的持久提交意图，使用持久化十进制文本并限制展示为两位小数；不以建议价或回读价代替，也不表示已经生效。 -->
             <td class="records-upload-cell"><span class="records-mobile-label">上传价</span><strong>{{ formatDecimal(group.latest.execution?.uploaded_price ?? (group.latest.execution ? '未记录' : '未提交')) }}</strong><small v-if="group.latest.execution?.uploaded_price != null">{{ group.latest.decision?.trace.station_currency || '币种未记录' }}</small></td>
             <td class="records-progress-cell"><div class="records-status-list"><template v-for="state in states" :key="state"><span v-if="recordStatusCount(group.counts, state)" class="records-status" :class="recordTone(state)"><i></i>{{ recordStatusLabel(state) }} {{ recordStatusCount(group.counts, state) }}</span></template></div></td>
-            <td class="records-time-cell"><div class="records-row-end"><time :datetime="group.latest.updated_at">{{ timeLabel(group.latest.updated_at) }}</time><button type="button" class="records-download" title="下载Excel" aria-label="下载Excel" @click.stop="downloadSeller(group)"><Download aria-hidden="true" /></button></div></td>
+            <td class="records-time-cell"><div class="records-row-end"><time v-if="group.latest.display_time" :datetime="group.latest.display_time">{{ timeLabel(group.latest.display_time) }}</time><span v-else>—</span><button type="button" class="records-download" title="下载Excel" aria-label="下载Excel" @click.stop="downloadSeller(group)"><Download aria-hidden="true" /></button></div></td>
           </tr></tbody>
         </table>
       </section>

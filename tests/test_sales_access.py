@@ -4,7 +4,9 @@ from app.config import Settings
 from app.main import create_app
 
 @pytest.fixture
-def client(tmp_path):
+def client(tmp_path, monkeypatch):
+    from fake_adapter import DemoAdapter
+    monkeypatch.setattr("app.main.build_adapter", lambda config: DemoAdapter(config.runtime_dir))
     c=Settings(database_url=f"sqlite:///{tmp_path/'sales.db'}",runtime_dir=tmp_path,admin_password='test-local-password',session_secret='test-session-secret-32-characters-long',_env_file=None)
     with TestClient(create_app(c)) as x: yield x
 

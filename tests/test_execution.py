@@ -6,7 +6,7 @@ from sqlalchemy import select
 from app.db import Base, create_database
 from app.config import Settings
 from app.models import Item, Execution, VariantGuard
-from app.adapters.demo import DemoAdapter
+from fake_adapter import DemoAdapter
 from app.adapters.base import LookupResult, SubmitResult
 from app.services.execution import PricingService
 from app.services.store import update_settings, settings_value

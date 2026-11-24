@@ -421,14 +421,13 @@ def test_selected_erp_preview_becomes_one_isolated_file_batch(sources, tmp_path,
         assert client.get(item_path).status_code == 404
 
 
-@pytest.mark.parametrize("mode", ["demo", "live"])
-def test_erp_preview_reconciliation_refuses_other_runtime_modes(tmp_path, mode):
+def test_erp_preview_reconciliation_refuses_live_mode(tmp_path):
     from fastapi.testclient import TestClient
 
     from app.config import Settings
     from app.main import create_app
 
-    config = Settings(_env_file=None, runtime_dir=tmp_path, adapter_mode=mode,
+    config = Settings(_env_file=None, runtime_dir=tmp_path, adapter_mode="live",
                       admin_password="test-password", session_secret="s" * 40)
     with TestClient(create_app(config)) as client:
         assert client.post("/api/auth/login", json={"username": "admin", "password": "test-password"}).is_success

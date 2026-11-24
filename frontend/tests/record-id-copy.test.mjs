@@ -30,7 +30,7 @@ test('copy confirms completion before reporting success and exposes rejection or
 })
 
 test('stage labels change only display semantics and preserve reference-priority evidence', () => {
-  for (const [label, expected] of [['① 原实际营销价', '原实际营销价'], ['② 补亏损', '补毛利亏'], ['③ 利润校验', '利润校验变动'], ['③ 参考价优先', '参考价优先']]) {
+  for (const [label, expected] of [['① 原实际营销价', '原营销价'], ['② 补亏损', '需补亏损'], ['③ 利润校验', '利润校验变动'], ['③ 参考价优先', '参考价优先']]) {
     const stage = { label, price: '12.3456789', key: 'break_even' }
     const saved = structuredClone(stage)
     assert.equal(recordStageLabel(stage), expected)

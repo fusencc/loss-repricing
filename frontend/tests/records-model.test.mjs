@@ -111,7 +111,7 @@ test('dialog stages use wrapping horizontal fields with saved price and original
   const css = await readFile(new URL('../src/records.css', import.meta.url), 'utf8')
   assert.match(source, /<dl class="records-log-stages"/)
   assert.match(source, /<template v-if="item\.decision\?\.stages">/)
-  assert.match(source, /<strong>\{\{ stagePriceLabel\(stage, item\.decision\.stages\.currency\) \}\}<\/strong>/)
+  assert.match(source, /<strong[^>]*>\{\{ stagePriceLabel\(stage, item\.decision\.stages\.currency\) \}\}<\/strong>/)
   assert.match(source, /<dt>修正一次毛利<\/dt>/)
   assert.doesNotMatch(source, /records-stage-change|stageChangeLabel|stagePercentLabel/)
   assert.doesNotMatch(source, /<table|在线利润率导致的变动|stageProfitChangeLabel|stage\.profit_change_cny|records-stage-formula|公式：/)

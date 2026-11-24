@@ -7,8 +7,8 @@ export PATH="$PWD/.venv/bin:/usr/local/bin:/usr/bin:/bin"
 python - <<'PY'
 from app.config import get_settings
 s=get_settings()
-if s.adapter_mode != 'demo' or s.live_submit_enabled:
-    raise SystemExit('本入口仅用于 demo 开发环境，要求 LR_ADAPTER_MODE=demo 且真实提交关闭。')
+if s.live_submit_enabled:
+    raise SystemExit('本地启动入口要求关闭真实提交。')
 PY
 if ss -ltnH 'sport = :18765' | grep -q .; then
     echo '18765 端口已占用，请先停止对应开发服务。' >&2

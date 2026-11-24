@@ -63,7 +63,7 @@ def test_lookup_rejects_paths_outside_capture_directory(tmp_path, capture_id):
 def test_cli_order_read_uses_saved_file_without_erp_login(tmp_path):
     capture_id = saved_historical_archive(tmp_path)
     import os
-    env = dict(os.environ, PYTHONPATH='backend', LR_RUNTIME_DIR=str(tmp_path), LR_ERP_USERNAME='', LR_ERP_PASSWORD='')
+    env = dict(os.environ, PYTHONPATH='backend', LR_RUNTIME_DIR=str(tmp_path), LR_DATABASE_URL='', LR_LIVE_HISTORY_DATABASE_URL='', LR_ERP_USERNAME='', LR_ERP_PASSWORD='')
     run = subprocess.run([sys.executable, '-m', 'app.capture_erp', '--capture-id', capture_id,
                           '--order', '001234567890123456789'], env=env, capture_output=True, text=True)
     assert run.returncode == 0, run.stderr

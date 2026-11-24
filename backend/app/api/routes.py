@@ -11,7 +11,7 @@ from app.db import transaction
 from app.services.store import settings_value, update_settings, enqueue, utcnow, stamp, BEIJING, current_items
 from app.services.store import ERP_RECONCILIATION_PREFIX, is_erp_reconciliation
 from app.api.auth import COOKIE, require_admin, require_user, make_session, password_matches
-from app.services.coordination import can_access, ensure_demo_ownership, verify_password, principal
+from app.services.coordination import can_access, verify_password, principal
 from app.models.coordination import UserAccount
 from app.api.coordination import can_view_item, item_collaboration
 from dataclasses import asdict
@@ -191,24 +191,6 @@ def batches(request: Request, actor=Depends(require_user)):
 @secured.post("/batches/run", dependencies=[Depends(require_admin)])
 def run(request: Request):
     return {"job_id": enqueue(request.app.state.factory, "run", {})}
-
-
-@secured.post("/demo/run", dependencies=[Depends(require_admin)])
-def demo(request: Request):
-    if request.app.state.config.adapter_mode != "demo":
-        raise HTTPException(409, "只有演示环境可运行演示批次")
-    state = request.app.state
-    sites = ["MY", "PH", "SG", "TH", "VN"]
-    pilot_shops = [f"DEMO-{site}" for site in sites]
-    if state.config.coordination_required:
-        snapshot = state.adapter.collect(utcnow().astimezone(BEIJING).date())
-        # 显式演示入口仅为样例店铺补齐缺失归属，保留已有归属与人工控制。
-        ensure_demo_ownership(state.factory, [
-            row.key for row in snapshot.online
-            if row.key.site in sites and row.key.shop_id == f"DEMO-{row.key.site}"
-        ])
-    update_settings(state.factory, {"autonomous_enabled": True, "pilot_shops": pilot_shops, "site_enabled": sites})
-    return {"job_id": enqueue(state.factory, "run", {})}
 
 
 @secured.get("/batches/{batch_id}")

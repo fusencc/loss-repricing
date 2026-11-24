@@ -16,7 +16,7 @@
 
 WSL `/home/developer/projects/loss-repricing` 内运行 `.venv/bin/python -m app.notification_worker`，PYTHONPATH 指向 backend。该进程只打开配置指定的真实档案、为 live 批次生成去重通知和处理 outbox，不加载价格上传适配器、不领取价格任务。现有只读网页继续独立运行。
 
-健康状态：`runtime/notification-worker-health.json`。正常每5秒刷新（外部请求超时会延后），含模式、开关和各投递状态数量。异常正文不写健康文件，只记异常类型。通知按当前账号与目标归属重新核对；没有绑定或有歧义时保留待处理及原因。
+健康状态：`runtime/notification-worker-health.json`。正常每5秒刷新（外部请求超时会延后），含模式、开关和各投递状态数量。异常正文不写健康文件，只记异常类型。通知按当前账号与目标归属重新核对；没有绑定或有歧义时保留待处理及原因。 关闭钉钉投递时，队列仍核对当前归属。商品交接后，旧负责人已无可见条目的待发通知会取消。
 
 Windows 任务计划注册被系统拒绝访问，实际使用当前用户 HKCU Run 自启动：`LossRepricingDingTalkNotifications`。部署脚本位于 `%LOCALAPPDATA%/LossRepricing/Notifications/supervise-notifications.ps1`，源码为 `deploy/supervise-notifications.ps1`。单实例隐藏守护，通知进程退出后等待15秒自动拉起。修改源码后需同步部署脚本并重启守护。
 

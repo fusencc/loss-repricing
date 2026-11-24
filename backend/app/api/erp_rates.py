@@ -5,7 +5,7 @@ GET /sample、/validation：只读四组第一页，用于管理员诊断。
 GET /rates：独立/open汇率查询，不与网页令牌混用，结果不注入定价快照。
 GET /captures/{capture_id}：仅查询已保存文件，不重新请求ERP。
 POST /captures/{capture_id}/pricing-previews：使用已保存批量采集做只读算价。
-这些入口即使在demo模式也可主动访问真实ERP（历史文件读取除外），均需管理员权限。
+这些入口可主动访问真实ERP（历史文件读取除外），均需管理员权限。
 """
 from typing import Annotated, Literal
 from functools import wraps, partial
@@ -47,7 +47,7 @@ def _record_failure(request, error, *, stage, http_status, error_code):
 
 
 def _erp_operation(stage):
-    """管理员来源入口即使运行于demo也是真实ERP；日志独立标记来源。"""
+    """管理员来源入口访问真实ERP；日志独立标记来源。"""
     def decorate(function):
         @wraps(function)
         def wrapped(request: Request, *args, **kwargs):

@@ -1,4 +1,4 @@
-"""仅使用隔离临时demo目录、数据库与合成事件，不访问真实接口。"""
+"""仅使用隔离临时目录、数据库与合成事件，不访问真实接口。"""
 from datetime import datetime, timedelta, timezone
 import base64
 import hashlib
@@ -51,7 +51,7 @@ def event(**extra):
 
 
 def write(client, rows, name="events.jsonl", role="api"):
-    path = client.app.state.config.runtime_dir / "logs" / "demo" / role / name
+    path = client.app.state.config.runtime_dir / "logs" / "live" / role / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
     return path
@@ -142,7 +142,7 @@ def test_symlink_files_and_parent_dirs_are_not_read(client, tmp_path):
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "secret.jsonl").write_text(json.dumps(event(password="secret-outside")) + "\n")
-    role = client.app.state.config.runtime_dir / "logs" / "demo" / "api"
+    role = client.app.state.config.runtime_dir / "logs" / "live" / "api"
     role.mkdir(parents=True, exist_ok=True)
     (role / "link.jsonl").symlink_to(outside / "secret.jsonl")
     result = client.get("/api/logs")
@@ -158,13 +158,13 @@ def test_symlink_files_and_parent_dirs_are_not_read(client, tmp_path):
 def test_mode_isolation_and_rotated_file_reading(client):
     admin(client)
     write(client, [event(error_id="rotated")], name="events.jsonl.2", role="worker")
-    live = client.app.state.config.runtime_dir / "logs" / "live" / "api"
-    live.mkdir(parents=True)
-    (live / "events.jsonl").write_text(json.dumps(event(error_id="live-only")) + "\n")
+    other = client.app.state.config.runtime_dir / "logs" / "file" / "api"
+    other.mkdir(parents=True)
+    (other / "events.jsonl").write_text(json.dumps(event(error_id="file-only")) + "\n")
     response = client.get("/api/logs", params={"role": "worker"})
     assert response.status_code == 200
     assert [row["error_id"] for row in response.json()["items"]] == [ident("rotated")]
-    assert ident("live-only") not in client.get("/api/logs").text
+    assert ident("file-only") not in client.get("/api/logs").text
 
 
 def test_missing_timestamp_partial_and_corrupt_lines_are_explicit(client):
@@ -223,7 +223,7 @@ def reader_file(reader, rows, name="events.jsonl", role="api"):
 
 def cursor_payload():
     upper = datetime.now(timezone.utc)
-    return {"filters": {}, "mode": "demo", "start": (upper - timedelta(hours=24)).isoformat(),
+    return {"filters": {}, "mode": "live", "start": (upper - timedelta(hours=24)).isoformat(),
             "end": upper.isoformat(), "snapshot": "0" * 64, "offset": 0, "expires": int(time.time()) + 900}
 
 

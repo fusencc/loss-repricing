@@ -104,9 +104,8 @@ let interval: number | undefined
 
 const mode = computed(() => overview.value?.mode || healthMode.value)
 const modeCopy = computed(() => ({
-  demo: '使用演示样本运行完整流程。',
   file: '读取文件快照并对账。',
-  live: '数据源待接入。真实提交需要完成数据接入，并启用对应的试点范围。',
+  live: '使用正式数据源，按已启用的店铺和站点范围执行。',
 }[mode.value] ?? '正在读取当前运行环境。'))
 const statusCards = [
   { label: '本轮不调', color: 'slate', hint: '按当前规则无需调价' },
@@ -491,8 +490,7 @@ onUnmounted(() => {
               </div>
             </div>
             <div v-if="isAdmin" class="hero-actions">
-              <el-button v-if="mode === 'demo'" type="primary" :loading="actionBusy && actionLabel === '运行演示批次'" :disabled="actionBusy || !!activeJob" @click="runJob('/demo/run', '运行演示批次')">运行演示批次</el-button>
-              <el-button v-else-if="mode === 'file'" type="primary" :loading="actionBusy && actionLabel === '启动批次'" :disabled="actionBusy || !!activeJob" @click="runJob('/batches/run', '启动批次')">启动批次</el-button>
+              <el-button v-if="mode === 'file'" type="primary" :loading="actionBusy && actionLabel === '启动批次'" :disabled="actionBusy || !!activeJob" @click="runJob('/batches/run', '启动批次')">启动批次</el-button>
               <el-button plain :disabled="actionBusy || !!activeJob" @click="runJob('/reconcile', '回读核验')">回读核验</el-button>
             </div>
           </section>

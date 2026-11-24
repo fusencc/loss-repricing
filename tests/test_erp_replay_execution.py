@@ -16,7 +16,7 @@ from app.main import create_app
 from app.models import Batch, Execution, Item, Job, Notice, VariantGuard
 from app.models.coordination import Correction
 from app.services import corrections, execution, store
-from app.services.coordination import ensure_demo_ownership
+from fake_adapter import DemoAdapter, ensure_demo_ownership
 from app.services.erp_capture_store import save_capture
 from app.worker import Worker
 
@@ -31,11 +31,12 @@ def replay(tmp_path, monkeypatch):
         monkeypatch.setattr(module, "utcnow", lambda: now)
 
     config = Settings(
-        _env_file=None, environment="development", adapter_mode="demo", coordination_required=True,
-        live_submit_enabled=False, ding_enabled=False, notification_mode="demo",
+        _env_file=None, environment="development", adapter_mode="file", coordination_required=True,
+        live_submit_enabled=False, ding_enabled=False, notification_mode="live",
         runtime_dir=tmp_path, database_url=f"sqlite:///{tmp_path / 'isolated.sqlite3'}",
         admin_password="isolated-test-password", session_secret="isolated-test-session-secret-12345678",
     )
+    monkeypatch.setattr("app.main.build_adapter", lambda config: DemoAdapter(config.runtime_dir))
     app = create_app(config)
     with TestClient(app) as client:
         login = client.post("/api/auth/login", json={"username": "admin", "password": config.admin_password})
@@ -183,7 +184,7 @@ def test_preview_manual_review_and_simulated_reconciliation(replay, monkeypatch,
     with factory() as session:
         correction_item = session.get(Item, attempt.item_id)
         notice = session.scalars(select(Notice).where(Notice.batch_id == correction_item.batch_id)).one()
-        assert notice.synthetic and notice.delivery_state == "demo" and notice.task_id is None
+        assert notice.delivery_state == "pending" and notice.task_id is None
         assert notice.summary["statuses"] == {"已核验": 1}
         assert notice.ack_at is None
         notice_id = notice.id
@@ -191,7 +192,7 @@ def test_preview_manual_review_and_simulated_reconciliation(replay, monkeypatch,
     with factory() as session:
         notice = session.get(Notice, notice_id)
         assert notice.ack_by == "admin"
-        assert notice.delivery_state == "demo" and notice.ack_at is not None
+        assert notice.delivery_state == "pending" and notice.ack_at is not None
 
 
 def test_preview_batch_preserves_partial_failure_and_independent_verification(replay, monkeypatch):

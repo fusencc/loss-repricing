@@ -180,7 +180,7 @@ def test_admin_can_replay_and_reopen_a_saved_capture_without_creating_execution(
         assert client.get(report_path.replace(capture_id, other_capture)).status_code == 404
 
         assert client.get("/api/batches").json() == []
-        assert list((tmp_path / "demo-receipts").iterdir()) == []
+        assert not (tmp_path / "demo-receipts").exists()
         client.post("/api/auth/logout")
         assert client.get(report_path).status_code == 401
 

@@ -67,12 +67,12 @@ test('compact log retains identity, status, three horizontal stage fields and up
   assert.equal((html.match(/data-stage=/g) ?? []).length, 3)
   assert.equal((html.match(/class="records-stage-field"/g) ?? []).length, 5)
   assert.doesNotMatch(html, /<table|<thead|<tbody|<tr|scope="col"/)
-  assert.match(html, /<dt>原实际营销价<\/dt><dd><strong>10 PHP<\/strong>/)
-  assert.match(html, /<dt>补毛利亏<\/dt><dd><strong>12\.35 PHP<\/strong>/)
-  assert.match(html, /<dt>利润校验变动<\/dt><dd><strong>14\.57 PHP<\/strong>/)
+  assert.match(html, /<dt>原营销价<\/dt><dd><strong class="records-value-red">10 PHP<\/strong>/)
+  assert.match(html, /<dt>需补亏损<\/dt><dd><strong class="">12\.35 PHP<\/strong>/)
+  assert.match(html, /<dt>利润校验变动<\/dt><dd><strong class="">14\.57 PHP<\/strong>/)
   assert.match(html, /<header class="records-log-heading">.*商品ID：000123.*<\/header>/s)
   assert.doesNotMatch(html, /<header class="records-log-heading">(?:(?!<\/header>).)*修正一次毛利/s)
-  assert.match(html, /data-field="first-margin"><dt>修正一次毛利<\/dt><dd><strong>-2\.35 CNY<\/strong>/)
+  assert.match(html, /data-field="first-margin"><dt>修正一次毛利<\/dt><dd><strong class="records-value-red">-2\.35 CNY<\/strong>/)
   assert.equal((html.match(/<dt>修正一次毛利<\/dt>/g) ?? []).length, 1)
   assert.equal((html.match(/上传含税价/g) ?? []).length, 1)
   assert.match(html, /class="records-stage-field" data-field="uploaded-price"><dt>上传含税价<\/dt><dd><strong>18\.24 PHP<\/strong><\/dd><\/div><\/dl>/)
@@ -101,7 +101,7 @@ test('upload is a peer price field and all execution statuses occupy a separate 
     row.status = status
     const original = structuredClone(row)
     const html = await render(row)
-    assert.match(html, new RegExp(`<div class="records-stage-field" data-field="uploaded-price"><dt>上传含税价</dt><dd><strong>18\\.24 PHP</strong></dd></div></dl>(?:<!--.*?-->)*<div class="records-log-state" aria-label="执行状态"><span class="${tone} records-status"><i></i>${label}</span><p class="records-log-reason">${status === '已核验' ? '商品符合调价' : '原因未记录'}</p></div>`))
+    assert.match(html, new RegExp(`<div class="records-stage-field" data-field="uploaded-price"><dt>上传含税价</dt><dd><strong>18\\.24 PHP</strong></dd></div></dl>(?:<!--.*?-->)*<div class="records-log-state" aria-label="执行状态"><span class="${tone} records-status"><i></i>${label}</span><p class="records-log-reason">${status === '已核验' ? '商品符合调价' : '原因未记录'}</p><p class="records-log-time">最近更新：<span>—</span></p></div>`))
     assert.equal((html.match(/class="records-log-state"/g) ?? []).length, 1)
     assert.doesNotMatch(html, /<dl[^>]*>(?:(?!<\/dl>).)*records-log-state/s)
     assert.doesNotMatch(html, /<header class="records-log-heading">(?:(?!<\/header>).)*records-log-state/s)
@@ -132,6 +132,20 @@ test('long saved upload amounts remain a single peer field with a separate statu
   assert.match(css, /\.records-stage-field dd\{margin:0;overflow-wrap:anywhere\}/)
 })
 
+test('only negative recorded margin and recorded original stage price are red', async () => {
+  for (const [amount, red] of [['-0.0001', true], ['-0.00', false], ['0', false], ['2.5', false]]) {
+    const row = item()
+    row.first_margin.amount = amount
+    const html = await render(row)
+    assert.match(html, new RegExp(`<dt>修正一次毛利</dt><dd><strong class="${red ? 'records-value-red' : ''}">`))
+    assert.match(html, /<dt>原营销价<\/dt><dd><strong class="records-value-red">10 PHP/)
+    assert.match(html, /<dt>需补亏损<\/dt><dd><strong class="">/)
+  }
+  const row = item()
+  row.decision.stages.rows[0].price = null
+  assert.match(await render(row), /<dt>原营销价<\/dt><dd><strong class="">未记录/)
+})
+
 test('records without stage evidence keep their existing saved two-price display', async () => {
   const row = item()
   row.decision.stages = null
@@ -148,7 +162,7 @@ test('missing upload and ERP margin evidence are not replaced by other saved val
   row.corrected_first_margin = { amount: '-999.11', currency: null }
   row.execution = { uploaded_price: null, actual_price: '987.65' }
   const html = await render(row)
-  assert.match(html, /<dt>修正一次毛利<\/dt><dd><strong>未记录<\/strong>/)
+  assert.match(html, /<dt>修正一次毛利<\/dt><dd><strong class="">未记录<\/strong>/)
   assert.match(html, /<dt>上传含税价<\/dt><dd><strong>未记录<\/strong><\/dd>/)
   assert.doesNotMatch(html, /18\.23 PHP|987\.65|999\.11/)
 })

@@ -143,7 +143,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 from app.observability import configure_logging,event
-configure_logging(SimpleNamespace(runtime_dir=Path(sys.argv[1]),adapter_mode='demo'), 'capture')
+configure_logging(SimpleNamespace(runtime_dir=Path(sys.argv[1]),adapter_mode='live'), 'capture')
 for i in range(5): event('erp.stage', source='erp', synthetic=False, stage='download')
 '''
     env = dict(os.environ, PYTHONPATH=str(root / 'backend'))

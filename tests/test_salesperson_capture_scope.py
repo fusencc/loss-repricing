@@ -31,7 +31,8 @@ def test_verified_salesperson_selector_is_a_valid_scope_not_full_four_sources():
     assert report['consistent_capture_scope']
     assert next(r for r in report['source_coverage'] if r['source']=='loss_allocatable')['finance_complete']
     assert '采集来源的筛选范围不一致或无法确认' not in report['global_issues']
-    assert any('四类' in issue for issue in report['global_issues'])
+    assert any('候选名单未取全' in issue and '禁止发货' in issue for issue in report['global_issues'])
+    assert not report['execution_allowed']
 
 
 def test_mixed_salesperson_selectors_are_not_a_single_scope():
@@ -90,7 +91,7 @@ def test_salesperson_cli_checks_order_ownership_before_finance_and_on_download(
         status = '可配货' if order.endswith('4') else '待处理'
         return xlsx(headers, [[order, status, 'Tiktok', '集团二部', owner, -1, -1, -1]])
 
-    def post(path, body, binary=False):
+    def post(path, body, binary=False, *, page_evidence=None):
         if path == '/Api/daysell/selectSellman':
             return [{'userName': seller, 'userID': None if issue == 'missing_id' else '007'}]
         if path == bulk.LOSS_EXPORT:

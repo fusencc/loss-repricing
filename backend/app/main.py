@@ -10,7 +10,6 @@ from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from app.config import get_settings, PROJECT_ROOT
 from app.db import Base, create_database
-from app.adapters.demo import DemoAdapter
 from app.adapters.file import FileAdapter
 from app.api.routes import router
 from app.services.execution import PricingService
@@ -19,10 +18,7 @@ from app.observability import configure_logging, bind_context, bind_sink, event,
 
 def build_adapter(config):
     # 这是定价任务的Snapshot来源选择，与管理员主动ERP采集入口不是同一条链路。
-    # demo为合成数据，file为已规范化快照，live由HttpAdapter按独立合同请求。
     # erp_bulk_capture保存的groups/details采集JSON不会在此自动变成Snapshot或上传价格。
-    if config.adapter_mode == "demo":
-        return DemoAdapter(config.runtime_dir)
     if config.adapter_mode == "file":
         return FileAdapter(config.snapshot_path)
     from app.adapters.http import HttpAdapter
@@ -46,8 +42,6 @@ def _create_app(config, sink):
         raise RuntimeError("请先运行deploy/start-local.ps1生成独立本地密码与会话密钥，或配置LR_ADMIN_PASSWORD/LR_SESSION_SECRET")
     config.runtime_dir.mkdir(parents=True, exist_ok=True)
     database_url = config.database_url
-    if database_url == "sqlite:///runtime/loss-repricing.db":
-        database_url = f"sqlite:///{config.runtime_dir / 'loss-repricing.db'}"
     engine, factory = create_database(database_url)
     # 本地SQLite提供免数据库服务的演示；生产MySQL由显式Alembic迁移管理，API不偷偷改表。
     if database_url.startswith("sqlite"):

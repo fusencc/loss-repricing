@@ -45,7 +45,7 @@ def test_missing_database_is_not_an_empty_verified_archive(tmp_path):
 def test_demo_database_cannot_prove_real_archive_absence(tmp_path):
     from app.services.local_price_history import capture_local_price_history
     target=tmp_path/'demo.db';engine,_=create_database('sqlite:///'+str(target));Base.metadata.create_all(engine);engine.dispose()
-    settings=Settings(_env_file=None,runtime_dir=tmp_path,database_url='sqlite:///'+str(target),adapter_mode='demo')
+    settings=Settings(_env_file=None,runtime_dir=tmp_path,database_url='sqlite:///'+str(target),adapter_mode='file')
     result=capture_local_price_history(settings,{'capture_id':'C1','synthetic':False,'sample_only':False})
     assert not result['acquisition_complete']
     assert any(row['code']=='local_live_archive_not_bound' for row in result['issues'])
@@ -55,7 +55,7 @@ def test_explicit_authoritative_archive_is_read_without_enabling_live_submission
     from app.services.local_price_history import capture_local_price_history
     target=tmp_path/'real.db';url='sqlite:///'+str(target)
     engine,_=create_database(url);Base.metadata.create_all(engine);engine.dispose()
-    settings=Settings(_env_file=None,runtime_dir=tmp_path,adapter_mode='demo',live_submit_enabled=False,
+    settings=Settings(_env_file=None,runtime_dir=tmp_path,adapter_mode='file',live_submit_enabled=False,
         database_url='sqlite:///'+str(tmp_path/'unused-demo.db'),live_history_database_url=url)
     result=capture_local_price_history(settings,{'capture_id':'C1','synthetic':False,'sample_only':False})
     assert result['acquisition_complete'] and result['archive_binding']=='configured_live_history_database'

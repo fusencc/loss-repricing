@@ -1,6 +1,6 @@
-# 本地演示运行与后续接入手册
+# 本地工作台运行手册
 
-适用目录：`D:\projects\loss-repricing`。当前是本机可运行demo，未部署到生产，未执行真实调价。真实数据抓取暂留，待用户准备后接入。
+主要开发环境为 WSL2。下列 PowerShell 命令适用于 Windows 本地副本。
 
 ## 1. 环境与启动
 
@@ -15,7 +15,7 @@ Set-Location -LiteralPath 'D:\projects\loss-repricing'
 
 入口：[本地工作台](http://127.0.0.1:18765)。账号`admin`；密码仅在根目录`.env`的`LR_ADMIN_PASSWORD`中查看，不输出、提交或截图。`.env`还保存独立会话密钥，不应上传Git。
 
-启动脚本会在缺少虚拟环境时创建并安装后端依赖，缺少`.env`时生成demo配置，缺少前端构建时安装并构建前端，然后执行数据库迁移，隐藏启动API和worker，等待健康检查。`-NoBrowser`用于不自动打开网页。
+启动脚本会在缺少虚拟环境时创建并安装后端依赖，缺少`.env`时生成本地 live 配置，缺少前端构建时安装并构建前端，然后执行数据库迁移，隐藏启动API和worker，等待健康检查。`-NoBrowser`用于不自动打开网页。
 
 若虚拟环境已存在但依赖改动，需要先执行：
 
@@ -42,7 +42,6 @@ Set-Location -LiteralPath 'D:\projects\loss-repricing'
 
 | 配置/模式 | 含义 |
 |---|---|
-| `LR_ADAPTER_MODE=demo` | 合成数据和本机模拟回执；演示按钮只启用虚拟店铺 |
 | `LR_ADAPTER_MODE=file` | 读取规范化JSON快照，仅算价对账；不上传、不认定生效 |
 | `LR_ADAPTER_MODE=live` | 按确认的数据合同连接真实来源；本轮未配置真实闭环 |
 | `LR_LIVE_SUBMIT_ENABLED=false` | 真实提交关闭；运行网页不能越过此环境开关 |
@@ -50,9 +49,8 @@ Set-Location -LiteralPath 'D:\projects\loss-repricing'
 | `LR_LIVE_CONTRACT_PATH` | 后续真实合同配置位置；当前示例`verified=false` |
 | `LR_DATABASE_URL` | 本项目独立数据库连接，不共享预算业务表或账号 |
 
-首次数据库默认试点店铺为空、自动执行和定时均未启用。demo、file、live 必须使用独立数据库和运行目录；切换环境不复用演示库。核验只处理与当前适配器模式一致的原批次执行，不会用模拟回执终结真实执行；旧模式未结记录仍保留，恢复时应回到其原模式和受控环境处理。
+首次数据库默认试点店铺为空、自动执行和定时均未启用。file、live 必须使用独立数据库和运行目录；切换环境不复用演示库。核验只处理与当前适配器模式一致的原批次执行，不会用模拟回执终结真实执行；旧模式未结记录仍保留，恢复时应回到其原模式和受控环境处理。
 
-演示按钮会启用demo虚拟店铺与站点用于展示流程，不改成live模式。演示后重复运行同一商品可能命中72小时保护，这是持久历史发挥作用，不需要清库或删锁。
 
 网页上的“暂停”及站点暂停只阻止新提交，仍允许查询已经提交的结果。单条异常“重新评估”只处理所选记录对应的实际上传目标：先核验该目标的未终结执行，再从新快照评估该目标。采集器可能读取完整共享来源，但不会顺带提交其他目标，也不会重传结果未知的旧请求。
 
@@ -60,7 +58,7 @@ Set-Location -LiteralPath 'D:\projects\loss-repricing'
 
 统一技术日志及错误编号的检索方式见[日志与排障](logging-and-troubleshooting.md)。WSL2 使用 `bash deploy/start-wsl.sh`，主开发目录为 `/home/developer/projects/loss-repricing`；Windows 路径是独立旧副本。两端配置、数据库与日志不自动同步。API启动命令已关闭 Uvicorn access log，避免把订单号、查询参数及带权限 URL 写入访问日志。WSL控制台仍接收进程输出；应用技术事件由日志组件另行保存。Windows下列 stdout/stderr 文件仅是进程输出，不是结构化业务证据，也不由应用日志轮转器管理。Windows原生Python当前不具备本实现要求的安全dirfd读取能力，网页日志查询、错误上下文和导出明确返回503；应用安全日志仍可写入，在受控本机查看文件，或使用WSL/Linux网页读取。日志状态中的其他角色文件更新时间只是观察值，不能当作worker存活或业务健康证明。容器Nginx仅记录时间、状态码、耗时及代理自生成编号，原始错误日志关闭；该代理编号不同于应用请求编号。
 
-本地默认使用`runtime/loss-repricing.db`，SQLite开启WAL。`runtime/demo-receipts`保留模拟外部回执；它与数据库一起支持重启后恢复演示。活跃目录只放含上传价的当前格式回执。旧格式且数据库已核验的回执可移到独立归档目录，原始文件和数据库记录一并保留。查询不到回执时，提交结果仍为未知。
+本地正式记录默认保存在 `runtime/live-history.db`，文件对账默认使用 `runtime/file-reconciliation.db`。显式绑定真实历史库时，live 数据库连接必须与其一致。
 
 常用文件：
 
@@ -75,7 +73,11 @@ Set-Location -LiteralPath 'D:\projects\loss-repricing'
 
 ## 5. 调度、恢复与防重
 
-启用定时后，worker从北京时间06:30起按日唯一键建立任务；11:00是目标时间提示，不是停止处理的硬截止。来源未就绪时，从本次取数失败起等待5分钟后重查，不复用昨日文件。尚未开始的旧日定时任务跨日后取消，新日按自己的定时任务取数。worker正常轮询间隔5秒，待核验记录约每60秒查询一次。通知投递轮询异常单独记录为 `worker.notice_dispatch_failed`，取数、算价和已有调价核验继续按各自状态处理。
+启用定时后，worker从北京时间09:00起按日唯一键建立任务；11:00是目标时间提示，不是停止处理的硬截止。来源未就绪时，从本次取数失败起等待5分钟后重查，不复用昨日文件。尚未开始的旧日定时任务跨日后取消，新日按自己的定时任务取数。worker正常轮询间隔5秒，待核验记录约每60秒查询一次。通知投递轮询异常单独记录为 `worker.notice_dispatch_failed`，取数、算价和已有调价核验继续按各自状态处理。
+
+上午任务完成后，工作簿保存在 `runtime/morning-logs/YYYY-MM-DD/M.D上午运行日志.xlsx`。名单日记录读取范围、建议价和待处理原因；正式批次记录已保存的实际运行结果，区分建议上传、提交和回读等证据。设置 `LR_DING_TK_MORNING_LOG_FOLDER` 后，用同一部署用户已认证的 `dws` 发布到「集团二部每日数据 → TK亏损提价日志」，已存在的同名文件不会被覆盖。写入失败会保留本地文件及排查编号，对已有工作簿可用 `PYTHONPATH=backend .venv/bin/python -m app.services.morning_log YYYY-MM-DD` 核实后单独补发。
+
+「集团二部每日数据 → 作废订单日志」由 `LR_DING_CANCELLATION_LOG_FOLDER` 单独绑定。只处理上午时段，沿用罗迪的 `M.D上午运行日志.xlsx` 和成功清单、失败清单、汇总三张表。上游将当天真实作废结果放在 `runtime/cancellation-logs/YYYY-MM-DD/M.D上午运行日志.xlsx` 后，上午任务收尾时核对日期和表头并写入钉盘。已有同名文件保留。上游文件未就绪时，查询钉盘当天文件节点或记录待生成状态。手动发布用 `--publish-cancellation`，仅复查用 `--check-cancellation`。
 
 worker和任务使用数据库租约与心跳；持久执行锁按平台、店铺、站点、产品ID、具体商品ID定位实际上传目标。源SKU改名或仓配变化不产生新锁，不能绕过未知执行或72小时保护；算价仍按源SKU严格匹配，不混算不同SKU亏损。顺序为：重新取数和判定 → 保存执行意图及目标锁并提交事务 → 上传 → 保存受理结果 → 查询实际价。
 
@@ -108,7 +110,7 @@ worker和任务使用数据库租约与心跳；持久执行锁按平台、店�
 npm.cmd run build
 ```
 
-界面验收需要运行中的demo服务、开发依赖和Playwright Chromium。若当前环境尚未准备，可按需安装：
+界面验收需要运行中的本地工作台、开发依赖和Playwright Chromium。若当前环境尚未准备，可按需安装：
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r backend\requirements-dev.txt
@@ -116,13 +118,12 @@ npm.cmd run build
 .\.venv\Scripts\python.exe deploy\smoke-ui.py
 ```
 
-界面脚本读取本地配置但不打印密码，验证登录、演示批次、计算明细、运行配置和390px窄屏，并检查页面JavaScript错误。它会生成新的模拟任务/回执，不调用生产系统。测试数量与最终核验结果单独记录。
+界面脚本验证登录、运行配置和 390px 窄屏布局，并检查页面 JavaScript 错误。
 
-界面脚本为演示任务完成预留180秒等待，覆盖强制重启后旧worker租约到期的接管过程；超时应检查worker心跳和日志，不绕过锁。
 
 ## 7. 备份与恢复原则
 
-本地演示备份应保留数据库及必要运行文件。最简单的冷备方式是先用停止脚本停止API和worker，再备份整个`runtime`；需要保留访问方式时，另外安全保管`.env`，不得公开或入Git。运行中的SQLite应使用一致性备份方式，不能只复制主库文件而遗漏WAL中尚未合并的内容。
+本地备份应保留数据库及必要运行文件。最简单的冷备方式是先用停止脚本停止API和worker，再备份整个`runtime`；需要保留访问方式时，另外安全保管`.env`，不得公开或入Git。运行中的SQLite应使用一致性备份方式，不能只复制主库文件而遗漏WAL中尚未合并的内容。
 
 生产采用独立MySQL一致性备份，同时保存合同版本、应用版本及必要业务文件。恢复前先关闭自动执行和定时，核对快照时间、已有执行意图、商品锁以及外部已生效记录，再恢复查询。不能因数据库回到旧版本就把外部已接受请求重新发送。
 

@@ -62,7 +62,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     with TemporaryDirectory(prefix='records-glass-demo-') as temp:
         root = Path(temp)
-        cfg = Settings(adapter_mode='demo', database_url=f'sqlite:///{root / "demo.db"}', runtime_dir=root,
+        cfg = Settings(adapter_mode='file', database_url=f'sqlite:///{root / "demo.db"}', runtime_dir=root,
             admin_password='isolated-demo-only', session_secret='isolated-records-demo-session-secret',
             live_submit_enabled=False, coordination_required=False, _env_file=None)
         app = create_app(cfg)

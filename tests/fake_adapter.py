@@ -1,4 +1,4 @@
-"""可重复演示数据与持久模拟回执，仅在demo环境使用，绝不访问业务系统。"""
+"""可重复演示数据与持久模拟回执，仅供隔离测试使用，绝不访问业务系统。"""
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -10,6 +10,7 @@ from app.adapters.base import SubmitResult, LookupResult, SourceUnavailable
 
 class DemoAdapter:
     mode = "demo"
+    synthetic = True
     timezone = timezone(timedelta(hours=8))
 
     def __init__(self, path):
@@ -98,3 +99,18 @@ class DemoAdapter:
             return LookupResult("unknown", message="回执商品身份不一致")
         return LookupResult("accepted", Decimal(data["actual_price"]), datetime.now(timezone.utc),
                             datetime.fromisoformat(data["effective_at"]), message="模拟实际售价证据")
+
+
+def ensure_demo_ownership(factory,keys):
+    from uuid import uuid4
+    from sqlalchemy import select
+    from app.db import transaction
+    from app.models.coordination import Ownership
+    from app.services.coordination import scope_key
+    with transaction(factory) as session:
+        for key in keys:
+            k=VariantKey.model_validate(key)
+            sk=scope_key(k.platform,k.shop_id,k.site)
+            if not session.scalar(select(Ownership).where(Ownership.scope_key==sk)):
+                session.add(Ownership(id=str(uuid4()),scope_key=sk,platform=k.platform,shop_id=k.shop_id,site=k.site,owner_id='admin',autonomous=True,version=1))
+

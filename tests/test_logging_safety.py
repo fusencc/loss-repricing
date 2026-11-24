@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 from app.api.auth import make_session
 from app.adapters.base import LookupResult, SourceUnavailable
-from app.adapters.demo import DemoAdapter
+from fake_adapter import DemoAdapter
 from app.config import Settings
 from app.main import create_app
 from app.models import Execution, VariantGuard
@@ -86,7 +86,7 @@ def test_validation_error_has_id_without_logging_input_value(tmp_path):
     assert 'sensitive-invalid-input-marker' not in app.state.log_sink.path.read_text()
 
 
-def test_real_read_only_erp_logged_as_real_even_in_demo(tmp_path, monkeypatch):
+def test_real_read_only_erp_logged_with_real_source(tmp_path, monkeypatch):
     from app.api import erp_rates
     cfg, app = setup(tmp_path)
     monkeypatch.setattr(erp_rates, 'query_erp_rates', lambda config: {'rates': []})
@@ -97,7 +97,7 @@ def test_real_read_only_erp_logged_as_real_even_in_demo(tmp_path, monkeypatch):
     rows = [json.loads(line) for line in app.state.log_sink.path.read_text().splitlines()]
     erp_rows = [row for row in rows if row['event'].startswith('erp.')]
     assert erp_rows
-    assert all(row['mode'] == 'demo' and row['source'] == 'erp' and row['synthetic'] is False for row in erp_rows)
+    assert all(row['mode'] == 'live' and row['source'] == 'erp' and row['synthetic'] is False for row in erp_rows)
     assert len({row['operation_id'] for row in erp_rows}) == 1
     assert all(row.get('request_id') == result.headers['X-Request-ID'] for row in erp_rows)
 

@@ -36,7 +36,7 @@ def test_manual_break_even_is_rejected_and_one_percent_passes(activity_locked):
     assert manual_decision(snap,o,Decimal('12.66'),'test','C1',NOW).ready
 
 def test_readback_under_one_percent_does_not_verify(context):
-    from app.adapters.demo import DemoAdapter
+    from fake_adapter import DemoAdapter
     from app.services.execution import PricingService
     from app.services.store import settings_value
     from app.models import Execution

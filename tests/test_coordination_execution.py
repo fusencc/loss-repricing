@@ -6,10 +6,9 @@ from app.config import Settings
 from app.db import Base, create_database, transaction
 from app.models import Item, Execution, VariantGuard
 from app.models.coordination import TargetControl
-from app.adapters.demo import DemoAdapter
+from fake_adapter import DemoAdapter, ensure_demo_ownership
 from app.adapters.base import LookupResult
 from app.services.execution import PricingService
-from app.services.coordination import ensure_demo_ownership
 from app.services.store import update_settings, utcnow, BEIJING
 
 class OneSku(DemoAdapter):

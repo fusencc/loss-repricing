@@ -12,7 +12,8 @@ from app.adapters.base import LookupResult
 from app.db import Base, create_database
 from app.domain.types import Decision, VariantKey
 from app.models import Batch, Execution, Item, Notice, VariantGuard
-from app.services.coordination import ensure_demo_ownership
+from app.models.coordination import Ownership
+from app.services.coordination import scope_key
 from app.services.execution import PricingService
 from app.services.store import stamp, utcnow
 
@@ -38,8 +39,9 @@ def run(size):
         now = stamp()
         key = VariantKey(platform="TikTok", shop_id="DEMO-MY", site="MY", product_id="P",
                          item_id="item", sku="SKU", warehouse="direct")
-        ensure_demo_ownership(factory, [key])
         with factory.begin() as session:
+            session.add(Ownership(id="bench-owner", scope_key=scope_key(key.platform, key.shop_id, key.site),
+                platform=key.platform, shop_id=key.shop_id, site=key.site, owner_id="admin", autonomous=True, version=1))
             session.add(Batch(id="bench", run_key="bench", business_date="2026-11-10", mode="demo",
                               status="pending_verification", created_at=now, snapshot={}, summary={}))
             session.flush()

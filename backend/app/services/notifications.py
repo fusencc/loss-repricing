@@ -103,7 +103,7 @@ def _markdown_text(value):
     return ''.join('\\'+char if char in '\\[]()*_`<>#' else char for char in value)
 
 
-def _card_text(summary, batch_mode, items):
+def _card_text(summary, items):
     if summary.get('kind') == 'warning':
         details=[]
         for index,item in enumerate(items,1):
@@ -121,8 +121,7 @@ def _card_text(summary, batch_mode, items):
         key=item.key
         details.append(f"{index}. SKU：{_markdown_text(key.get('sku'))} · 站点：{_markdown_text(key.get('site'))} · 店铺：{_markdown_text(key.get('shop_id'))}\n\n"
                        f"   原因：{_markdown_text(item.reason)}")
-    warning='演示批次（已提价项为模拟结果）\n\n' if batch_mode=='demo' else '文件对账（非真实提价）\n\n' if batch_mode=='file' else ''
-    return (f"**{summary['title']}**\n\n{warning}"
+    return (f"**{summary['title']}**\n\n"
             f"**{processed_at:%Y-%m-%d %H:%M:%S}** · 共处理**{len(items)}**条\n\n"
             f"{breakdown}\n\n待处理的明细：\n\n"
             + ('\n\n'.join(details) if details else '无')
@@ -249,14 +248,12 @@ def _escalate(factory):
 
 
 def notification_status(factory,config):
-    live=getattr(config,'notification_mode','demo')=='live'
     configured=all(getattr(config,k,'') for k in ('ding_client_id','ding_client_secret'))
     with factory() as session:
         counts=dict(Counter(session.scalars(select(Notice.delivery_state))))
-    return {'mode':'live' if live else 'demo','enabled':bool(getattr(config,'ding_enabled',False)),
-            'configured':bool(configured),'synthetic':not live,'counts':counts,
-            'message':('演示模拟投递，不代表真实钉钉发送' if not live else
-                       '机器人真实通知已启用' if configured and getattr(config,'ding_enabled',False) else
+    return {'mode':'live','enabled':bool(getattr(config,'ding_enabled',False)),
+            'configured':bool(configured),'synthetic':False,'counts':counts,
+            'message':('机器人真实通知已启用' if configured and getattr(config,'ding_enabled',False) else
                        '真实通知需启用并完成应用配置')}
 
 
@@ -306,19 +303,19 @@ def _dispatch_notices(factory,config,owner):
             delivery_state='unknown',last_error='发送过程中断，结果未知，禁止自动重发',updated_at=stamp(utcnow())))
     _escalate(factory)
     state=notification_status(factory,config)
-    if state['mode']=='live' and (not state['enabled'] or not state['configured']):
-        return state
-    client=DingTalkClient(config) if state['mode']=='live' else None
+    # 关闭钉钉投递时仍要清理已失去归属的待发通知，避免旧负责人积压。
+    client = DingTalkClient(config) if state['enabled'] and state['configured'] else None
     try:
         with factory() as session:
-            ids=list(session.scalars(select(Notice.id).where(Notice.delivery_state.in_(['pending','accepted','delivered']))))
+            ids=list(session.scalars(select(Notice.id).join(Batch, Batch.id == Notice.batch_id).where(
+                Batch.mode == 'live', Notice.synthetic.is_(False), Notice.delivery_state.in_(['pending','accepted','delivered']))))
         for notice_id in ids:
             if not _renew_dispatch(factory,owner):
                 break
             with factory.begin() as session:
                 notice=session.get(Notice,notice_id)
                 if notice.delivery_state in {'accepted','delivered'}:
-                    if not client or notice.synthetic or not notice.task_id or not notice.recipient_userid:
+                    if client is None or notice.synthetic or not notice.task_id or not notice.recipient_userid:
                         continue
                     # Result endpoint retains evidence for only 24h. Keep acceptance, never resend.
                     if utcnow()-datetime.fromisoformat(notice.updated_at)>timedelta(hours=24):
@@ -344,11 +341,7 @@ def _dispatch_notices(factory,config,owner):
                     _,resolve=_coord()
                     unassigned=any(resolve(session,i.key) is None for i in current)
                     notice.summary=dict(notice.summary,unassigned=unassigned)
-                    if not client:
-                        notice.synthetic=True
-                        notice.delivery_state='demo'
-                        notice.last_error='演示模拟投递，未向钉钉发送'
-                        notice.updated_at=stamp(utcnow())
+                    if client is None:
                         continue
                     UserAccount,_=_coord()
                     user=session.get(UserAccount,notice.recipient_id) if notice.recipient_id!='admin' else None
@@ -363,7 +356,7 @@ def _dispatch_notices(factory,config,owner):
                         continue
                     notice.recipient_userid=userid
                     summary=notice.summary
-                    text = _card_text(summary, notice_batch_mode(session, notice), current)
+                    text = _card_text(summary, current)
                     notice.delivery_evidence=list(notice.delivery_evidence or []) + [{
                         'operation':'send_intent','summary':dict(summary),'item_ids':list(notice.item_ids),
                         'title':summary['title'],'markdown':text,'at':stamp(utcnow())}]

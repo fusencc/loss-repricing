@@ -24,7 +24,7 @@ export interface RecordItem {
   process?: { id: string; updated_at: string; stage: string; reason: string }[]
   id: string; batch_id: string; key: Record<string, string>
   seller: { id: string | null; name: string }; department: string | null; shop_name: string | null
-  status: ItemStatus; phase?: string | null; reason: string; updated_at: string; business_date: string; mode: string; synthetic: boolean
+  status: ItemStatus; phase?: string | null; reason: string; updated_at: string; display_time: string | null; business_date: string; mode: string; synthetic: boolean
   first_margin: { amount: string; currency: string } | null
   decision: { current_actual: string | null; target_actual: string | null; upload_price: string | null
     price_change: string | null
@@ -193,10 +193,15 @@ export function isIncrease(value: string | null | undefined): boolean {
   return !/^[-+]?0(\.0+)?$/.test(value)
 }
 
+// 只按原始十进制文本识别负数，避免精度转换以及将缺失或负零误认为亏损。
+export function isNegativeAmount(value: string | null | undefined): boolean {
+  return typeof value === 'string' && /^-\d+(?:\.\d+)?$/.test(value) && /[1-9]/.test(value)
+}
+
 // 日志名称只在展示层调整；保留后台阶段键、金额和「参考价优先」等证据语义，不回写历史。
 export function recordStageLabel(stage: RecordStage): string {
   const label = stage.label.replace(/^[\u2460-\u2462]\s*/, '')
-  return ({ '补亏损': '补毛利亏', '利润校验': '利润校验变动' }[label] ?? label)
+  return ({ '原实际营销价': '原营销价', '补亏损': '需补亏损', '利润校验': '利润校验变动' }[label] ?? label)
 }
 
 export function stagePriceLabel(stage: RecordStage, currency: string | null | undefined): string {

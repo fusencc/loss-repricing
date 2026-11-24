@@ -39,12 +39,12 @@ def test_job_completes_and_schedule_creates_only_one_daily_job(tmp_path):
     engine.dispose()
 
 
-def test_schedule_starts_at_beijing_six_thirty(tmp_path):
+def test_schedule_starts_at_beijing_nine(tmp_path):
     engine, factory, service = setup(tmp_path)
     update_settings(factory, {"schedule_enabled": True})
     worker = Worker(factory, service)
-    # UTC前一日22:30对应北京时间当日06:30，业务日键使用北京时间。
-    before = datetime(2026, 11, 4, 22, 29, 59, tzinfo=timezone.utc).timestamp()
+    # UTC 00:59:59 对应北京时间 08:59:59。
+    before = datetime(2026, 11, 5, 0, 59, 59, tzinfo=timezone.utc).timestamp()
     worker.tick(before)
     assert service.calls == 0
     with factory() as session:
@@ -59,11 +59,11 @@ def test_schedule_starts_at_beijing_six_thirty(tmp_path):
     engine.dispose()
 
 
-def test_schedule_disabled_at_beijing_six_thirty(tmp_path):
+def test_schedule_disabled_at_beijing_nine(tmp_path):
     engine, factory, service = setup(tmp_path)
     update_settings(factory, {"schedule_enabled": False})
     worker = Worker(factory, service)
-    worker.tick(datetime(2026, 11, 4, 22, 30, tzinfo=timezone.utc).timestamp())
+    worker.tick(datetime(2026, 11, 5, 1, 0, tzinfo=timezone.utc).timestamp())
     assert service.calls == 0
     with factory() as session:
         assert session.query(Job).count() == 0
@@ -137,7 +137,7 @@ def test_expired_daily_retry_does_not_process_the_new_business_day(tmp_path):
     yesterday = enqueue(factory, "run", {"date": "2026-11-05"}, "daily:2026-11-05")
     update_settings(factory, {"schedule_enabled": True})
     worker = Worker(factory, service)
-    morning = datetime(2026, 11, 6, 0, 0, tzinfo=timezone.utc).timestamp()
+    morning = datetime(2026, 11, 6, 1, 0, tzinfo=timezone.utc).timestamp()
     worker.tick(morning)
     worker.tick(morning + 5)
     assert service.calls == 1
@@ -164,7 +164,7 @@ def test_notice_dispatch_failure_does_not_skip_reconciliation_or_daily_job(tmp_p
     update_settings(factory, {"schedule_enabled": True})
 
     worker = Worker(factory, service)
-    worker.tick(datetime(2026, 11, 5, 0, 0, tzinfo=timezone.utc).timestamp())
+    worker.tick(datetime(2026, 11, 5, 1, 0, tzinfo=timezone.utc).timestamp())
 
     assert reconciles == [True]
     assert service.calls == 1
@@ -173,3 +173,56 @@ def test_notice_dispatch_failure_does_not_skip_reconciliation_or_daily_job(tmp_p
         job = session.query(Job).filter_by(dedupe_key="daily:2026-11-05").one()
         assert job.state == "done" and job.batch_id == "batch-result"
     engine.dispose()
+
+def test_pilot_day_at_nine_routes_only_to_roster_and_publishes_once(tmp_path, monkeypatch):
+    from datetime import date
+    from openpyxl import load_workbook
+
+    engine, factory, service = setup(tmp_path)
+    pilot_day = date(2026, 11, 25)
+    service.config = Settings(_env_file=None, runtime_dir=tmp_path,
+                              coordination_required=False, live_submit_enabled=True,
+                              ding_tk_morning_log_folder='tk-folder', ding_cancellation_log_folder='cancel-folder')
+    calls = []
+    drive_calls = []
+
+    def capture(config, *, roster_date):
+        assert roster_date == pilot_day and config.live_submit_enabled is False
+        calls.append(roster_date)
+        return {'status': 'completed', 'ready_prices': 0, 'departments': []}
+
+    monkeypatch.setattr('app.services.erp_workflow.run_workflow', capture)
+    def drive(args, directory):
+        folder = args[args.index('--folder') + 1]
+        drive_calls.append((args[1], folder))
+        if args[1] == '+list':
+            return {'files': [], 'hasMore': False}
+        assert folder == 'tk-folder'
+        assert (directory / args[args.index('--file') + 1]).is_file()
+        return {'nodeId': 'tk-file'}
+
+    monkeypatch.setattr('app.services.morning_log._dws', drive)
+
+    worker = Worker(factory, service)
+    before = datetime(2026, 11, 25, 0, 59, 59, tzinfo=timezone.utc).timestamp()
+    worker.tick(before)
+    assert calls == []
+    worker.tick(before + 1)
+    worker.tick(before + 6)
+    worker.tick(before + 86401)
+    assert calls == [pilot_day]
+    assert service.calls == 0
+    assert drive_calls == [('+list', 'tk-folder'), ('+upload', 'tk-folder'), ('+list', 'cancel-folder')]
+    import json
+    lookup = tmp_path / 'cancellation-logs' / pilot_day.isoformat() / 'lookup.json'
+    assert json.loads(lookup.read_text(encoding='utf-8'))['status'] == 'pending'
+    published = tmp_path / 'morning-logs' / pilot_day.isoformat() / '11.25上午运行日志.xlsx'
+    with factory() as session:
+        job = session.query(Job).one()
+        assert job.dedupe_key == 'daily:2026-11-25' and job.state == 'done'
+    workbook = load_workbook(published, read_only=True)
+    try:
+        assert list(workbook['汇总'].values)[1] == ('2026-11-25', '名单只读算价', 'completed', 0)
+    finally:
+        workbook.close()
+        engine.dispose()

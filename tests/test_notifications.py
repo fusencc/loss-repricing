@@ -85,16 +85,16 @@ def notices_context(tmp_path):
             s.add(UserAccount(id=uid,username=uid,display_name=uid,role=role,password_hash='unused',
                               dingtalk_userid='ding-'+uid,created_at=stamp(),updated_at=stamp()))
         s.add(Ownership(id='o',scope_key=scope_key('tiktok','shop','MY'),platform='tiktok',shop_id='shop',site='MY',owner_id='seller',supervisor_id='manager'))
-        s.add(Batch(id='b',run_key='b',business_date='2026-11-05',mode='demo',status='done',created_at=stamp(),snapshot={},summary={}))
+        s.add(Batch(id='b',run_key='b',business_date='2026-11-05',mode='live',status='done',created_at=stamp(),snapshot={},summary={}))
         s.flush()
         s.add(Item(id='i',batch_id='b',variant_id='v',key=key,status='待处理',phase='failed',reason='reason',decision={},updated_at=stamp()))
-    cfg=SimpleNamespace(notification_mode='demo',ding_enabled=False,session_secret='x'*32,admin_username='admin',
+    cfg=SimpleNamespace(notification_mode='live',ding_enabled=False,session_secret='x'*32,admin_username='admin',
                         ding_corp_id='corp',ding_client_id='client',ding_client_secret='secret',ding_agent_id='123',public_base_url='https://example.com')
     yield factory,cfg
     engine.dispose()
 
 
-def test_batch_deduplicated_and_demo_is_visibly_synthetic(notices_context):
+def test_batch_deduplicated_and_disabled_delivery_stays_pending(notices_context):
     from app.models.notifications import Notice
     from app.services.notifications import enqueue_batch_notices,dispatch_notices
     factory,cfg=notices_context
@@ -104,7 +104,7 @@ def test_batch_deduplicated_and_demo_is_visibly_synthetic(notices_context):
     with factory() as s:
         n=s.scalar(select(Notice))
         assert n.recipient_id=='seller' and n.item_ids==['i']
-        assert n.delivery_state=='demo' and n.synthetic and n.task_id is None
+        assert n.delivery_state=='pending' and not n.synthetic and n.task_id is None
         assert n.summary['exceptions']==1
 
 
@@ -160,7 +160,8 @@ def test_escalation_once_after24h_only_to_explicit_supervisor(notices_context):
     with factory() as s:
         children=s.scalars(select(Notice).where(Notice.parent_id.is_not(None))).all()
         assert len(children)==1 and children[0].recipient_id=='manager'
-        assert children[0].synthetic
+        assert children[0].delivery_state == 'pending'
+        assert not children[0].synthetic
 
 
 def test_notification_routes_authorization_retry_and_ack(notices_context):
@@ -190,7 +191,10 @@ def test_notification_routes_authorization_retry_and_ack(notices_context):
     with factory.begin() as s:
         n=s.get(Notice,nid);n.delivery_state='failed'
     assert client.post(f'/api/notifications/{nid}/retry').json()['delivery_state']=='pending'
-    assert client.get('/api/notification-status').json()['synthetic'] is True
+    status = client.get('/api/notification-status').json()
+    assert status['mode'] == 'live'
+    assert status['enabled'] is False
+    assert status['synthetic'] is False
 
 @pytest.mark.parametrize('state',['accepted','unknown','sending','delivered','read','demo'])
 def test_retry_rejects_every_state_except_explicit_failed(notices_context,state):
@@ -429,7 +433,7 @@ def test_notice_detail_pages_current_results_and_rechecks_recipient(notices_cont
         checked.status, checked.phase = "已核验", "verified"
         session.add(Execution(
             id="checked-execution", item_id="checked", state="verified", variant_id="checked",
-            request={}, response={}, evidence={"actual_price": "18.72", "mode": "demo"},
+            request={}, response={}, evidence={"actual_price": "18.72", "mode": "live"},
             created_at=stamp(), updated_at=stamp(),
         ))
 
@@ -446,7 +450,7 @@ def test_notice_detail_pages_current_results_and_rechecks_recipient(notices_cont
         page = client.get(path, params={"limit": 2})
         assert page.status_code == 200, page.text
         result = page.json()
-        assert result["batch_mode"] == "demo"
+        assert result["batch_mode"] == "live"
         assert result["total"] == 4
         assert result["statuses"] == {"待处理": 1, "待核验": 1, "已核验": 1, "本轮不调": 1}
         assert result["delivery_state"] == "pending" and result["ack_at"] is None
@@ -497,7 +501,7 @@ def test_robot_result_template_uses_authorized_details_and_download_link(notices
     assert '待处理的明细：' in text
     assert 'sku' in text and 'MY' in text and 'shop' in text and '缺少费用数据' in text
     assert '查询提价数据下载[http://8.133.252.166:50003](http://8.133.252.166:50003)' in text
-    assert '演示批次' in text
+    assert '演示批次' not in text
 
 
 @pytest.mark.parametrize("changed_account, change", [
@@ -630,11 +634,13 @@ def test_robot_read_receipt_requires_exact_recipient():
     assert c.query_notice('opaque','seller')['state']=='read'
 
 
-def test_notification_only_tick_never_enqueues_demo_batches(notices_context,monkeypatch):
+def test_notification_only_tick_never_enqueues_demo_batches(notices_context):
     from app.notification_worker import notification_tick
     from app.models import Batch
     from app.models.notifications import Notice
     factory,cfg=notices_context
+    with factory.begin() as session:
+        session.get(Batch, 'b').mode = 'demo'
     notification_tick(factory,cfg)
     with factory.begin() as s:
         assert s.query(Notice).count()==0
@@ -665,7 +671,7 @@ def test_result_template_historical_activity_is_pending_and_verified_is_increase
     def item(status,code,sku):
         return SimpleNamespace(status=status,decision={'reason_code':code},key={'sku':sku,'site':'PH','shop_id':'s'},reason='原因',updated_at='2026-11-19T02:30:00+00:00')
     items=[item('待处理','activity_locked','active-sku'),item('待核验','pending_submission','manual-sku'),item('已核验','ready','done-sku'),item('本轮不调','recent_price_change','skip-sku')]
-    text=_card_text(_summary(items),'live',items)
+    text=_card_text(_summary(items),items)
     assert '待处理 2 · 已提价 1 · 本轮不调 1' in text
     assert '活动中' not in text
     assert 'manual-sku' in text and 'active-sku' in text
@@ -675,9 +681,9 @@ def test_result_template_historical_activity_is_pending_and_verified_is_increase
 def test_result_template_empty_manual_list_and_markdown_escape():
     from app.services.notifications import _card_text,_summary
     done=SimpleNamespace(status='已核验',decision={},key={},reason='done',updated_at='2026-11-19T02:30:00+00:00')
-    assert '待处理的明细：\n\n无' in _card_text(_summary([done]),'live',[done])
+    assert '待处理的明细：\n\n无' in _card_text(_summary([done]),[done])
     pending=SimpleNamespace(status='待处理',decision={},key={'sku':'[bad](https://wrong.test)','shop_id':'s','site':'PH'},reason='*reason*\nnext',updated_at=done.updated_at)
-    text=_card_text(_summary([pending]),'live',[pending])
+    text=_card_text(_summary([pending]),[pending])
     assert '[bad](https://wrong.test)' not in text
     assert '*reason*\nnext' not in text
 
@@ -706,3 +712,19 @@ def test_warning_notice_goes_to_admin_independent_of_owner(notices_context, monk
     with factory() as session:
         n=session.scalar(select(Notice).where(Notice.recipient_id=='admin'))
         assert n.summary['kind']=='warning' and n.delivery_state=='accepted'
+
+@pytest.mark.parametrize("mode", ["file", "demo"])
+def test_robot_skips_non_live_batches(notices_context, monkeypatch, mode):
+    from app.adapters.dingtalk import DingTalkClient
+    from app.models import Batch, Notice
+    from app.services.notifications import dispatch_notices, enqueue_batch_notices
+
+    factory, config = notices_context
+    config.ding_enabled = True
+    with factory.begin() as session:
+        session.get(Batch, 'b').mode = mode
+    enqueue_batch_notices(factory, 'b')
+    monkeypatch.setattr(DingTalkClient, 'send_notice', lambda *args: pytest.fail('非正式批次发送了通知'))
+    dispatch_notices(factory, config)
+    with factory() as session:
+        assert session.scalar(select(Notice)).delivery_state == 'pending'

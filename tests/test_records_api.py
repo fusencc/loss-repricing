@@ -42,6 +42,25 @@ def client(tmp_path):
         yield client
 
 
+def test_record_display_time_uses_completed_upload_then_collection(client):
+    with client.app.state.factory.begin() as session:
+        item = session.get(Item, 'i3')
+        row = dict(item.decision['trace']['online_rows'][0], observed_at='2026-11-17T01:30:00+00:00')
+        item.decision = dict(item.decision, trace=dict(item.decision['trace'], online_rows=[row]))
+        session.add(Execution(id='exec-time', item_id=item.id, variant_id=item.variant_id, state='verified',
+            request={}, response={}, evidence={'price_record': {'operation_log': {
+                'status': 2, 'completeTime': '2026-11-17 13:10:00'}}},
+            created_at='2026-11-17T04:00:00+00:00', updated_at='2026-11-17T06:00:00+00:00'))
+    rows = {r['id']: r for r in client.get('/api/records').json()['items']}
+    assert rows['i3']['display_time'] == '2026-11-17T13:10:00+08:00'
+    with client.app.state.factory.begin() as session:
+        execution = session.get(Execution, 'exec-time')
+        execution.evidence = {}
+    rows = {r['id']: r for r in client.get('/api/records').json()['items']}
+    assert rows['i3']['display_time'] == '2026-11-17T01:30:00+00:00'
+    assert rows['i0']['display_time'] is None
+
+
 def test_first_margin_exposes_only_selected_erp_order_amount(client):
     with client.app.state.factory.begin() as session:
         item = session.get(Item, 'i3')

@@ -1,6 +1,8 @@
 """销售记录页的只读投影；不调用采集、调价或通知，不返回原始证据。"""
 from collections import Counter
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from app.models import Batch, Item, Execution, Ownership, UserAccount
 from app.services.coordination import ownership_scopes
@@ -10,6 +12,23 @@ KEY_FIELDS = ('platform', 'shop_id', 'site', 'product_id', 'item_id', 'sku', 'wa
 
 def display_text(value):
     return value if isinstance(value, str) and value.strip() else None
+
+
+def record_display_time(item, evidence):
+    # 已绑定本次执行的成功调价日志 completeTime 是北京时间任务完成时间，不能使用核验时间或提交意图时间代替。
+    log = (evidence.get('price_record') or {}).get('operation_log') or {}
+    value = display_text(log.get('completeTime')) if log.get('status') == 2 else None
+    if value:
+        try:
+            parsed = datetime.fromisoformat(value)
+            return (parsed if parsed.tzinfo else parsed.replace(tzinfo=ZoneInfo('Asia/Shanghai'))).isoformat()
+        except ValueError:
+            pass
+    # 无可靠上传完成时间时取相同完整商品键的在线部门来源采集时间；冲突或缺失不猜测。
+    rows = ((item.decision or {}).get('trace') or {}).get('online_rows') or []
+    times = {display_text(row.get('observed_at')) for row in rows
+             if all((row.get('key') or {}).get(k) == item.key.get(k) for k in KEY_FIELDS)}
+    return next(iter(times)) if len(times) == 1 and None not in times else None
 
 
 def record_department(item):
@@ -196,6 +215,7 @@ def public_record(item, batch, execution, department, seller):
         'first_margin': first_margin,
         # 仅投影本条持久阶段与结果类型；原因仍用本条商品记录，不读取其他尝试或推断查询异常。
         'status': item.status, 'phase': item.phase, 'reason': item.reason, 'updated_at': item.updated_at,
+        'display_time': record_display_time(item, evidence),
         'decision': {field: display_text(decision.get(field))
                      for field in ('current_actual', 'target_actual', 'upload_price')} | {
             'trace': {'station_currency': currency}, 'price_change': price_change,

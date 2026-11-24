@@ -4,7 +4,7 @@
 
 ## 1. 日志来源与保存
 
-API、worker及 `PYTHONPATH=backend .venv/bin/python -m app.capture_erp` 使用统一日志组件，在当前运行目录的 `logs/<mode>/<role>/log-<pid>-<instance>.jsonl` 保存结构化技术事件（`mode` 为demo/file/live，`role` 为api/worker/capture，后两个编号为进程号及随机实例编号）。不同模式应配置独立运行目录与数据库；日志中区分 `demo/file/live`，ERP独立只读入口始终标记 `source=erp, synthetic=false`，即使所在服务配置为demo。
+API、worker及 `PYTHONPATH=backend .venv/bin/python -m app.capture_erp` 使用统一日志组件，在当前运行目录的 `logs/<mode>/<role>/log-<pid>-<instance>.jsonl` 保存结构化技术事件（`mode` 为file/live，`role` 为api/worker/capture，后两个编号为进程号及随机实例编号）。不同模式应配置独立运行目录与数据库；日志中区分 `file/live`，ERP独立只读入口始终标记 `source=erp, synthetic=false`。
 
 `.env.example` 的日志配置：`LR_LOG_LEVEL=INFO`、`LR_LOG_MAX_BYTES=20971520`（单文件20 MiB）、`LR_LOG_RETENTION_DAYS=14`、`LR_LOG_TOTAL_BYTES=1073741824`（目录总量1 GiB）。日志清理与轮转不清理数据库、采集文件、原始Excel或回执。DEBUG只改变技术事件级别，不开启请求正文、SQL参数或凭据输出。
 

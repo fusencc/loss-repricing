@@ -1,4 +1,5 @@
 """只从独立环境配置读取连接和凭据，绝不复用预算程序的账号。"""
+from datetime import date
 from pathlib import Path
 from pydantic import Field, SecretStr, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -12,9 +13,9 @@ class Settings(BaseSettings):
         extra="ignore",
     )
     environment: str = "development"
-    adapter_mode: str = "demo"
-    database_url: str = "sqlite:///runtime/loss-repricing.db"
-    # 只读真实执行/保护档案，可独立于当前demo/file写入模式绑定。
+    adapter_mode: str = "live"
+    database_url: str = ""
+    # 只读真实执行/保护档案，可独立于文件对账模式绑定。
     live_history_database_url: SecretStr = Field(default_factory=lambda: SecretStr(""))
     runtime_dir: Path = PROJECT_ROOT / "runtime"
     admin_username: str = "admin"
@@ -34,6 +35,9 @@ class Settings(BaseSettings):
     erp_capture_platform: str = "Tiktok"
     erp_capture_platform_id: str = "9B583641B0CA11EDAAB1AC1F6B9B9987"
     erp_capture_bloc: str = "集团二部"
+    # 2026-11-25 按代码内七人名单自动采集和算价；随部署启用，不依赖本机环境配置。
+    erp_roster_date: date | None = date(2026, 11, 25)
+    erp_roster_schedule_enabled: bool = True
     erp_capture_request_interval_seconds: float = Field(default=16, ge=0, le=300)
     # 网页后端暂无批量销量开放合同；串行读取并限制请求频率，后续改用批量/增量来源。
     sales_request_interval_seconds: float = Field(default=2, ge=0, le=30)
@@ -52,17 +56,22 @@ class Settings(BaseSettings):
     ding_client_secret: str = ""
     ding_agent_id: str = ""
     public_base_url: str = ""
-    notification_mode: str = "demo"
+    notification_mode: str = "live"
+    ding_tk_morning_log_folder: str = ""  # TK亏损提价日志目录。
+    ding_cancellation_log_folder: str = ""  # 作废订单日志目录。
 
     @model_validator(mode="after")
     def production_settings(self):
+        if not self.database_url:
+            filename = "live-history.db" if self.adapter_mode == "live" else "file-reconciliation.db"
+            self.database_url = f"sqlite:///{self.runtime_dir / filename}"
         archive_url=self.live_history_database_url.get_secret_value().strip()
         if self.adapter_mode=='live' and archive_url and archive_url!=self.database_url:
             raise ValueError('真实运行数据库必须与已绑定的真实提价档案一致')
-        if self.adapter_mode not in {"demo", "file", "live"}:
-            raise ValueError("LR_ADAPTER_MODE必须为demo/file/live")
-        if self.notification_mode not in {"demo", "live"}:
-            raise ValueError("notification_mode必须为demo/live")
+        if self.adapter_mode not in {"file", "live"}:
+            raise ValueError("LR_ADAPTER_MODE必须为file/live")
+        if self.notification_mode != "live":
+            raise ValueError("notification_mode必须为live")
         if self.environment == "production":
             if not self.coordination_required:
                 raise ValueError("生产环境必须开启协作权限")

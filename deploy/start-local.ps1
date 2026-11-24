@@ -11,7 +11,7 @@ if (-not (Test-Path -LiteralPath $pythonExe)) {
 }
 New-Item -ItemType Directory -Path (Join-Path $projectDir 'runtime') -Force | Out-Null
 if (-not (Test-Path -LiteralPath (Join-Path $projectDir '.env'))) {
-    & $pythonExe -c "from pathlib import Path; import secrets; p=Path('.env'); p.write_text('LR_ENVIRONMENT=development\nLR_ADAPTER_MODE=demo\nLR_ADMIN_USERNAME=admin\nLR_ADMIN_PASSWORD='+secrets.token_urlsafe(18)+'\nLR_SESSION_SECRET='+secrets.token_urlsafe(40)+'\nLR_LIVE_SUBMIT_ENABLED=false\n',encoding='utf-8')"
+    & $pythonExe -c "from pathlib import Path; import secrets; p=Path('.env'); p.write_text('LR_ENVIRONMENT=development\nLR_ADAPTER_MODE=live\nLR_ADMIN_USERNAME=admin\nLR_ADMIN_PASSWORD='+secrets.token_urlsafe(18)+'\nLR_SESSION_SECRET='+secrets.token_urlsafe(40)+'\nLR_LIVE_SUBMIT_ENABLED=false\n',encoding='utf-8')"
     if ($LASTEXITCODE -ne 0) { throw '本地配置创建失败' }
 }
 if (-not (Test-Path -LiteralPath (Join-Path $projectDir 'frontend\dist\index.html'))) {

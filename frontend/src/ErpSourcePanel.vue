@@ -59,7 +59,7 @@ function download() {
 <template>
   <section class="panel settings-panel">
     <header class="panel-heading"><h2>ERP 数据获取验证</h2></header>
-    <p class="muted">主动访问真实 ERP，读取四组候选的第一页并补订单明细。只读验证独立于演示模式，不计算价格、不提交调价、不修改试点。</p>
+    <p class="muted">主动访问真实 ERP，读取四组候选的第一页并补订单明细。此操作只读，不计算价格、不提交调价、不修改试点。</p>
     <div class="form-actions">
       <label for="erp-sample-limit">每组抽样条数</label>
       <el-input-number id="erp-sample-limit" v-model="limit" :min="1" :max="10" :value-on-clear="2" :disabled="busy" aria-label="每组抽样条数" />

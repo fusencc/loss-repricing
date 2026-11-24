@@ -83,7 +83,6 @@ button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px soli
   border-radius: 20px; font-size: 12px; font-weight: 700; color: #465d67; background: #e9eff1; white-space: nowrap;
 }
 .mode-dot { background: currentColor; }
-.mode-demo { color: #8a5607; background: #fff0d0; }
 .mode-file { color: #255a8c; background: #e2eefc; }
 .mode-live { color: #076459; background: #d8f1e9; }
 

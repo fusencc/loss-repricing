@@ -1,5 +1,5 @@
 """持久后台任务进程。日志仅提供技术排查，不改变租约、执行意图或未知不重传规则。"""
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from threading import Event, Thread
 from uuid import uuid4
 import time
@@ -80,8 +80,11 @@ class Worker:
                 self._failures.pop("worker.notice_dispatch_failed", None)
         config = settings_value(self.factory)
         local = datetime.fromtimestamp(now, timezone.utc).astimezone(BEIJING)
-        # 2026-11-20用户确认：北京时间06:30起建立当日唯一任务，晚启动仍补建。
-        if config["schedule_enabled"] and (local.hour, local.minute) >= (6, 30):
+        # 2026-11-24用户确认：北京时间09:00起建立当日唯一任务，晚启动仍补建。
+        service_config = getattr(self.service, "config", None)
+        pilot_begins_today = (getattr(service_config, "erp_roster_schedule_enabled", False)
+                              and getattr(service_config, "erp_roster_date", None) == local.date())
+        if (config["schedule_enabled"] or pilot_begins_today) and (local.hour, local.minute) >= (9, 0):
             enqueue(self.factory, "run", {"date": local.date().isoformat()}, f"daily:{local.date().isoformat()}")
         if now - self.last_reconcile >= 60:
             self.service.reconcile()
@@ -103,12 +106,23 @@ class Worker:
             scheduled_day = job.payload.get("date")
             current_time = now + (time.monotonic() - tick_started)
             current_day = datetime.fromtimestamp(current_time, timezone.utc).astimezone(BEIJING).date().isoformat()
-            if job.kind == "run" and scheduled_day and job.dedupe_key == f"daily:{scheduled_day}" and scheduled_day < current_day:
+            daily = job.kind == "run" and scheduled_day and job.dedupe_key == f"daily:{scheduled_day}"
+            service_config = getattr(self.service, "config", None)
+            roster_date = getattr(service_config, "erp_roster_date", None)
+            if daily and scheduled_day < current_day:
                 # 日任务只消费本日数据。旧执行继续走独立核验，新日由其自己的唯一日任务处理。
                 state, error = "cancelled", "原定时任务已过业务日，按新业务日定时任务处理"
+            elif daily and roster_date and scheduled_day == roster_date.isoformat():
+                from app.services.erp_workflow import run_workflow
+                # 试点名单走四类来源的逐人采集入口；通用正式任务没有名单过滤能力。
+                config = service_config.model_copy(update={'live_submit_enabled': False})
+                capture = run_workflow(config, roster_date=roster_date)
+                error = self._morning_log(config, roster_date, capture=capture)
             elif job.kind == "run":
                 batch_id = (self.service.run_batch(job.id, item_id=job.payload["item_id"])
                             if job.payload.get("item_id") else self.service.run_batch(job.id))
+                if daily and getattr(service_config, "adapter_mode", None) == "live":
+                    error = self._morning_log(service_config, date.fromisoformat(scheduled_day), batch_id=batch_id)
             elif job.kind == "erp_reconciliation":
                 from app.services.erp_pricing import save_preview_reconciliation
                 batch_id = save_preview_reconciliation(
@@ -147,6 +161,23 @@ class Worker:
                 event('job.completed', state=state, batch_id=batch_id, duration_ms=(time.monotonic() - started) * 1000)
             finally:
                 self.current_job = None
+
+    def _morning_log(self, config, day, **source):
+        from app.services.morning_log import publish_morning_log, save_morning_log, sync_cancellation_log
+        try:
+            filename = save_morning_log(config, day, factory=self.factory, **source)
+            publish_morning_log(config, filename)
+        except Exception as exc:
+            # 采集/执行已完成，日志失败不能触发再次取数或提交。
+            error_id = event('worker.morning_log_failed', exception=exc)
+            error = f"上午日志未写入钉盘，请按排查编号检查：{error_id}"
+        else:
+            error = None
+        try:
+            sync_cancellation_log(config, day)
+        except Exception as exc:
+            event('worker.cancellation_log_failed', exception=exc)
+        return error
 
     def run_forever(self, poll_seconds=5):
         stop = Event()

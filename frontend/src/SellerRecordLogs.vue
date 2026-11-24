@@ -2,10 +2,11 @@
 import { computed, ref, watch } from 'vue'
 import { Search } from '@element-plus/icons-vue'
 import { formatDecimal } from './decimal-display.ts'
+import { timeLabel } from './api'
 import SkuPriceReferenceView from './SkuPriceReference.vue'
 import RecordIdCopy from './RecordIdCopy.vue'
 import { recordPrice, recordTone, recordStatusLabel, recordDisplayStates,
-  changeLabel, isPositiveChange, filterRecordItems, stagePriceLabel, recordStageLabel, recordStateReason, recordStatusCount,
+  changeLabel, isPositiveChange, isNegativeAmount, filterRecordItems, stagePriceLabel, recordStageLabel, recordStateReason, recordStatusCount,
   type RecordStatusFilter,
   type SellerGroup } from './records-model'
 
@@ -60,13 +61,13 @@ const searchInput = ref<HTMLInputElement | null>(null)
           <!-- first_margin 只投影唯一匹配的 ERP 订单级「修正一次毛利」原金额及原币；无证据不使用单件亏损或在线利润替代。 -->
           <div class="records-stage-field" data-field="first-margin">
             <dt>修正一次毛利</dt>
-            <dd><strong>{{ item.first_margin ? `${formatDecimal(item.first_margin.amount)} ${item.first_margin.currency}` : '未记录' }}</strong></dd>
+            <dd><strong :class="{ 'records-value-red': isNegativeAmount(item.first_margin?.amount) }">{{ item.first_margin ? `${formatDecimal(item.first_margin.amount)} ${item.first_margin.currency}` : '未记录' }}</strong></dd>
           </div>
           <!-- 三环节由后端按保存金额与当日汇率算好；这里只展示已保存价格，不重算增幅。 -->
           <template v-if="item.decision?.stages">
             <div v-for="stage in item.decision.stages.rows" :key="stage.key" :data-stage="stage.key" class="records-stage-field">
               <dt>{{ recordStageLabel(stage) }}</dt>
-              <dd><strong>{{ stagePriceLabel(stage, item.decision.stages.currency) }}</strong></dd>
+              <dd><strong :class="{ 'records-value-red': stage.key === 'original' && stage.price != null }">{{ stagePriceLabel(stage, item.decision.stages.currency) }}</strong></dd>
               <dd v-if="stage.key === 'loss' && stage.trial_profit != null && stage.trial_margin_percent != null">
                 <small>按初步补亏后的营销价试算，每件利润 {{ formatDecimal(stage.trial_profit) }} {{ item.decision.stages.currency ?? '币种未记录' }}，利润率 {{ formatDecimal(stage.trial_margin_percent) }}%</small>
               </dd>
@@ -89,6 +90,7 @@ const searchInput = ref<HTMLInputElement | null>(null)
         <div class="records-log-state" aria-label="执行状态">
           <span class="records-status" :class="recordTone(item.status)"><i></i>{{ recordStatusLabel(item.status) }}</span>
           <p class="records-log-reason">{{ recordStateReason(item) }}</p>
+          <p class="records-log-time">最近更新：<time v-if="item.display_time" :datetime="item.display_time">{{ timeLabel(item.display_time) }}</time><span v-else>—</span></p>
         </div>
         <SkuPriceReferenceView :reference="item.decision?.sku_price_reference" :price-limit="item.decision?.price_limit" />
       </article>

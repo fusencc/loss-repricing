@@ -102,11 +102,11 @@ class PricingService:
 
     def run_batch(self, run_key, item_id=None):
         with bind_sink(get_sink(self.config)), bind_context(operation_id=uuid4().hex):
-            event('batch.started', source=self.adapter.mode, synthetic=self.adapter.mode == 'demo')
+            event('batch.started', source=self.adapter.mode, synthetic=getattr(self.adapter, 'synthetic', False))
             started = time.monotonic()
             batch_id = self._run_batch(run_key, item_id)
             event('batch.completed', batch_id=batch_id, source=self.adapter.mode,
-                  synthetic=self.adapter.mode == 'demo', duration_ms=(time.monotonic() - started) * 1000)
+                  synthetic=getattr(self.adapter, 'synthetic', False), duration_ms=(time.monotonic() - started) * 1000)
             return batch_id
 
     def _run_batch(self, run_key, item_id=None):
@@ -169,7 +169,7 @@ class PricingService:
             batch_id = batch.id
         self._save_decisions(batch_id, decisions)
         event('batch.saved', batch_id=batch_id, count=len(decisions),
-              source=self.adapter.mode, synthetic=self.adapter.mode == 'demo')
+              source=self.adapter.mode, synthetic=getattr(self.adapter, 'synthetic', False))
         if utcnow().astimezone(BEIJING).date() != business_date:
             self._rollover(run_key, batch_id, item_id)
             self._summarize(batch_id)
@@ -352,7 +352,7 @@ class PricingService:
             item.reason = "执行意图已持久保存，等待逐行结果与实际价格"
         # 事务退出后才能记录“已持久保存”，日志不冒充数据库提交成功。
         event('execution.intent_saved', execution_id=execution_id, item_id=item_id, batch_id=item.batch_id,
-              source=self.adapter.mode, synthetic=self.adapter.mode == 'demo')
+              source=self.adapter.mode, synthetic=getattr(self.adapter, 'synthetic', False))
         return execution_id
 
     def _submit(self, item_id, decision, business_date=None):
@@ -423,11 +423,11 @@ class PricingService:
                 return False if crossed_day else None
             try:
                 event('execution.submit_started', execution_id=execution_id, item_id=item_id,
-                      source=self.adapter.mode, synthetic=self.adapter.mode == 'demo')
+                      source=self.adapter.mode, synthetic=getattr(self.adapter, 'synthetic', False))
                 result = self.adapter.submit(execution_id, decision)
             except Exception as exc:
                 event('execution.unknown', exception=exc, execution_id=execution_id, item_id=item_id,
-                      source=self.adapter.mode, synthetic=self.adapter.mode == 'demo')
+                      source=self.adapter.mode, synthetic=getattr(self.adapter, 'synthetic', False))
                 result = SubmitResult("unknown", message=f"提交结果未知（{type(exc).__name__}），仅查结果、不重传")
             execution = session.get(Execution, execution_id)
             item = session.get(Item, item_id)
@@ -443,7 +443,7 @@ class PricingService:
                 item.status = "待核验"
             item.updated_at = stamp()
         event('execution.result_saved', execution_id=execution_id, item_id=item_id, batch_id=item.batch_id,
-              state=execution.state, source=self.adapter.mode, synthetic=self.adapter.mode == 'demo')
+              state=execution.state, source=self.adapter.mode, synthetic=getattr(self.adapter, 'synthetic', False))
 
     def reconcile(self, item_id=None, target_id=None, *, summarize_batch=True):
         # 核验不受暂停开关限制；否则暂停后已送达的请求将永久失去跟踪。
@@ -495,7 +495,7 @@ class PricingService:
                     price_limit_passed = upper is None or MoneyRatio(result.actual_price) <= upper
             except Exception as exc:
                 event('execution.lookup_failed', exception=exc, execution_id=execution.id,
-                      item_id=execution.item_id, source=self.adapter.mode, synthetic=self.adapter.mode == 'demo')
+                      item_id=execution.item_id, source=self.adapter.mode, synthetic=getattr(self.adapter, 'synthetic', False))
                 continue  # 稍后继续核验，保持原锁，不把查询失败当作未提交。
             with transaction(self.factory) as session:
                 control = lock_control(session, decision.key) if self.config.coordination_required else None
@@ -547,7 +547,7 @@ class PricingService:
                         current.evidence["effective_at"] = stamp(effective)
                         current.evidence["effective_time_source"] = effective_time_source
                         current.state, item.phase, item.status = "verified", "verified", "已核验"
-                        item.reason = "模拟价格已核验" if self.adapter.mode == "demo" else "当前实际有效售价已逐条核验"
+                        item.reason = "当前实际有效售价已逐条核验"
                         # 较旧请求晚核验不得倒退最近生效时间。
                         guard.last_effective_at = max(filter(None, [guard.last_effective_at, stamp(effective)]))
                         if control is not None:
@@ -585,7 +585,7 @@ class PricingService:
                 event({'verified': 'execution.verified', 'failed': 'execution.rejected',
                        'mismatch': 'execution.mismatch'}[current.state],
                       execution_id=execution.id, item_id=execution.item_id, batch_id=item.batch_id,
-                      state=current.state, source=self.adapter.mode, synthetic=self.adapter.mode == 'demo')
+                      state=current.state, source=self.adapter.mode, synthetic=getattr(self.adapter, 'synthetic', False))
 
     def _summarize(self, batch_id, *, refresh_error=None):
         with transaction(self.factory) as session:

@@ -42,15 +42,18 @@ def main():
     password = token_urlsafe(24)
     with TemporaryDirectory(prefix='loss-sales-ui-') as temporary:
         config = Settings(
-            _env_file=None, environment='development', adapter_mode='demo',
+            _env_file=None, environment='development', adapter_mode='file',
             database_url=f"sqlite:///{Path(temporary) / 'smoke.sqlite'}",
             runtime_dir=Path(temporary), admin_username='smoke-admin',
             admin_password=password, session_secret=token_urlsafe(48),
             secure_cookie=False, live_submit_enabled=False, coordination_required=True,
             ding_enabled=False, ding_corp_id='', ding_client_id='', ding_client_secret='',
-            ding_agent_id='', notification_mode='demo', erp_token='',
+            ding_agent_id='', notification_mode='live', erp_token='',
         )
         app = create_app(config)
+        sys.path.insert(0, str(ROOT / "tests"))
+        from fake_adapter import DemoAdapter
+        app.state.adapter = app.state.service.adapter = DemoAdapter(temporary)
         worker = Worker(app.state.factory, app.state.service)
         stop = Event()
         failures = []
@@ -87,7 +90,8 @@ def main():
                         'supervisor_id':accounts[supervisor]['id'] if supervisor else None,
                         'autonomous':True,
                     }))
-                job = check(admin.post('/api/demo/run'))
+                check(admin.patch('/api/settings', json={'pilot_shops':['DEMO-MY','DEMO-PH'],'site_enabled':['MY','PH'],'autonomous_enabled':True}))
+                job = check(admin.post('/api/batches/run'))
                 def complete_job():
                     data = check(admin.get(f"/api/jobs/{job['job_id']}"))
                     assert data['state'] != 'failed', data

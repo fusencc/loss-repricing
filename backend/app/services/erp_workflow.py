@@ -1,5 +1,7 @@
 """ERP 候选至待提价文件的只读编排；复用统一规则，不调用模型或价格上传。"""
 from collections import Counter
+from datetime import date, datetime
+from app.services.store import BEIJING
 from pathlib import Path
 from uuid import uuid4
 import json
@@ -48,14 +50,36 @@ def filter_candidate_history(settings, targets, *, client=None, auth=None):
     return history,eligible,filtered
 
 
-def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, progress=None):
+# 2026-11-24 用户明确要求把这七人的采集名单写入代码，随部署交付；
+# 这是取数范围，不是店铺试点或真实价格提交授权。名单不再从环境变量或本地文件读取。
+ERP_ROSTER_NAMES = ('桂露', '莫雯舒', '赵亮亮', '刘付文昌', '李佳丽', '杨颖', '曹雪娇')
+
+
+def _roster(settings, required_day):
+    today = datetime.now(BEIJING).date()
+    if required_day is not None and required_day != today:
+        raise ValueError('名单任务不属于当前北京时间业务日')
+    if required_day is None and settings.erp_roster_date != today:
+        return None
+    names = ERP_ROSTER_NAMES
+    if not isinstance(names, tuple) or not names or any(not isinstance(n, str) or not n.strip() for n in names):
+        raise ValueError('代码中的销售员名单须为非空姓名元组，不进行 ERP 采集')
+    return list(dict.fromkeys(n.strip() for n in names))
+
+
+def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, progress=None, roster_date: date | None = None):
     """按部门串行完成只读采集和算价，显式指定采集编号时回放单批。"""
     if capture_id is not None:
+        if roster_date is not None:
+            raise ValueError('名单采集不能与离线回放同时指定')
         rebuild_clean_capture(settings.runtime_dir, capture_id)
         return _evaluate_capture(settings, capture_id, replay=True, evidence=evidence, exports=exports, progress=progress)
     if evidence is not None or exports is not None:
         raise ValueError('补充文件只可用于明确指定采集编号的离线对账')
 
+    names = _roster(settings, roster_date)
+    # 名单先于登录和公共费用取数校验；空名单不能变成不限人员。
+    scopes = [(department, name) for department in ERP_DEPARTMENTS for name in (names or [None])]
     directory = Path(settings.runtime_dir) / 'erp-workflows' / uuid4().hex
     directory.mkdir(mode=0o700, parents=True)
     departments = []
@@ -64,21 +88,26 @@ def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, prog
         'department_order': list(ERP_DEPARTMENTS), 'departments': departments,
         'ready_prices': 0, 'artifact_dir': str(directory.resolve()),
     }
+    if names is not None:
+        summary['salespersons'] = names
+        summary['roster_date'] = datetime.now(BEIJING).date().isoformat()
     manifest = directory / 'result.json'
     write_verified(manifest, summary)
     with (httpx.Client(timeout=60, trust_env=False, follow_redirects=False) as client,
           _session(settings) as web_session):
         auth = SalesAuth(settings, client)
-        for department in ERP_DEPARTMENTS:
+        for department, name in scopes:
             if progress:
                 progress(f'开始处理 {department}。')
             try:
                 result = _run_workflow(settings, department=department, progress=progress,
-                                       web_session=web_session, client=client, auth=auth)
+                                       web_session=web_session, client=client, auth=auth,
+                                       **({'salesperson': name} if name is not None else {}))
             except Exception as error:
                 # 单部门异常在调度边界留痕，不能终止其他独立部门。
                 result = _workflow_failure(error)
-            departments.append({**result, 'department': department})
+            departments.append({**result, 'department': department,
+                                **({'salesperson': name} if name is not None else {})})
             summary['ready_prices'] += result['ready_prices']
             write_verified(manifest, summary)
             if progress:
@@ -100,11 +129,11 @@ def _workflow_failure(error):
             'stopped_by_rate_limit': isinstance(error, ErpAccountRateLimited)}
 
 
-def _run_workflow(settings, *, department, web_session, client, auth, progress=None):
+def _run_workflow(settings, *, department, web_session, client, auth, progress=None, salesperson=None):
     # 每批只绑定启动时的当日检查；同日后续批次再补查失败的范围。
     daily_fees = refresh_daily_fees(settings, client=client, auth=auth)
     collected = capture_erp_bulk(settings, department=department, progress=progress,
-                                 web_session=web_session)
+                                 web_session=web_session, salesperson=salesperson)
     saved = save_capture(settings.runtime_dir, collected)
     capture_id = saved['capture_id']
     try:

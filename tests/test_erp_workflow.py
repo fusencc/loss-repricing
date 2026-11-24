@@ -205,7 +205,7 @@ def test_cli_missing_evidence_returns_nonzero_after_persisting_report(tmp_path):
     _, capture_id, _ = inputs(tmp_path)
     command = subprocess.run(
         [sys.executable, '-m', 'app.erp_workflow', '--capture-id', capture_id],
-        env=dict(os.environ, PYTHONPATH='backend', LR_RUNTIME_DIR=str(tmp_path)),
+        env=dict(os.environ, PYTHONPATH='backend', LR_RUNTIME_DIR=str(tmp_path), LR_DATABASE_URL='', LR_LIVE_HISTORY_DATABASE_URL=''),
         capture_output=True, text=True,
     )
     assert command.returncode == 2, command.stderr
