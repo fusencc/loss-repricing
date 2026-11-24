@@ -25,7 +25,7 @@ from app.adapters.official_price_logs import capture_recent_price_changes, recen
 from app.domain.types import VariantKey
 from app.observability import event
 from decimal import Decimal
-from app.adapters.sales_batch_export import capture_sales_batch, select_export_candidates
+from app.adapters.sales_batch_export import capture_sales_batch, export_activity_hints, select_export_candidates
 from app.adapters.sales_platform_capture import capture_platform_controls
 from app.adapters.live_online_preparation import prepare_online_states
 from app.services.erp_capture_store import load_capture, rebuild_clean_capture, save_capture, write_verified
@@ -237,7 +237,8 @@ def _evaluate_capture(settings, capture_id, *, replay, evidence=None, exports=No
                 'item_id':t['key']['item_id']} for t in pricing_targets]
             try:
                 platform = capture_platform_controls(settings,capture,platform_targets,progress=progress,
-                                                     client=client,auth=auth)
+                                                     client=client,auth=auth,
+                                                     activity_hints=export_activity_hints(sales) if sales else None)
             except SourceUnavailable:
                 platform_status = 'unavailable'
             else:

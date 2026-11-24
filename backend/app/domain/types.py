@@ -180,6 +180,8 @@ class OnlineState(BaseModel):
     retail_price: FiniteDecimal
     # 没有活动折扣时来源须传 None。零元售价由引擎识别为异常数据。
     marketing_price: FiniteDecimal | None = None
+    # 销售系统原始 OFF 百分数。营销实价可能已经舍入，仍作为当前成交价。
+    discount_off_percent: Annotated[FiniteDecimal, Field(ge=0, lt=100)] | None = None
     # 可选同SKU营销均价，有值时限制最高营销价；没有Top3或查询失败不新增限制。
     sku_price_reference: SkuPriceReference | None = None
     fee_scope: StrictStr
@@ -199,10 +201,13 @@ class OnlineState(BaseModel):
     last_changed_at: AwareDatetime | None = None
 
     def actual_price_and_discount(self) -> tuple[Decimal, MoneyRatio] | None:
-        """缺营销价时按含税零售价成交。有效成交比例 P/R 保留精确分数。"""
+        """成交价取来源实价。来源提供 OFF 时，提价按该百分数保持折扣。"""
         actual = self.marketing_price if self.marketing_price is not None else self.retail_price
         if actual <= 0 or actual > self.retail_price:
             return None
+        if self.discount_off_percent is not None:
+            hundred = MoneyRatio(Decimal(100))
+            return actual, (hundred - MoneyRatio(self.discount_off_percent)) / hundred
         return actual, MoneyRatio(actual, self.retail_price)
 
 

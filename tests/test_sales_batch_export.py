@@ -46,7 +46,9 @@ def test_export_download_verifies_coverage_and_uses_original_headers(tmp_path):
             return httpx.Response(200, json={'access_token':'test-token','expires_in':3600})
         if path == EXPORT:
             import json
-            assert json.loads(request.content)['productIdStr'].split()[0] == first
+            body = json.loads(request.content)
+            assert body['productIdStr'].split()[0] == first
+            assert {'折扣', '海外仓库存', 'erp成本价', '包装重量'} <= set(body['exportField'])
             return httpx.Response(200, json={'resp_code': 0, 'datas': None})
         if path == TASKS:
             data = [] if calls.count(TASKS) % 2 else [
@@ -101,9 +103,9 @@ def test_batch_prices_are_used_only_when_current_platform_confirms_them():
     capture, targets, inputs = sources()
     record = inputs['platform']['records'][0]
     record['company_activity_locked'] = False
-    record['current_variants'][0]['marketPrice'] = '61.49'
+    record['current_variants'][0]['marketPrice'] = None
     exported = {'币种': 'PHP', '含vat价格': '61.49', '营销价格': '', '折扣': '', '活动类型': '',
-                '7天销量': '7', '海外仓公式利润率(%)': '-14.93'}
+                '7天销量': '7', '海外仓公式利润率(%)': '-14.93', '海外仓库存': '114'}
     inputs['sales'].update(source_mode='online_sku_batch_export', variants=[
         {'shopName': 'SHOPPH', 'productId': 'P1', 'sellerSkuId': 'I1',
          'batch_pricing': exported, 'export_ref': 'SALES/001.xlsx:2'}
@@ -115,6 +117,53 @@ def test_batch_prices_are_used_only_when_current_platform_confirms_them():
     report = prepare_online_states(capture, targets, **inputs)
     assert not report['online']
     assert report['issues'][0]['reason'] == '批量导出价格与当前平台快照不一致'
+
+
+def test_batch_discount_uses_sales_off_when_current_marketing_price_is_rounded():
+    from decimal import Decimal
+
+    from app.adapters.live_online_preparation import prepare_online_states
+    from app.domain.money import MoneyRatio
+    from app.domain.types import OnlineState
+    from test_live_online_preparation import sources
+
+    capture, targets, inputs = sources()
+    inputs['platform']['records'][0]['current_variants'][0]['marketPrice'] = '30.75'
+    inputs['sales'].update(source_mode='online_sku_batch_export', variants=[
+        {'shopName': 'SHOPPH', 'productId': 'P1', 'sellerSkuId': 'I1', 'export_ref': 'SALES/001.xlsx:2',
+         'batch_pricing': {'币种': 'PHP', '含vat价格': '61.49', '营销价格': '30.75',
+                           '折扣': '50', '活动类型': '直接折扣', '海外仓库存': '114'}}
+    ])
+    result = prepare_online_states(capture, targets, **inputs)
+    state = OnlineState.model_validate(result['online'][0]['state'])
+    assert state.actual_price_and_discount() == (Decimal('30.75'), MoneyRatio(Decimal('0.5')))
+
+
+def test_direct_profit_uses_exported_erp_cost_and_grams():
+    from decimal import Decimal
+
+    from app.adapters.live_online_preparation import prepare_online_states
+    from test_live_online_preparation import configure_direct, sources
+    from test_sales_fee_inputs import direct_source
+
+    capture, targets, inputs = sources()
+    _, rate = direct_source()
+    configure_direct(inputs['fixed_fees']['config'], rate, 'PH')
+    inputs['sales']['currency_rates'][1]['rate'] = '0.1'
+    variant = inputs['platform']['records'][0]['current_variants'][0]
+    variant.update(overseasStockSum=0, overseasStockWarehouseInfo='[]', warehousename='WH-PH',
+                   localWeight=None, costPrice=None)
+    inputs['sales'].update(source_mode='online_sku_batch_export', variants=[
+        {'shopName': 'SHOPPH', 'productId': 'P1', 'sellerSkuId': 'I1', 'export_ref': 'SALES/001.xlsx:2',
+         'batch_pricing': {'币种': 'PHP', '含vat价格': '61.49', '营销价格': '30.745',
+                           '折扣': '50', '活动类型': '直接折扣', '海外仓库存': '0',
+                           'erp成本价': '2', '包装重量': '21'}}
+    ])
+    result = prepare_online_states(capture, targets, **inputs)
+    assert not result['issues']
+    state = result['online'][0]['state']
+    assert state['profit_check']['mode'] == 'direct'
+    assert Decimal(state['profit_check']['model']['fixed_cost']) == Decimal('5')
 
 
 @pytest.mark.parametrize(('corrected_margin', 'selected'), [('-1', True), ('0', False), ('1', False), (None, False)])

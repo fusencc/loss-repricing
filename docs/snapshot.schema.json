@@ -226,6 +226,23 @@
           "default": null,
           "title": "Marketing Price"
         },
+        "discount_off_percent": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 100.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Discount Off Percent"
+        },
         "sku_price_reference": {
           "anyOf": [
             {

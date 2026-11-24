@@ -84,9 +84,9 @@ def prepare_online_states(capture,targets,*,sales,platform,local_history,fixed_f
             if (price.get('currency')!=currency or variant.get('currency')!=currency or retail<=0
                     or retail!=money(variant.get('priceIncludeVat'))):
                 raise ValueError('当前含VAT价格、币种与公司快照不一致')
-            actual=money(variant.get('marketPrice'))
-            if not Decimal(0)<actual<=retail:raise ValueError('当前营销价格或折扣无效')
+            raw_actual = variant.get('marketPrice')
             export_proof = None
+            discount_off = None
             if batch_export:
                 exported_rows = exported[target['erp_shop'], key.product_id, key.item_id]
                 if len(exported_rows) != 1 or not _warehouse_matches(variant, key.warehouse):
@@ -94,15 +94,31 @@ def prepare_online_states(capture,targets,*,sales,platform,local_history,fixed_f
                 exported_row = exported_rows[0]
                 export_values = exported_row['batch_pricing']
                 export_retail = money(export_values['含vat价格'])
-                marketing_fields = ('营销价格', '折扣', '活动类型')
-                no_marketing = (all(export_values[field] in (None, '') for field in marketing_fields)
-                                and control.get('company_activity_locked') is False and actual == retail)
-                export_actual = export_retail if no_marketing else money(export_values['营销价格'])
-                if (export_values['币种'] != currency or export_retail != retail or export_actual != actual):
+                if export_values['币种'] != currency or export_retail != retail:
                     raise ValueError('批量导出价格与当前平台快照不一致')
-                # 三项营销字段都空时，须由已核实的无活动和现价一致凭证确认零折扣。
-                retail, actual = export_retail, export_actual
+                # 无活动侧且三项营销字段均空时，按含税价成交。百分比活动直接使用导出的 OFF。
+                marketing_fields = ('营销价格', '折扣', '活动类型')
+                no_marketing = (control.get('company_activity_locked') is False
+                                and all(export_values[field] in (None, '') for field in marketing_fields))
+                if no_marketing:
+                    actual, discount_off = retail, Decimal(0)
+                elif export_values['活动类型'] == '直接折扣':
+                    actual = money(export_values['营销价格'])
+                    discount_off = money(export_values['折扣'])
+                    if not 0 <= discount_off < 100:
+                        raise ValueError('销售导出的 OFF 百分比无效')
+                else:
+                    raise ValueError('销售导出未确认当前活动为百分比折扣或无活动')
+                if (raw_actual not in (None, '') or not no_marketing) and money(raw_actual) != actual:
+                    raise ValueError('批量导出价格与当前平台快照不一致')
+                # 导出库存单位为件，重量为克，ERP 成本为 CNY/件。海外成本与头程仍须按实际仓取明细。
+                variant = {**variant, 'overseasStockSum': export_values['海外仓库存'],
+                           'marketPrice': actual}
                 export_proof = {'ref': exported_row['export_ref'], 'values': export_values}
+            else:
+                actual = money(raw_actual)
+            if not Decimal(0) < actual <= retail:
+                raise ValueError('当前营销价格或折扣无效')
             allowed_binding={'configured_live_history_database','live_runtime_database'}
             if capture['synthetic']:allowed_binding.add('injected_synthetic_test')
             if (local_history.get('acquisition_complete') is not True
@@ -117,6 +133,8 @@ def prepare_online_states(capture,targets,*,sales,platform,local_history,fixed_f
             if not isinstance(department,str) or not department.strip():
                 raise ValueError('商品部门归属未知，不能选取当前部门费率')
             mode='overseas' if stock is not None and stock>0 else 'direct'
+            if export_proof is not None and mode == 'direct':
+                variant = {**variant, 'costPrice': export_values['erp成本价'], 'localWeight': export_values['包装重量']}
             rate=select_current_rate(fixed_fees,variant,parent,key.site,mode)
             if export_proof is not None and 'vat_source' in rate:
                 category = str(export_values['平台尾类目ID'])
@@ -162,11 +180,13 @@ def prepare_online_states(capture,targets,*,sales,platform,local_history,fixed_f
                 for row in local_history['protections'])
             state=ReviewedOnlineState.model_validate({'key':key.model_dump(mode='json'),'main_sku':target['main_sku'],
                 'currency':currency,'retail_price':format(retail,'f'),'marketing_price':format(actual,'f'),
+                'discount_off_percent':discount_off,
                 'sku_price_reference':price_reference_for(price_references,capture,key,
                     sku=target['erp_sku'],currency=currency),
                 'fee_scope':'erp-corrected-first-margin-v1',
                 'profit_check':{'overseas_stock':None if stock is None else format(stock,'f'),'mode':mode,'department':department,
-                    'inventory_observed_at':control['observed_at'],'source_ref':control['ref'],
+                    'inventory_observed_at': sales['completed_at'] if export_proof else control['observed_at'],
+                    'source_ref': export_proof['ref'] if export_proof else control['ref'],
                     'model':fee['online_model'].model_dump(mode='json')},'observed_at':control['observed_at'],
                 'history_known':recent is not None,'last_increase_at':None,
                 'recent_price_log':recent.model_dump(mode='json') if recent else None,

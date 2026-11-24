@@ -36,11 +36,13 @@ def _archive(directory, result, response, filename, path, request):
     return received_at
 
 
-def _activity_batch(client, auth, directory, result, batch_number, products, bloc):
-    """已确认的空格分隔产品 ID。双筛选完整翻页后才判断每个店铺产品。"""
+def _activity_batch(client, auth, directory, result, batch_number, products_by_activity, bloc):
+    """按所需的活动状态批查父商品，各侧独立翻页。"""
     matches = defaultdict(list)
     observed_at = None
-    for active in (0, 1):
+    for active, products in products_by_activity.items():
+        if not products:
+            continue
         total, fetched, page = None, 0, 1
         previous_pages = set()
         while True:
@@ -81,7 +83,7 @@ def _activity_batch(client, auth, directory, result, batch_number, products, blo
 
 
 def _activity_product_batches(shops_by_product, interval):
-    # 每批至少两次筛选，每店铺产品再读两次。按节流时间估算批长，
+    # 每批按需查一侧或两侧，每店铺产品再读两次。按节流时间估算批长，
     # 给现态快照和可选参考留出余量；实际耗时和页数仍以观测时间为准。
     max_links = max(1, int(240 / (2 * interval)) - 1) if interval > 0 else None
     batch, links = [], 0
@@ -97,7 +99,7 @@ def _activity_product_batches(shops_by_product, interval):
         yield batch
 
 
-def _confirmed_activity(settings, plans, client, auth, directory, result):
+def _confirmed_activity(settings, plans, client, auth, directory, result, activity_hints):
     shops_by_product = defaultdict(list)
     for shop, product in sorted(plans, key=lambda identity: (identity[1], identity[0])):
         if any(char.isspace() for char in product):
@@ -108,8 +110,14 @@ def _confirmed_activity(settings, plans, client, auth, directory, result):
     batches = _activity_product_batches(shops_by_product, settings.sales_request_interval_seconds)
     for batch_number, batch in enumerate(batches, 1):
         try:
+            products_by_activity = {
+                active: [product for product in batch if any(
+                    activity_hints.get((shop, product)) in (active, None) for shop in shops_by_product[product]
+                )]
+                for active in (0, 1)
+            }
             matches, observed_at = _activity_batch(client, auth, directory, result, batch_number,
-                                                   batch, settings.erp_capture_bloc)
+                                                   products_by_activity, settings.erp_capture_bloc)
         except (SourceUnavailable, httpx.HTTPError, ValueError, TypeError, KeyError) as error:
             issue = {'code':'company_activity_batch_unverified', 'product_ids':batch,
                      'error_kind':type(error).__name__}
@@ -124,7 +132,8 @@ def _confirmed_activity(settings, plans, client, auth, directory, result):
         for product in batch:
             for shop in shops_by_product[product]:
                 rows = matches.get((shop, product), [])
-                if len(rows) != 1:
+                expected = activity_hints.get((shop, product))
+                if len(rows) != 1 or (expected is not None and bool(rows[0][0]) != expected):
                     result['issues'].append({'code':'company_activity_state_conflicting_or_missing',
                         'erp_shop':shop, 'product_id':product, 'item_ids':sorted(plans[shop, product])})
                     continue
@@ -132,7 +141,7 @@ def _confirmed_activity(settings, plans, client, auth, directory, result):
                 yield (shop, product), active, parent, observed_at
 
 
-def capture_platform_controls(settings,capture,targets,*,client=None,auth=None,progress=None):
+def capture_platform_controls(settings,capture,targets,*,client=None,auth=None,progress=None,activity_hints=None):
     if settings.vendor_api_url.rstrip('/') != ORIGIN:
         raise SourceUnavailable('平台现态来源地址未确认')
     plans=defaultdict(set)
@@ -154,7 +163,7 @@ def capture_platform_controls(settings,capture,targets,*,client=None,auth=None,p
     auth=auth or SalesAuth(settings,client)
     context=private_request.set(True)
     try:
-        confirmed = _confirmed_activity(settings, plans, client, auth, directory, result)
+        confirmed = _confirmed_activity(settings, plans, client, auth, directory, result, activity_hints or {})
         for number, ((shop, product), active, parent, activity_observed) in enumerate(confirmed, 1):
             items = plans[shop, product]
             if progress:progress(f'读取平台当前商品身份与可售状态：第{number}/{len(plans)}个产品。')

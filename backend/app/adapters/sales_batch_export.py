@@ -27,6 +27,7 @@ FIELDS = (
     '产品ID', '商品ID', '本地主sku', '本地子sku', '平台子sku', '币种',
     '7天销量', '税前价', '含vat价格', '营销价格', '折扣', '活动类型',
     'VAT费率', '平台尾类目ID', '直发公式利润率', '海外仓公式利润率',
+    '海外仓库存', '海外仓仓库', 'erp成本价', '包装重量',
 )
 COLUMNS = ('集团', '部门', '店铺名称', '站点', *(
     '海外仓公式利润率(%)' if field == '海外仓公式利润率' else field for field in FIELDS
@@ -51,6 +52,18 @@ def select_export_candidates(capture, verified_orders):
             if margin < 0 and products:
                 candidates[order] = tuple(sorted(products))
     return candidates
+
+
+def export_activity_hints(sales):
+    """同一店铺父商品任一子 SKU 有活动即筛有活动侧；价格字段不完整则让现态查两侧。"""
+    states = defaultdict(set)
+    for variant in sales['variants']:
+        row = variant['batch_pricing']
+        active = True if row['活动类型'] else (
+            False if row['折扣'] in (None, '') and row['营销价格'] in (None, '') else None
+        )
+        states[variant['shopName'], variant['productId']].add(active)
+    return {key: True in values for key, values in states.items() if True in values or values == {False}}
 
 
 def _parse_export(content, ids, bloc):

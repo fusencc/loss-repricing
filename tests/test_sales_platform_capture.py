@@ -5,7 +5,7 @@ import pytest
 from app.config import Settings
 
 
-def run(tmp_path,case='valid'):
+def run(tmp_path,case='valid', **options):
     from app.adapters.sales_platform_capture import capture_platform_controls
     calls=[]
     def handler(request):
@@ -32,7 +32,7 @@ def run(tmp_path,case='valid'):
     capture={'capture_id':'C1','synthetic':True,'sample_only':False}
     targets=[{'erp_shop':'SHOPPH','product_id':'P1','item_id':'I1'},{'erp_shop':'SHOPPH','product_id':'P1','item_id':'I1'}]
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        result=capture_platform_controls(settings,capture,targets,client=client)
+        result=capture_platform_controls(settings,capture,targets,client=client,**options)
     return result,calls
 
 
@@ -46,6 +46,14 @@ def test_current_platform_state_is_bound_to_requested_product_and_saved_once(tmp
     assert result['records'][0]['data']['skus'][0]['price']['sale_price']=='61.49'
     assert json.loads(Path(result['artifact_file']).read_text())==result
     assert all('Bearer SECRET' not in p.read_text() for p in tmp_path.rglob('*.json'))
+
+
+@pytest.mark.parametrize(('case', 'active'), [('valid', True), ('inactive', False)])
+def test_export_activity_checks_only_the_observed_state(tmp_path, case, active):
+    result, calls = run(tmp_path, case, activity_hints={('SHOPPH', 'P1'): active})
+    assert result['acquisition_complete']
+    assert result['records'][0]['company_activity_locked'] is active
+    assert sum('/findByPage' in path for path in calls) == 1
 
 
 @pytest.mark.parametrize('case',['outside','duplicate'])
