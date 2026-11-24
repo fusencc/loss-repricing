@@ -1,5 +1,5 @@
 """按 ERP 网页合同取得四类候选，并逐批核对财务导出的订单范围。"""
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from collections import Counter
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -20,7 +20,8 @@ import httpx
 from openpyxl import load_workbook, Workbook
 
 from app.adapters.base import SourceUnavailable
-from app.adapters.erp_web import WEB_BASE, ErpAccountRateLimited, ErpBusinessFailure, error_evidence
+from app.adapters.erp_web import (WEB_BASE, ErpAccountRateLimited, ErpBusinessFailure, error_evidence,
+                                  retry_erp_read, safe_page_excerpt)
 from app.adapters.transport_privacy import private_request
 from app.services.erp_capture_store import write_verified
 
@@ -37,6 +38,7 @@ SOURCES = {
 }
 ERP_DEPARTMENTS = ('Tiktok一部', 'Tiktok五部', 'Tiktok十二部', 'Tiktok二十二部')
 BLOCKED_LIST = '/Api/order/list'
+BLOCKED_PAGE_SIZE = 20
 STATUS_LABELS = {4: '可配货', 3: '待处理'}
 LOSS_EXPORT = '/Api/deficit/dowDeficitOrder'
 ORDER_EXPORT = '/newIp/report/orderDownload/asyncOrderListDownload'
@@ -128,20 +130,22 @@ def _scope(records, bloc, *, expected_status=None, department=None, salesperson=
 
 @contextmanager
 def _session(settings, client=None):
-    if not settings.erp_username or not settings.erp_password.get_secret_value():
-        raise SourceUnavailable('请配置ERP账号密码')
     owned = client is None
     client = client or httpx.Client(timeout=120, trust_env=False, follow_redirects=False)
     context = private_request.set(True)
     last = None
     interval = settings.erp_capture_request_interval_seconds if owned else 0
     try:
-        def request(method, path, **kwargs):
+        def request(method, path, *, observe=None, **kwargs):
             nonlocal last
             if last is not None:
-                sleep(max(0, interval - (monotonic() - last)))
+                pause = interval - (monotonic() - last)
+                if pause > 0:
+                    sleep(pause)
             last = monotonic()
             r = client.request(method, path, timeout=120, follow_redirects=False, **kwargs)
+            if observe is not None:
+                observe(r)
             r.raise_for_status()
             if 300 <= r.status_code < 400:
                 raise SourceUnavailable('ERP下载重定向未验证，未继续下载')
@@ -157,17 +161,40 @@ def _session(settings, client=None):
                 raise ErpBusinessFailure(j['code'])
             return j.get('data')
 
-        user = payload(request('POST', WEB_BASE + '/newIp/system/login', json={
-            'username': settings.erp_username, 'password': settings.erp_password.get_secret_value()}))
-        token = user.get('accessToken') or user.get('token') if isinstance(user, dict) else None
-        if not isinstance(token, str) or not token.strip():
-            raise SourceUnavailable('ERP登录未返回令牌')
+        token = None
+        login_error = None
 
-        def post(path, body, binary=False, *, success_code=None):
+        def authenticate():
+            # 懒登录使认证失败仍由调用该请求的采集步骤归档。
+            nonlocal token, login_error
+            if login_error is not None:
+                raise login_error.with_traceback(None)
+            if token is None:
+                try:
+                    if not settings.erp_username or not settings.erp_password.get_secret_value():
+                        raise SourceUnavailable('请配置ERP账号密码')
+                    user = payload(request('POST', WEB_BASE + '/newIp/system/login', json={
+                        'username': settings.erp_username, 'password': settings.erp_password.get_secret_value()}))
+                    value = user.get('accessToken') or user.get('token') if isinstance(user, dict) else None
+                    if not isinstance(value, str) or not value.strip():
+                        raise SourceUnavailable('ERP登录未返回令牌')
+                    token = value
+                except (SourceUnavailable, httpx.HTTPError, ValueError) as error:
+                    login_error = error
+                    raise
+            return token
+
+        def post(path, body, binary=False, *, success_code=None, page_evidence=None):
             expected = success_code if success_code is not None else (0 if path == BLOCKED_LIST else 200)
             if type(expected) is not int or expected not in (0, 200):
                 raise ValueError('ERP成功码须为已核对的0或200')
-            r = request('POST', WEB_BASE + path, json=body, headers={'authorization': token})
+            headers = {'authorization': authenticate()}
+            def send():
+                observe = (lambda r: page_evidence(safe_page_excerpt(r))) if (
+                    path == BLOCKED_LIST and page_evidence is not None) else None
+                return request('POST', WEB_BASE + path, json=body, headers=headers, observe=observe)
+            # 登录及创建导出任务不重试。只重读幂等名单和已绑定任务列表。
+            r = retry_erp_read(send) if path in (BLOCKED_LIST, TASKS) else send()
             if binary and r.content.startswith(b'PK'):
                 return r.content
             data = payload(r, expected=expected)
@@ -183,8 +210,8 @@ def _session(settings, client=None):
             if parsed.scheme not in ('http','https') or not parsed.hostname or parsed.username or parsed.password:
                 raise SourceUnavailable('ERP下载地址格式无效')
             # 令牌仅发送到ERP源，带权限下载URL只在内存中使用，不写日志或采集文件。
-            headers = {'authorization': token} if parsed.netloc == urlsplit(WEB_BASE).netloc else {}
-            return request('GET', target, headers=headers).content
+            headers = {'authorization': authenticate()} if parsed.netloc == urlsplit(WEB_BASE).netloc else {}
+            return retry_erp_read(lambda: request('GET', target, headers=headers)).content
 
         yield post, download
     finally:
@@ -260,45 +287,57 @@ def write_comparison_workbook(folder, financial_paths, loss_path, *, filename='�
     return result
 
 
-def _blocked_ids(post, group, *, salesperson=None):
-    """列表确认 jzfh=1；异步按条件导出实测会混入非禁止发货订单。"""
+def _blocked_ids(post, group, *, salesperson=None, evidence_dir=None):
+    """只发布整页校验通过的订单；保留其在候选数组中的半开区间，失败页不能贡献订单。"""
     if salesperson is not None:
         seller_id = group['filters'].get('shopUsernameid')
         if not isinstance(seller_id, str) or not seller_id or seller_id != seller_id.strip():
             raise SourceUnavailable('ERP禁止发货名单缺少有效的销售员ID')
-    ids = {}
-    # 2026-11-11两类真实读取已验证limit=10000，分别一次返回2467/4431条且等于total。
-    # 单页取得常见业务范围，避免跨16秒请求间隔时订单状态变化导致名单漂移；
-    # 超过一页仍按原完整性条件分页，不放宽总数、页长或逐行范围检查。
-    page_size = 10000
+    seen = set()
+    ids = group.setdefault('candidate_order_ids', [])
     page = 1
     while True:
-        data = post(BLOCKED_LIST, dict(group['filters'], page=page, limit=page_size))
-        records = data.get('records') if isinstance(data, dict) else None
-        total = data.get('total') if isinstance(data, dict) else None
-        if type(total) is not int or total < 0 or not isinstance(records, list):
-            raise SourceUnavailable('ERP禁止发货分页结构无效')
-        group['pages'].append({'page':page, 'total':total, 'rows':len(records)})
-        if page == 1:
-            group['total'] = total
-        if total != group['total'] or len(records) != min(page_size, max(0,total-(page-1)*page_size)):
-            raise SourceUnavailable('ERP禁止发货分页总数或页长变化，未使用不完整名单')
-        for row in records:
-            order = row.get('orderid') if isinstance(row, dict) else None
-            if (not isinstance(order, str) or not order.strip() or order in ids
-                    or str(row.get('platform')).casefold() != 'tiktok'
-                    or str(row.get('jzfh')) != '1' or str(row.get('status')) != str(group['status'])):
-                raise SourceUnavailable('ERP禁止发货名单存在重复订单、无效订单号或范围不符')
-            # ERP 订单页按 shopUsernameid 查询，列表「销售员」返回姓名 shopUsername。
-            # 每页先验归属再使用名单，包括试抓额度之外的订单。
-            if salesperson is not None and row.get('shopUsername') != salesperson:
-                raise SourceUnavailable('ERP禁止发货名单销售员字段缺失或与指定销售员不一致')
-            ids[order] = {key: row[key] for key in ('shopid', 'shopname')
-                          if isinstance(row.get(key), str) and row[key].strip()}
+        evidence = []
+        try:
+            # 11/24 两个大部门 limit=200 读超时；20 行首页实测成功。仍须逐页核对总数与范围。
+            body = dict(group['filters'], page=page, limit=BLOCKED_PAGE_SIZE)
+            kwargs = {'page_evidence': evidence.append} if evidence_dir is not None else {}
+            data = post(BLOCKED_LIST, body, **kwargs)
+            records = data.get('records') if isinstance(data, dict) else None
+            total = data.get('total') if isinstance(data, dict) else None
+            if type(total) is not int or total < 0 or not isinstance(records, list):
+                raise SourceUnavailable('ERP禁止发货分页结构无效，不能判为零单')
+            if (page > 1 and total != group['total']) or len(records) != min(BLOCKED_PAGE_SIZE, total-len(ids)):
+                raise SourceUnavailable('ERP禁止发货分页总数或页长变化，本页未入选')
+            verified = {}
+            for row in records:
+                order = row.get('orderid') if isinstance(row, dict) else None
+                if (not isinstance(order, str) or not order.strip() or order in seen or order in verified
+                        or str(row.get('platform')).casefold() != 'tiktok'
+                        or str(row.get('jzfh')) != '1' or str(row.get('status')) != str(group['status'])):
+                    raise SourceUnavailable('ERP禁止发货名单存在重复订单、无效订单号或范围不符')
+                if salesperson is not None and row.get('shopUsername') != salesperson:
+                    raise SourceUnavailable('ERP禁止发货名单销售员字段缺失或与指定销售员不一致')
+                verified[order] = {key: row[key] for key in ('shopid', 'shopname')
+                                   if isinstance(row.get(key), str) and row[key].strip()}
+        except (SourceUnavailable, httpx.HTTPError, ValueError, TypeError) as error:
+            group.setdefault('failed_pages', []).append(page)
+            group['list_error'] = error_evidence(error)
+            raise
+        finally:
+            if evidence:
+                # 本地证据与业务报告/技术日志分开；仅固定字段形状及计数，绝不保存原始响应。
+                write_verified(evidence_dir / f"{group['source']}-page-{page}-excerpt.json", evidence)
+        start = len(ids)
+        ids.extend(verified)
+        seen.update(verified)
+        if 'departments' in group['filters']:
+            group.setdefault('blocked_shops', {}).update(verified)
+        group['total'] = total
+        group['pages'].append({'page': page, 'total': total, 'rows': len(verified),
+                               'verified': True, 'start': start, 'end': len(ids)})
         if len(ids) == total:
-            if 'departments' in group['filters']:
-                group['blocked_shops'] = ids
-            return list(ids)
+            return ids
         page += 1
 
 
@@ -325,9 +364,11 @@ def _finance_batches(group, ids, batch_size):
     return batches
 
 
-def capture_erp_bulk(settings, *, source=None, client=None, max_polls=EXPORT_POLL_LIMIT, export_batch_size=1000,
+def capture_erp_bulk(settings, *, source=None, client=None, web_session=None, max_polls=EXPORT_POLL_LIMIT, export_batch_size=1000,
                      max_orders=None, progress=None, salesperson=None, department=None, event_callback=None):
     """默认核对四类候选。显式试抓按每组限额，保留完整候选名单。"""
+    if client is not None and web_session is not None:
+        raise ValueError('ERP客户端与网页会话不能同时指定')
     if source is not None and source not in SOURCES:
         raise ValueError('未知的ERP候选来源')
     if department is not None and department not in ERP_DEPARTMENTS:
@@ -392,7 +433,7 @@ def capture_erp_bulk(settings, *, source=None, client=None, max_polls=EXPORT_POL
                        'total':None,'error':None,'failed_pages':[],'files':[],'pages':[],
                        'list_complete':False,'stage':'not_attempted','batches':[],
                        'status_discrepancies':[],'missing_order_ids':[]})
-    result = {'source_version':'erp-web-bulk-four-20261109','source_kind':'erp_web_backend',
+    result = {'source_version':'erp-web-bulk-four-20261124','source_kind':'erp_web_backend',
               'sample_only':max_orders is not None,'selection_complete':False,
               'acquisition_mode':'bulk_download','queried_at':now.isoformat(),'groups':groups,
               'details':[],'capture_complete':False,'pricing_ready':False,'stopped_by_rate_limit':False,
@@ -413,7 +454,7 @@ def capture_erp_bulk(settings, *, source=None, client=None, max_polls=EXPORT_POL
             group.update(loss_rows=losses, total=len(losses), loss_column_count=count)
             ids = list(dict.fromkeys(r['订单编号'] for r in losses))
         else:
-            ids = _blocked_ids(post, group, salesperson=salesperson)
+            ids = _blocked_ids(post, group, salesperson=salesperson, evidence_dir=folder)
         group.update(candidate_order_ids=ids, list_complete=True)
 
     def download_finance(post, download, group, batch):
@@ -536,9 +577,9 @@ def capture_erp_bulk(settings, *, source=None, client=None, max_polls=EXPORT_POL
             # 每批落盘，后续批次失败也可查看已成功部分，不重复生成任务。
             write_verified(folder / 'result.json', result)
 
-    emit('正在登录ERP，按来源读取候选名单…')
+    emit('正在按来源读取ERP候选名单…')
     try:
-        with _session(settings, client) as (post, download):
+        with (nullcontext(web_session) if web_session is not None else _session(settings, client)) as (post, download):
             if salesperson is not None:
                 users = post('/Api/daysell/selectSellman', {})
                 if not isinstance(users, list):
@@ -552,32 +593,31 @@ def capture_erp_bulk(settings, *, source=None, client=None, max_polls=EXPORT_POL
                     if group['kind'] == 'blocked':
                         group['filters']['shopUsernameid'] = seller_id
                 emit(f'已确认销售员：{salesperson}，按所选来源读取该销售员的订单。')
+            def read_list(group):
+                with record_group_errors(group):
+                    collect_candidates(post, group)
+
+            def read_finance(group):
+                # 候选数组只在整页通过后扩展。名单没取全不等于已验证前缀失效。
+                ids = group['candidate_order_ids'][:max_orders]
+                group['selected_orders'] = len(ids)
+                for batch in _finance_batches(group, ids, export_batch_size):
+                    with record_group_errors(group, batch):
+                        download_finance(post, download, group, batch)
+                if group.get('list_error'):
+                    group['stage'] = 'candidate_list_incomplete'
+
             if department is None:
                 for group in groups:
+                    read_list(group)
+                    read_finance(group)
                     with record_group_errors(group):
-                        collect_candidates(post, group)
-                        ids = group['candidate_order_ids'][:max_orders]
-                        group['selected_orders'] = len(ids)
-                        batches = _finance_batches(group, ids, export_batch_size)
-                        for batch in batches:
-                            # Record the current task failure before moving to the next source.
-                            with record_group_errors(group, batch):
-                                download_finance(post, download, group, batch)
-                            if batch['status'] == 'failed':
-                                break
                         finish_group(group)
             else:
                 for group in groups:
-                    with record_group_errors(group):
-                        collect_candidates(post, group)
+                    read_list(group)
                 for group in groups:
-                    if not group['list_complete']:
-                        continue
-                    ids = group['candidate_order_ids'][:max_orders]
-                    group['selected_orders'] = len(ids)
-                    for batch in _finance_batches(group, ids, export_batch_size):
-                        with record_group_errors(group, batch):
-                            download_finance(post, download, group, batch)
+                    read_finance(group)
     except (SourceUnavailable, httpx.HTTPError, ValueError, TypeError, KeyError, OSError) as error:
         result.update(error_evidence(error))
         result['stopped_by_rate_limit'] = isinstance(error, ErpAccountRateLimited)

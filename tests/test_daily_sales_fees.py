@@ -191,13 +191,13 @@ def test_workflow_refreshes_daily_fees_before_erp_collection(tmp_path,monkeypatc
     from app.services import erp_workflow
     settings,_,_,_=setup(tmp_path)
     events=[]
-    monkeypatch.setattr(erp_workflow,'refresh_daily_fees',lambda s:events.append('fees'))
+    monkeypatch.setattr(erp_workflow,'refresh_daily_fees',lambda s, **kwargs:events.append('fees'))
     def stop(*args,**kwargs):
         events.append('erp')
         raise RuntimeError('stop after order proof')
     monkeypatch.setattr(erp_workflow,'capture_erp_bulk',stop)
     with pytest.raises(RuntimeError,match='order proof'):
-        erp_workflow._run_workflow(settings,department='D1')
+        erp_workflow._run_workflow(settings,department='D1',web_session=object(),client=None,auth=None)
     assert events==['fees','erp']
 
 

@@ -16,7 +16,7 @@ from time import monotonic, sleep
 import httpx
 
 from app.adapters.base import SourceUnavailable
-from app.adapters.erp_web import WEB_BASE, ErpAccountRateLimited, ErpBusinessFailure, error_evidence
+from app.adapters.erp_web import WEB_BASE, ErpAccountRateLimited, ErpBusinessFailure, error_evidence, retry_erp_read
 from app.adapters.http import TIMEOUT
 from app.adapters.transport_privacy import private_request
 from app.adapters.erp_validation import build_sample_validation
@@ -80,7 +80,7 @@ def _erp_reader(settings, client=None):
         token = user.get('accessToken') or user.get('token')
         if not isinstance(token, str) or not token.strip():
             raise SourceUnavailable('ERP网页登录未返回令牌')
-        yield lambda path, body=None: post(path, body, token)
+        yield lambda path, body=None: retry_erp_read(lambda: post(path, body, token))
     except (httpx.HTTPError, ValueError, TypeError):
         raise SourceUnavailable('ERP只读采集连接或响应无效') from None
     finally:
@@ -136,13 +136,13 @@ def _summarize_sample_group(group, limit):
         return
     total = group['total']
     if not rows:
-        complete = total in (None, 0)
-        reason = 'empty_page' if complete else 'count_inconsistent'
+        complete = total == 0
+        reason = 'empty_page' if complete else 'total_unknown' if total is None else 'count_inconsistent'
     elif total is not None and len(rows) >= total:
         complete = total == len(rows) == unique_orders
         reason = 'total_reached' if complete else 'count_inconsistent'
-    elif total is None and len(rows) < limit:
-        complete, reason = True, 'short_page'
+    elif total is None:
+        complete, reason = False, 'total_unknown'
     else:
         complete, reason = False, 'page_limit'
     group.update(list_complete=complete, stop_reason=reason)

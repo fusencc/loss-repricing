@@ -10,14 +10,15 @@ from decimal import Decimal
 from hashlib import sha256
 import json
 from pathlib import Path
-from time import monotonic, sleep
+from time import monotonic
 from urllib.parse import quote
 from uuid import uuid4
 
 import httpx
 
+from app.adapters.base import SourceUnavailable
 from app.adapters.normalization import money, source_time
-from app.adapters.sales_auth import ORIGIN, SalesAuth
+from app.adapters.sales_auth import COLLECTION_STOP_STATUSES, ORIGIN, SalesAuth
 from app.adapters.transport_privacy import private_request
 from app.domain.engine import SITE_CURRENCIES
 from app.domain.price_reference import PriceReferenceSample, SkuPriceReference, calculate_price_reference
@@ -61,7 +62,7 @@ def _sample(variant):
         tax_inclusive_price=retail, discount_percent=money(discount))
 
 
-def capture_sku_price_references(settings, capture, targets, *, platform, client=None,
+def capture_sku_price_references(settings, capture, targets, *, platform, client=None, auth=None,
                                  progress=None, request_budget=60):
     """可选来源边界：即使认证、响应或归档失败，也不抛给核心定价编排。"""
     now = lambda: datetime.now(timezone.utc).isoformat()
@@ -78,7 +79,7 @@ def capture_sku_price_references(settings, capture, targets, *, platform, client
         directory.mkdir(mode=0o700, parents=True)
         if settings.vendor_api_url.rstrip('/') != ORIGIN:
             raise ValueError('reference_origin_unconfirmed')
-        _capture(settings, targets, platform, client, result, directory,
+        _capture(settings, targets, platform, client, auth or SalesAuth(settings, client), result, directory,
                  request_budget=request_budget, progress=progress)
         result['completed_at'] = now()
         write_verified(result['artifact_file'], result)
@@ -96,7 +97,7 @@ def capture_sku_price_references(settings, capture, targets, *, platform, client
     return result
 
 
-def _capture(settings, targets, platform, client, result, directory, *, request_budget, progress):
+def _capture(settings, targets, platform, client, auth, result, directory, *, request_budget, progress):
     controls = {}
     observations = {}
     variant_cache = {}
@@ -105,6 +106,9 @@ def _capture(settings, targets, platform, client, result, directory, *, request_
         controls[identity] = record.get('current_variants', [])
         observations[identity] = record.get('observed_at')
         variant_cache[identity] = record.get('current_variants', [])
+    started = monotonic()
+    now = datetime.now(timezone.utc)
+    budget = 30
     groups = defaultdict(list)
     for target in targets:
         key = VariantKey.model_validate(target['key'])
@@ -113,9 +117,11 @@ def _capture(settings, targets, platform, client, result, directory, *, request_
         if len(current) != 1:
             continue
         try:
-            age = (datetime.now(timezone.utc) - source_time(observations[target['erp_shop'], key.product_id])).total_seconds()
-            # 现有核心快照有效期300秒；参考总预算30秒，至少预留60秒余量。
-            # 不能因可选参考查得慢，让本来可定价的现价依据过期。
+            age = (now - source_time(observations[target['erp_shop'], key.product_id])).total_seconds()
+            # 本来仍有效的其他目标也不能因等待可选参考跨过300秒。
+            if 0 <= age < 300:
+                budget = min(budget, 300 - age)
+            # 只为至少还有60秒时效余量的目标发起可选参考。
             if age < 0 or age >= 240:
                 continue
             scope = _warehouse_scope(current[0])
@@ -124,11 +130,7 @@ def _capture(settings, targets, platform, client, result, directory, *, request_
         groups[target['erp_sku'], key.site].append((target, key, scope))
     if not groups:
         return
-    deadline = monotonic() + 30
-    auth = SalesAuth(settings, client)
-    token = auth.get_token()
-    last_request = None
-    unavailable = False
+    deadline = started + budget
     used = 0
 
     def remaining_time():
@@ -138,22 +140,19 @@ def _capture(settings, targets, platform, client, result, directory, *, request_
         return remaining
 
     def read(path, body):
-        nonlocal last_request, used, unavailable
-        if unavailable or used >= request_budget:
-            raise ValueError('reference_query_budget_or_service_unavailable')
-        remaining = remaining_time()
-        if last_request is not None:
-            pause = max(0, settings.sales_request_interval_seconds - (monotonic() - last_request))
-            if pause >= remaining:
-                raise TimeoutError('optional_reference_time_budget')
-            sleep(pause)
-        last_request = monotonic()
+        nonlocal used
+        if used >= request_budget:
+            raise ValueError('reference_query_budget_exhausted')
+        # 登录续期、跨步骤节流、业务请求共用可选参考的时间预算。
+        headers = auth.collection_headers(remaining_time=remaining_time)
         used += 1
         # 各I/O阶段共享剩余预算的份额；流式读取同时检查总时限及响应大小。
         timeout = min(5, remaining_time() / 4)
         with client.stream('POST', ORIGIN + path, json=body,
-                headers={'Authorization': 'Bearer ' + token},
+                headers=headers,
                 timeout=httpx.Timeout(timeout, connect=min(3, timeout))) as response:
+            if response.status_code == 429:
+                auth.observe_collection_response(response)
             remaining_time()
             content = bytearray()
             for chunk in response.iter_bytes():
@@ -167,8 +166,6 @@ def _capture(settings, targets, platform, client, result, directory, *, request_
         result['files'].append({'path': path, 'request': body, 'http_status': response.status_code,
             'file': str(file.resolve()), 'sha256': sha256(raw).hexdigest(),
             'observed_at': datetime.now(timezone.utc).isoformat()})
-        if response.status_code in (401, 403, 429):
-            unavailable = True
         response.raise_for_status()
         value = json.loads(raw, parse_float=Decimal)
         code = 'code' if path == PRODUCTS else 'resp_code'
@@ -209,10 +206,18 @@ def _capture(settings, targets, platform, client, result, directory, *, request_
         try:
             if progress:
                 progress('查询同 SKU 可选营销参考价。')
-            parents = parents_for(sku, site)
+            parents = [(parent['shopName'], parent['productId']) for parent in parents_for(sku, site)]
+            parent_links = set(parents)
+            # 父商品搜索只提供候选上界。排除自身链接后不足三个时，无需请求变体。
+            definitions = [(target, key, scope) for target, key, scope in definitions
+                           if len(parent_links - {(target['erp_shop'], key.product_id)}) >= 3]
+            if not definitions:
+                continue
+            own_links = {(target['erp_shop'], key.product_id) for target, key, _ in definitions}
             variants = []
-            for parent in parents:
-                identity = parent['shopName'], parent['productId']
+            for identity in parents:
+                if own_links == {identity}:
+                    continue
                 if identity not in variant_cache:
                     path = VARIANTS + '/'.join(quote(x, safe='') for x in identity)
                     value = read(path, {'shopName': identity[0], 'productId': identity[1]})
@@ -246,9 +251,16 @@ def _capture(settings, targets, platform, client, result, directory, *, request_
                 except (ValueError, KeyError, TypeError, ArithmeticError) as error:
                     result['issues'].append({'code': 'price_reference_missing',
                         'target': key.identity(), 'error_kind': type(error).__name__})
-        except (httpx.HTTPError, TimeoutError, ValueError, KeyError, TypeError, ArithmeticError) as error:
-            result['issues'].append({'code': 'price_reference_scope_unavailable',
-                'error_kind': type(error).__name__})
+        except (SourceUnavailable, httpx.HTTPError, TimeoutError, ValueError, KeyError, TypeError, ArithmeticError) as error:
+            issue = {'code': 'price_reference_scope_unavailable', 'error_kind': type(error).__name__}
+            status = (error.response.status_code if isinstance(error, httpx.HTTPStatusError)
+                      else auth.stopped_http_status)
+            if status is not None:
+                issue['http_status'] = status
+            result['issues'].append(issue)
+            if (status in COLLECTION_STOP_STATUSES or isinstance(error, (SourceUnavailable, TimeoutError))
+                    or used >= request_budget):
+                break
 
 
 def price_reference_for(source, capture, key, *, sku, currency):

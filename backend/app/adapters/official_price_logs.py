@@ -145,7 +145,7 @@ observed_at是本次完成回读的时间，不是平台源更新时间或执行
         'differences':{'actual_tax_inclusive_minus_uploaded':str((MoneyRatio(money(current['retail']))-MoneyRatio(uploaded_price)).decimal())}}
 
 
-def capture_recent_price_changes(settings, keys, *, now=None, client=None):
+def capture_recent_price_changes(settings, keys, *, now=None, client=None, auth=None):
     """11/17用户指定：滚动72小时内type=2日志大于0即保护，不限操作者或涨跌。
 
     完成时间按北京时间秒精度传入；不臆造成功状态过滤或最近生效时间。
@@ -166,7 +166,7 @@ def capture_recent_price_changes(settings, keys, *, now=None, client=None):
         'queries':[],'artifact_file':str(path.resolve())}
     owned = client is None
     client = client or httpx.Client(timeout=40,trust_env=False,follow_redirects=False)
-    auth = SalesAuth(settings,client)
+    auth = auth or SalesAuth(settings,client)
     context = private_request.set(True)
     try:
         for offset in range(0,len(ids),100):
@@ -174,11 +174,13 @@ def capture_recent_price_changes(settings, keys, *, now=None, client=None):
             body = {'sellerSkuIds':batch,'type':2,'completeTimeStart':start.strftime('%Y-%m-%d %H:%M:%S'),
                 'completeTimeEnd':end.strftime('%Y-%m-%d %H:%M:%S')}
             query = {'method':'POST','path':COUNT_PATH,'request':body,'status':'unavailable'}
+            stop = False
             try:
                 if settings.vendor_api_url.rstrip('/') != ORIGIN:
                     raise SourceUnavailable('官方日志来源地址未确认')
                 response = client.post(ORIGIN+COUNT_PATH,json=body,
-                    headers={'Authorization':'Bearer '+auth.get_token()},timeout=40,follow_redirects=False)
+                    headers=auth.collection_headers(),timeout=40,follow_redirects=False)
+                auth.observe_collection_response(response)
                 query.update(http_status=response.status_code,response_sha256=sha256(response.content).hexdigest())
                 response.raise_for_status()
                 value = response.json()
@@ -198,11 +200,17 @@ def capture_recent_price_changes(settings, keys, *, now=None, client=None):
                             'count':matches[0]['count'] if valid else None}
             except (httpx.HTTPError,SourceUnavailable) as error:
                 query.update(status='transport_error',error_kind=type(error).__name__)
+                stop = isinstance(error, SourceUnavailable)
             except (ValueError,TypeError,KeyError) as error:
                 query.update(status='invalid_response',error_kind=type(error).__name__)
+            result['queries'].append(query)
+            if auth.stopped_http_status is not None:
+                result['stopped_http_status'] = auth.stopped_http_status
+                break
             if query['status']!='ok':
                 for item in batch:result['records'][item]={'status':query['status'],'count':None}
-            result['queries'].append(query)
+            if stop:
+                break
     finally:
         private_request.reset(context)
         if owned:client.close()

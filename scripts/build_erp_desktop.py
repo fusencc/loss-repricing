@@ -32,7 +32,7 @@ def build(output):
     source += 'import json\n' + privacy + '\n'
     source += definitions('backend/app/adapters/base.py',['SourceUnavailable'])+'\n'
     source += definitions('backend/app/adapters/erp_web.py',
-        ['ErpBusinessFailure', 'ErpAccountRateLimited', 'error_evidence', '_failure', 'WEB_BASE']) + '\n'
+        ['ErpBusinessFailure', 'ErpAccountRateLimited', 'error_evidence', '_failure', 'retry_erp_read', 'safe_page_excerpt', 'WEB_BASE']) + '\n'
     source += definitions('backend/app/services/erp_capture_store.py',['write_verified'])+'\n'
     source += ''.join(lines)+'\n'
     # 批量核心通过event_callback注入日志，独立文件采用入口内的标准库白名单记录器，

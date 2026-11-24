@@ -200,3 +200,31 @@ def test_reconcile_does_not_store_another_executions_price_record(execution_db,t
     with execution_db() as s:
         e=s.get(Execution,'execution-1')
         assert e.state=='unknown' and 'price_record' not in e.evidence
+
+
+@pytest.mark.parametrize('status', [401, 403, 429])
+def test_recent_batches_share_interval_and_stop_on_http_rejection(tmp_path, monkeypatch, status):
+    from app.adapters import sales_auth
+    from app.adapters.official_price_logs import capture_recent_price_changes
+    clock = [0]
+    monkeypatch.setattr(sales_auth, 'monotonic', lambda: clock[0])
+    def sleep(seconds):
+        clock[0] += seconds
+    monkeypatch.setattr(sales_auth, 'sleep', sleep)
+    monkeypatch.setattr(sales_auth.SalesAuth, 'get_token', lambda self: 'TEST')
+    keys = [KEY.model_copy(update={'item_id':f'I{i:03d}'}) for i in range(201)]
+    calls = []
+    def handler(request):
+        batch = json.loads(request.content)['sellerSkuIds']
+        calls.append((clock[0], len(batch)))
+        if len(calls) == 2:
+            return httpx.Response(status)
+        return httpx.Response(200, json={'resp_code':0,'datas':[
+            {'sellerSkuId':sku,'count':0} for sku in batch]})
+    settings = Settings(_env_file=None,runtime_dir=tmp_path,sales_request_interval_seconds=2)
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        result = capture_recent_price_changes(settings, keys, client=client, now=NOW)
+    assert calls == [(0,100),(2,100)]
+    assert result['records']['I000'] == {'status':'ok','count':0}
+    assert result['records']['I100'] == result['records']['I200'] == {'status':'unavailable','count':None}
+    assert result['stopped_http_status'] == status

@@ -17,8 +17,118 @@ from app.services.erp_capture_store import write_verified
 
 PATH = '/Api/api-tiktok-sales/online/getEditOnlineDataByShopNameAndProductId'
 
+ACTIVITY_PATH = '/Api/api-tiktok-sales/online/findByPage'
+BATCH_SIZE = 100
 
-def capture_platform_controls(settings,capture,targets,*,client=None,progress=None):
+
+def _archive(directory, result, response, filename, path, request):
+    file = directory / filename
+    file.write_bytes(response.content)
+    raw = file.read_bytes()
+    if raw != response.content:
+        raise OSError('平台采集原件回读不一致')
+    received_at = datetime.now(timezone.utc).isoformat()
+    result['files'].append({'file':str(file.resolve()), 'bytes':len(raw), 'sha256':sha256(raw).hexdigest(),
+        'path':path, 'request':request, 'http_status':response.status_code, 'received_at':received_at})
+    response.raise_for_status()
+    return received_at
+
+
+def _activity_batch(client, auth, directory, result, batch_number, products, bloc):
+    """已确认的空格分隔产品 ID。双筛选完整翻页后才判断每个店铺产品。"""
+    matches = defaultdict(list)
+    observed_at = None
+    for active in (0, 1):
+        total, fetched, page = None, 0, 1
+        previous_pages = set()
+        while True:
+            body = {'page':page, 'limit':BATCH_SIZE, 'blocNames':[bloc],
+                    'productIdStr':' '.join(products), 'isPromotion':'0' if active == 0 else 1}
+            response = client.post(ORIGIN + ACTIVITY_PATH, json=body, headers=auth.collection_headers(),
+                                   timeout=60, follow_redirects=False)
+            auth.observe_collection_response(response)
+            received = _archive(directory, result, response,
+                                f'activity-{batch_number:05d}-{active}-{page:04d}.json', ACTIVITY_PATH, body)
+            if observed_at is None:
+                observed_at = received
+            value = response.json(parse_float=Decimal)
+            if not isinstance(value, dict) or type(value.get('code')) is not int or value['code'] != 0:
+                raise ValueError('company_activity_business_failed')
+            count, rows = value.get('count'), value.get('data')
+            if (type(count) is not int or count < 0 or (total is not None and count != total)
+                    or not isinstance(rows, list) or len(rows) != min(BATCH_SIZE, count - fetched)):
+                raise ValueError('company_activity_coverage_unverified')
+            total = count
+            page_identities = set()
+            for row in rows:
+                if (not isinstance(row, dict) or row.get('bloc') != bloc
+                        or row.get('productId') not in products):
+                    raise ValueError('company_activity_scope_mismatch')
+                shop = identity_text(row.get('shopName'))
+                identity = shop, row['productId']
+                if identity in previous_pages:
+                    raise ValueError('company_activity_coverage_unverified')
+                page_identities.add(identity)
+                matches[identity].append((active, row))
+            previous_pages.update(page_identities)
+            fetched += len(rows)
+            if fetched == total:
+                break
+            page += 1
+    return matches, observed_at
+
+
+def _activity_product_batches(shops_by_product, interval):
+    # 每批至少两次筛选，每店铺产品再读两次。按节流时间估算批长，
+    # 给现态快照和可选参考留出余量；实际耗时和页数仍以观测时间为准。
+    max_links = max(1, int(240 / (2 * interval)) - 1) if interval > 0 else None
+    batch, links = [], 0
+    for product, shops in shops_by_product.items():
+        if batch and (len(batch) == BATCH_SIZE or (max_links is not None and links + len(shops) > max_links)):
+            yield batch
+            batch, links = [], 0
+        batch.append(product)
+        links += len(shops)
+    if batch:
+        yield batch
+
+
+def _confirmed_activity(settings, plans, client, auth, directory, result):
+    shops_by_product = defaultdict(list)
+    for shop, product in sorted(plans, key=lambda identity: (identity[1], identity[0])):
+        if any(char.isspace() for char in product):
+            result['issues'].append({'code':'company_activity_invalid_product_id',
+                'erp_shop':shop, 'product_id':product, 'item_ids':sorted(plans[shop, product])})
+            continue
+        shops_by_product[product].append(shop)
+    batches = _activity_product_batches(shops_by_product, settings.sales_request_interval_seconds)
+    for batch_number, batch in enumerate(batches, 1):
+        try:
+            matches, observed_at = _activity_batch(client, auth, directory, result, batch_number,
+                                                   batch, settings.erp_capture_bloc)
+        except (SourceUnavailable, httpx.HTTPError, ValueError, TypeError, KeyError) as error:
+            issue = {'code':'company_activity_batch_unverified', 'product_ids':batch,
+                     'error_kind':type(error).__name__}
+            if isinstance(error, ValueError) and str(error).startswith('company_activity_'):
+                issue['reason'] = str(error)
+            if isinstance(error, httpx.HTTPStatusError):
+                issue['http_status'] = error.response.status_code
+            result['issues'].append(issue)
+            if isinstance(error, SourceUnavailable) or auth.stopped_http_status is not None:
+                return
+            continue
+        for product in batch:
+            for shop in shops_by_product[product]:
+                rows = matches.get((shop, product), [])
+                if len(rows) != 1:
+                    result['issues'].append({'code':'company_activity_state_conflicting_or_missing',
+                        'erp_shop':shop, 'product_id':product, 'item_ids':sorted(plans[shop, product])})
+                    continue
+                active, parent = rows[0]
+                yield (shop, product), active, parent, observed_at
+
+
+def capture_platform_controls(settings,capture,targets,*,client=None,auth=None,progress=None):
     if settings.vendor_api_url.rstrip('/') != ORIGIN:
         raise SourceUnavailable('平台现态来源地址未确认')
     plans=defaultdict(set)
@@ -37,26 +147,19 @@ def capture_platform_controls(settings,capture,targets,*,client=None,progress=No
         'artifact_file':str((directory/'result.json').resolve())}
     owned=client is None
     client=client or httpx.Client(timeout=60,trust_env=False,follow_redirects=False)
-    auth=SalesAuth(settings,client)
+    auth=auth or SalesAuth(settings,client)
     context=private_request.set(True)
     try:
-        for number,((shop,product),items) in enumerate(sorted(plans.items()),1):
+        confirmed = _confirmed_activity(settings, plans, client, auth, directory, result)
+        for number, ((shop, product), active, parent, activity_observed) in enumerate(confirmed, 1):
+            items = plans[shop, product]
             if progress:progress(f'读取平台当前商品身份与可售状态：第{number}/{len(plans)}个产品。')
-            stage='authentication'
             try:
-                token=auth.get_token()
-                stage='request'
-                response=client.get(ORIGIN+PATH,params={'shopName':shop,'productId':product},
-                    headers={'Authorization':'Bearer '+token},timeout=60,follow_redirects=False)
-                path=directory/f'{number:05d}.json';path.write_bytes(response.content)
-                raw=path.read_bytes()
-                if raw!=response.content:raise OSError('平台现态原件回读不一致')
-                received=datetime.now(timezone.utc).isoformat()
-                result['files'].append({'file':str(path.resolve()),'bytes':len(raw),'sha256':sha256(raw).hexdigest(),
-                    'path':PATH,'request':{'shopName':shop,'productId':product},
-                    'http_status':response.status_code,'received_at':received})
-                response.raise_for_status()
-                if not 200<=response.status_code<300:raise ValueError('platform_response_redirect')
+                params = {'shopName':shop,'productId':product}
+                response = client.get(ORIGIN+PATH,params=params,headers=auth.collection_headers(),
+                                      timeout=60,follow_redirects=False)
+                auth.observe_collection_response(response)
+                received = _archive(directory, result, response, f'{number:05d}.json', PATH, params)
                 value=response.json(parse_float=Decimal)
                 if not isinstance(value,dict) or type(value.get('resp_code')) is not int or value['resp_code']!=0:
                     raise ValueError('platform_business_failed')
@@ -71,44 +174,13 @@ def capture_platform_controls(settings,capture,targets,*,client=None,progress=No
                 projected={key:data.get(key) for key in ('id','status','product_status','is_not_for_sale','update_time')}
                 projected['skus']=[{key:sku.get(key) for key in ('id','seller_sku','price','status_info','inventory')}
                     for sku in skus]
-                # 当前前端isPromotion=0/1为明确是否参加活动。两种筛选都读，
-                # 只有唯一一边明确返回同产品时才确认，不能以null活动字段猜无活动。
-                matches={}
-                for active in (0,1):
-                    body={'page':1,'limit':100,'blocNames':[settings.erp_capture_bloc],
-                        'productIdStr':product,'isPromotion':'0' if active==0 else 1}
-                    activity_response=client.post(ORIGIN+'/Api/api-tiktok-sales/online/findByPage',json=body,
-                        headers={'Authorization':'Bearer '+token},timeout=60,follow_redirects=False)
-                    path=directory/f'{number:05d}-activity-{active}.json'
-                    path.write_bytes(activity_response.content);raw=path.read_bytes()
-                    if raw!=activity_response.content:raise OSError('活动状态原件回读不一致')
-                    result['files'].append({'file':str(path.resolve()),'bytes':len(raw),'sha256':sha256(raw).hexdigest(),
-                        'path':'/Api/api-tiktok-sales/online/findByPage','request':body,
-                        'http_status':activity_response.status_code,'received_at':datetime.now(timezone.utc).isoformat()})
-                    activity_response.raise_for_status()
-                    value=activity_response.json(parse_float=Decimal)
-                    if (not isinstance(value,dict) or type(value.get('code')) is not int or value['code']!=0
-                            or type(value.get('count')) is not int or value['count'] not in (0,1)
-                            or not isinstance(value.get('data'),list) or len(value['data'])!=value['count']):
-                        raise ValueError('company_activity_coverage_unverified')
-                    rows=value['data']
-                    if any(not isinstance(row,dict) or row.get('shopName')!=shop or row.get('productId')!=product
-                            or row.get('bloc')!=settings.erp_capture_bloc for row in rows):
-                        raise ValueError('company_activity_scope_mismatch')
-                    if rows:matches[active]=rows[0]
-                if len(matches)!=1:raise ValueError('company_activity_state_conflicting_or_missing')
-                active,parent=next(iter(matches.items()))
                 variant_path='/Api/api-tiktok-sales/online/findProductVariants/'+quote(shop,safe='')+'/'+quote(product,safe='')
                 variant_body={'shopName':shop,'productId':product}
                 variant_response=client.post(ORIGIN+variant_path,json=variant_body,
-                    headers={'Authorization':'Bearer '+token},timeout=60,follow_redirects=False)
-                path=directory/f'{number:05d}-variants.json';path.write_bytes(variant_response.content);raw=path.read_bytes()
-                if raw!=variant_response.content:raise OSError('当前变体原件回读不一致')
-                result['files'].append({'file':str(path.resolve()),'bytes':len(raw),'sha256':sha256(raw).hexdigest(),
-                    'path':variant_path,'request':variant_body,'http_status':variant_response.status_code,
-                    'received_at':datetime.now(timezone.utc).isoformat()})
-                variants_observed=result['files'][-1]['received_at']
-                variant_response.raise_for_status()
+                    headers=auth.collection_headers(),timeout=60,follow_redirects=False)
+                auth.observe_collection_response(variant_response)
+                variants_observed = _archive(directory, result, variant_response, f'{number:05d}-variants.json',
+                                             variant_path, variant_body)
                 value=variant_response.json(parse_float=Decimal)
                 if not isinstance(value,dict) or type(value.get('resp_code')) is not int or value['resp_code']!=0:
                     raise ValueError('current_variant_business_failed')
@@ -119,20 +191,24 @@ def capture_platform_controls(settings,capture,targets,*,client=None,progress=No
                 ids=[identity_text(row.get('sellerSkuId')) for row in variants]
                 if len(ids)!=len(set(ids)) or not items<=set(ids):
                     raise ValueError('current_variant_identity_ambiguous')
-                completed=datetime.now(timezone.utc).isoformat()
                 result['records'].append({'platform_price_observed_at':received,'variants_observed_at':variants_observed,'company_activity_locked':bool(active),'company_parent':_json_values(parent),
                     'current_variants':_json_values(variants),
                     'erp_shop':shop,'product_id':product,'item_ids':sorted(items),
-                    'observed_at':completed,'data':_json_values(projected),'ref':f'{source_id}/{number}'})
+                    # 活动证据早于详情；核心时效从最早观测算起，不能用完成时间刷新它。
+                    'observed_at':activity_observed,'data':_json_values(projected),'ref':f'{source_id}/{number}'})
             except (SourceUnavailable,httpx.HTTPError,ValueError,TypeError,KeyError) as error:
-                result['issues'].append({'code':'platform_current_state_unverified','erp_shop':shop,
-                    'product_id':product,'item_ids':sorted(items),'error_kind':type(error).__name__})
-                if stage=='authentication' or (isinstance(error,httpx.HTTPStatusError)
-                        and error.response.status_code in (401,403)):
+                issue = {'code':'platform_current_state_unverified','erp_shop':shop,
+                         'product_id':product,'item_ids':sorted(items),'error_kind':type(error).__name__}
+                if isinstance(error, httpx.HTTPStatusError):
+                    issue['http_status'] = error.response.status_code
+                result['issues'].append(issue)
+                if isinstance(error, SourceUnavailable) or auth.stopped_http_status is not None:
                     break
     finally:
         private_request.reset(context)
         if owned:client.close()
+    if plans and auth.stopped_http_status is not None:
+        result['stopped_http_status'] = auth.stopped_http_status
     result['acquisition_complete']=len(result['records'])==len(plans) and not result['issues']
     result['completed_at']=datetime.now(timezone.utc).isoformat()
     write_verified(result['artifact_file'],result)

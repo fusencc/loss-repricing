@@ -14,7 +14,7 @@ from app.adapters.base import SourceUnavailable
 from app.adapters.erp_export_mapping import _product_ids, _text, _xlsx_rows
 from app.adapters.erp_order_loss import _number
 from app.adapters.normalization import sku_text
-from app.adapters.sales_auth import ORIGIN, SalesAuth
+from app.adapters.sales_auth import COLLECTION_STOP_STATUSES, ORIGIN, SalesAuth
 from app.adapters.sales_capture import CURRENCY_RATES, _json_values
 from app.adapters.transport_privacy import private_request
 from app.services.erp_capture_store import write_verified
@@ -66,7 +66,10 @@ def _parse_export(content, ids, bloc):
 
 def _export_file(client, auth, ids, bloc):
     def post(path, body):
-        response = client.post(ORIGIN + path, json=body, headers={'Authorization': 'Bearer ' + auth.get_token()})
+        response = client.post(ORIGIN + path, json=body, headers=auth.collection_headers(),
+                               timeout=30, follow_redirects=False)
+        if response.status_code == 429:
+            auth.observe_collection_response(response)
         response.raise_for_status()
         data = response.json()
         if not isinstance(data, dict) or data.get('resp_code') != 0:
@@ -100,7 +103,8 @@ def _export_file(client, auth, ids, bloc):
                 if (url.scheme, url.hostname, url.port) != ('http', '121.46.237.218', 19110) or url.username:
                     raise ValueError('sales_export_download_origin_unverified')
                 content = bytearray()
-                with client.stream('GET', task['excelUrl'], follow_redirects=False) as response:
+                auth.wait_for_request()
+                with client.stream('GET', task['excelUrl'], timeout=30, follow_redirects=False) as response:
                     response.raise_for_status()
                     for chunk in response.iter_bytes():
                         content.extend(chunk)
@@ -116,7 +120,7 @@ def _export_file(client, auth, ids, bloc):
     raise ValueError('sales_export_timeout')
 
 
-def capture_sales_batch(settings, capture, candidates, shop_scopes, *, client=None, progress=None):
+def capture_sales_batch(settings, capture, candidates, shop_scopes, *, client=None, auth=None, progress=None):
     if settings.vendor_api_url.rstrip('/') != ORIGIN:
         raise SourceUnavailable('销售导出地址未确认')
     shops_by_product = defaultdict(lambda: defaultdict(set))
@@ -138,7 +142,7 @@ def capture_sales_batch(settings, capture, candidates, shop_scopes, *, client=No
     ]
     owned = client is None
     client = client or httpx.Client(timeout=30, trust_env=False, follow_redirects=False)
-    auth = SalesAuth(settings, client)
+    auth = auth or SalesAuth(settings, client)
     context = private_request.set(True)
     try:
         for offset in range(0, len(ids), BATCH_SIZE):
@@ -148,11 +152,14 @@ def capture_sales_batch(settings, capture, candidates, shop_scopes, *, client=No
             try:
                 content, task_id, rows = _export_file(client, auth, batch, settings.erp_capture_bloc)
             except (SourceUnavailable, httpx.HTTPError, ValueError, TypeError, KeyError) as error:
-                issues.append({'code': 'sales_batch_unavailable', 'product_ids': batch,
-                               'reason': str(error) if isinstance(error, ValueError) else type(error).__name__})
-                if isinstance(error, SourceUnavailable) or (
-                    isinstance(error, httpx.HTTPStatusError) and error.response.status_code in (401, 403, 429)
-                ):
+                issue = {'code': 'sales_batch_unavailable', 'product_ids': batch,
+                         'reason': str(error) if isinstance(error, ValueError) else type(error).__name__}
+                status = (error.response.status_code if isinstance(error, httpx.HTTPStatusError)
+                          else auth.stopped_http_status)
+                if status is not None:
+                    issue['http_status'] = status
+                issues.append(issue)
+                if isinstance(error, SourceUnavailable) or status in COLLECTION_STOP_STATUSES:
                     break
                 continue
             path = directory / f'{offset // BATCH_SIZE + 1:03d}.xlsx'
@@ -180,9 +187,12 @@ def capture_sales_batch(settings, capture, candidates, shop_scopes, *, client=No
                     if (product, shop) not in matched:
                         issues.append({'code': 'sales_export_shop_product_missing', 'product_id': product,
                                        'shop': shop})
-        if variants:
+        if variants and auth.stopped_http_status is None:
             try:
-                response = client.get(ORIGIN + CURRENCY_RATES, headers={'Authorization': 'Bearer ' + auth.get_token()})
+                response = client.get(ORIGIN + CURRENCY_RATES, headers=auth.collection_headers(),
+                                      timeout=30, follow_redirects=False)
+                if response.status_code == 429:
+                    auth.observe_collection_response(response)
                 response.raise_for_status()
                 raw = response.json(parse_float=Decimal)
                 if not isinstance(raw, list):

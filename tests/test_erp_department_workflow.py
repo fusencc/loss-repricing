@@ -97,9 +97,10 @@ def test_department_finance_batches_follow_sources_without_seller_priority(tmp_p
 
 def test_workflow_continues_after_incomplete_or_failed_department(tmp_path, monkeypatch):
     attempted = []
-    waits = []
+    sessions = []
 
-    def run_department(settings, *, department, progress):
+    def run_department(settings, *, department, progress, web_session, client, auth):
+        sessions.append((web_session, client, auth))
         attempted.append(department)
         if department == 'Tiktok一部':
             return {'status': 'blocked', 'ready_prices': 0, 'stopped_by_rate_limit': True}
@@ -108,13 +109,14 @@ def test_workflow_continues_after_incomplete_or_failed_department(tmp_path, monk
         return {'status': 'completed', 'ready_prices': 1}
 
     monkeypatch.setattr(erp_workflow, '_run_workflow', run_department, raising=False)
-    monkeypatch.setattr(erp_workflow, 'sleep', waits.append)
     result = erp_workflow.run_workflow(Settings(_env_file=None, runtime_dir=tmp_path))
     assert attempted == ['Tiktok一部', 'Tiktok五部', 'Tiktok十二部', 'Tiktok二十二部']
     assert [dept['status'] for dept in result['departments']] == ['blocked', 'failed', 'completed', 'completed']
     assert result['status'] == 'needs_attention'
     assert result['ready_prices'] == 2
-    assert waits == [16]
+    assert all(all(actual is expected for actual, expected in zip(session, sessions[0]))
+               for session in sessions)
+    assert sessions[0][1].is_closed
     assert not result['execution_allowed']
     assert json.loads((Path(result['artifact_dir']) / 'result.json').read_text()) == result
 
@@ -168,3 +170,74 @@ def test_department_archive_scope_is_enforced_by_pricing(bad_scope):
     else:
         assert 'loss_allocatable' not in report['evaluation_complete_sources']
         assert report['summary']['ready_prices'] == 0
+
+
+def test_round_reuses_real_erp_and_sales_authentication_and_clock(tmp_path, monkeypatch):
+    from app.adapters import erp_bulk_capture, sales_auth
+    from app.adapters.official_price_logs import capture_recent_price_changes
+    from app.adapters.sales_platform_capture import capture_platform_controls
+    from app.domain.types import VariantKey
+    from app.adapters.erp_order_headers import capture_order_headers
+
+    erp_clock, sales_clock = [0], [0]
+    def erp_sleep(seconds):
+        erp_clock[0] += seconds
+    def sales_sleep(seconds):
+        sales_clock[0] += seconds
+    monkeypatch.setattr(erp_bulk_capture, 'monotonic', lambda: erp_clock[0])
+    monkeypatch.setattr(erp_bulk_capture, 'sleep', erp_sleep)
+    monkeypatch.setattr(sales_auth, 'monotonic', lambda: sales_clock[0])
+    monkeypatch.setattr(sales_auth, 'sleep', sales_sleep)
+    erp_calls, sales_calls = [], []
+    def erp_handler(request):
+        erp_calls.append((request.url.path, erp_clock[0]))
+        if request.url.path.endswith('/login'):
+            return httpx.Response(200, json={'code':200,'data':{'accessToken':'ERP-TEST'}})
+        assert request.headers['authorization'] == 'ERP-TEST'
+        body = json.loads(request.content)
+        assert body['filter1'] == 'r.orderid'
+        row = {'orderid':'ORDER','shopid':'SHOP','shopname':'SHOPPH','platform':'TikTok'}
+        return httpx.Response(200, json={'code':0,'data':{'records':[row],'total':1}})
+
+    def sales_handler(request):
+        sales_calls.append((request.url.path, sales_clock[0]))
+        if request.url.path.endswith('/token'):
+            return httpx.Response(200, json={'access_token':'SALES-TEST','expires_in':3600})
+        assert request.headers['authorization'] == 'Bearer SALES-TEST'
+        if request.url.path.endswith('/findByPage'):
+            assert json.loads(request.content)['productIdStr'] == 'PRODUCT'
+            return httpx.Response(200, json={'code':0,'count':0,'data':[]})
+        return httpx.Response(200,json={'resp_code':0,'datas':[{'sellerSkuId':'ITEM','count':0}]})
+
+    real_client = httpx.Client
+    clients = [
+        real_client(transport=httpx.MockTransport(sales_handler)),
+        real_client(transport=httpx.MockTransport(erp_handler)),
+    ]
+    mock_clients = iter(clients)
+    monkeypatch.setattr(httpx, 'Client', lambda **kwargs: next(mock_clients))
+    key = VariantKey(platform='TikTok',shop_id='SHOP',site='PH',product_id='PRODUCT',
+                     item_id='ITEM',sku='SKU',warehouse='WAREHOUSE')
+
+    def run_department(settings, *, department, progress, web_session, client, auth):
+        capture = {'capture_id':department,'groups':[{'candidate_order_ids':['ORDER']}]}
+        # 两个连续步骤及下一部门共用同一网页登录和间隔。
+        for _ in range(2):
+            assert capture_order_headers(settings,capture,web_session=web_session)['acquisition_complete']
+        assert capture_recent_price_changes(settings,[key],client=client,auth=auth)['acquisition_complete']
+        platform = capture_platform_controls(settings,capture,
+            [{'erp_shop':'SHOPPH','product_id':'PRODUCT','item_id':'ITEM'}],client=client,auth=auth)
+        assert platform['issues'][0]['code'] == 'company_activity_state_conflicting_or_missing'
+        return {'status':'completed','ready_prices':0}
+
+    monkeypatch.setattr(erp_workflow, '_run_workflow', run_department)
+    settings = Settings(_env_file=None,runtime_dir=tmp_path,
+                        erp_username='U',erp_password='P',vendor_username='U',vendor_password='P',
+                        erp_capture_request_interval_seconds=16,sales_request_interval_seconds=2)
+    result = erp_workflow.run_workflow(settings)
+    assert result['status'] == 'completed'
+    assert len(erp_calls) == 9 and sum(path.endswith('/login') for path, _ in erp_calls) == 1
+    assert [when for _,when in erp_calls] == list(range(0, 9 * 16, 16))
+    assert len(sales_calls) == 13 and sum(path.endswith('/token') for path, _ in sales_calls) == 1
+    assert [when for _,when in sales_calls[1:]] == list(range(0, 24, 2))
+    assert all(client.is_closed for client in clients)

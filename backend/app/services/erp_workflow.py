@@ -4,11 +4,12 @@ from pathlib import Path
 from uuid import uuid4
 import json
 from hashlib import sha256
-from time import sleep
+import httpx
 
 from app.adapters.base import SourceUnavailable
 from app.adapters.normalization import source_time
-from app.adapters.erp_bulk_capture import ERP_DEPARTMENTS, capture_erp_bulk
+from app.adapters.erp_bulk_capture import ERP_DEPARTMENTS, _session, capture_erp_bulk
+from app.adapters.sales_auth import SalesAuth
 from app.adapters.erp_web import ErpAccountRateLimited
 from app.adapters.erp_rates import query_current_erp_fx
 from app.adapters.erp_detail_capture import capture_erp_details
@@ -29,9 +30,10 @@ from app.services.erp_capture_store import load_capture, rebuild_clean_capture, 
 from app.services.erp_pricing import load_pricing_preview, save_pricing_preview
 from app.services.erp_seller_candidates import summarize_seller_candidates
 
-def filter_candidate_history(settings, targets):
+def filter_candidate_history(settings, targets, *, client=None, auth=None):
     """按子商品查询近72小时官方历史；仅明确有调价记录时排除，未知继续。"""
-    history = (capture_recent_price_changes(settings,[VariantKey.model_validate(t['key']) for t in targets])
+    history = (capture_recent_price_changes(settings,[VariantKey.model_validate(t['key']) for t in targets],
+                                             client=client, auth=auth)
         if targets else None)
     eligible, filtered = [], []
     for target in targets:
@@ -49,7 +51,8 @@ def filter_candidate_history(settings, targets):
 def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, progress=None):
     """按部门串行完成只读采集和算价，显式指定采集编号时回放单批。"""
     if capture_id is not None:
-        return _run_workflow(settings, capture_id=capture_id, evidence=evidence, exports=exports, progress=progress)
+        rebuild_clean_capture(settings.runtime_dir, capture_id)
+        return _evaluate_capture(settings, capture_id, replay=True, evidence=evidence, exports=exports, progress=progress)
     if evidence is not None or exports is not None:
         raise ValueError('补充文件只可用于明确指定采集编号的离线对账')
 
@@ -63,22 +66,23 @@ def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, prog
     }
     manifest = directory / 'result.json'
     write_verified(manifest, summary)
-    for department in ERP_DEPARTMENTS:
-        if departments and departments[-1].get('stopped_by_rate_limit'):
-            # 新部门开始自己的任务，仍遵守同一 ERP 账号的请求间隔。
-            sleep(settings.erp_capture_request_interval_seconds)
-        if progress:
-            progress(f'开始处理 {department}。')
-        try:
-            result = _run_workflow(settings, department=department, progress=progress)
-        except Exception as error:
-            # 单部门异常在调度边界留痕，不能终止其他独立部门。
-            result = _workflow_failure(error)
-        departments.append({**result, 'department': department})
-        summary['ready_prices'] += result['ready_prices']
-        write_verified(manifest, summary)
-        if progress:
-            progress(f"{department} 处理结果：{result['status']}。")
+    with (httpx.Client(timeout=60, trust_env=False, follow_redirects=False) as client,
+          _session(settings) as web_session):
+        auth = SalesAuth(settings, client)
+        for department in ERP_DEPARTMENTS:
+            if progress:
+                progress(f'开始处理 {department}。')
+            try:
+                result = _run_workflow(settings, department=department, progress=progress,
+                                       web_session=web_session, client=client, auth=auth)
+            except Exception as error:
+                # 单部门异常在调度边界留痕，不能终止其他独立部门。
+                result = _workflow_failure(error)
+            departments.append({**result, 'department': department})
+            summary['ready_prices'] += result['ready_prices']
+            write_verified(manifest, summary)
+            if progress:
+                progress(f"{department} 处理结果：{result['status']}。")
     if all(department['status'] == 'completed' for department in departments):
         summary['status'] = 'completed'
     elif summary['ready_prices'] or any(department['status'] == 'completed' for department in departments):
@@ -96,21 +100,19 @@ def _workflow_failure(error):
             'stopped_by_rate_limit': isinstance(error, ErpAccountRateLimited)}
 
 
-def _run_workflow(settings, *, department=None, capture_id=None, evidence=None, exports=None, progress=None):
-    if capture_id is not None:
-        rebuild_clean_capture(settings.runtime_dir, capture_id)
-        return _evaluate_capture(settings, capture_id, replay=True, evidence=evidence, exports=exports, progress=progress)
-
+def _run_workflow(settings, *, department, web_session, client, auth, progress=None):
     # 每批只绑定启动时的当日检查；同日后续批次再补查失败的范围。
-    daily_fees = refresh_daily_fees(settings)
-    collected = capture_erp_bulk(settings, department=department, progress=progress)
+    daily_fees = refresh_daily_fees(settings, client=client, auth=auth)
+    collected = capture_erp_bulk(settings, department=department, progress=progress,
+                                 web_session=web_session)
     saved = save_capture(settings.runtime_dir, collected)
     capture_id = saved['capture_id']
     try:
         # 原件成功但清洗失败时不得让后续空文件看起来像已完成。
         if saved['cleaning_status'] != 'saved':
             raise OSError('原件已存档，清洗失败；请按采集编号重建清洗')
-        return _evaluate_capture(settings, capture_id, replay=False, progress=progress, daily_fees=daily_fees)
+        return _evaluate_capture(settings, capture_id, replay=False, progress=progress, daily_fees=daily_fees,
+                                 web_session=web_session, client=client, auth=auth)
     except Exception as error:
         # 算价或清洗失败时，仍保留已经写入的采集编号供核对。
         return {**_workflow_failure(error), 'capture_id': capture_id, 'department': department,
@@ -118,7 +120,8 @@ def _run_workflow(settings, *, department=None, capture_id=None, evidence=None, 
                 'stopped_by_rate_limit': saved.get('stopped_by_rate_limit', False) or isinstance(error, ErpAccountRateLimited)}
 
 
-def _evaluate_capture(settings, capture_id, *, replay, evidence=None, exports=None, progress=None, daily_fees=None):
+def _evaluate_capture(settings, capture_id, *, replay, evidence=None, exports=None, progress=None, daily_fees=None,
+                      web_session=None, client=None, auth=None):
     capture = load_capture(settings.runtime_dir, capture_id)
     limited = capture.get('stopped_by_rate_limit', False)
     empty = capture['capture_complete'] and not any(group['candidate_order_ids'] for group in capture['groups'])
@@ -153,7 +156,7 @@ def _evaluate_capture(settings, capture_id, *, replay, evidence=None, exports=No
     sales_status = 'not_requested'
     fx_status = 'file_evidence' if evidence is not None else 'not_requested'
     if not replay:
-        headers = capture_order_headers(settings, capture, progress=progress)
+        headers = capture_order_headers(settings, capture, progress=progress, web_session=web_session)
         content = Path(headers['artifact_file']).read_bytes()
         headers = json.loads(content)
         headers_ref = {key:headers[key] for key in ('source_id','erp_capture_id','synthetic','sample_only',
@@ -161,7 +164,7 @@ def _evaluate_capture(settings, capture_id, *, replay, evidence=None, exports=No
         headers_ref['sha256'] = sha256(content).hexdigest()
         headers_status = 'saved' if headers['acquisition_complete'] else 'partial'
         try:
-            native = capture_erp_details(settings, capture, progress=progress)
+            native = capture_erp_details(settings, capture, progress=progress, web_session=web_session)
         except SourceUnavailable:
             native_status = 'unavailable'
         else:
@@ -175,7 +178,8 @@ def _evaluate_capture(settings, capture_id, *, replay, evidence=None, exports=No
             erp_only = prepare_order_losses(capture, native, order_headers=headers)
             candidates = select_export_candidates(capture, erp_only['proofs'].keys() & erp_only['shop_scopes'].keys())
             try:
-                sales = capture_sales_batch(settings, capture, candidates, erp_only['shop_scopes'], progress=progress)
+                sales = capture_sales_batch(settings, capture, candidates, erp_only['shop_scopes'],
+                                            progress=progress, client=client, auth=auth)
             except SourceUnavailable:
                 sales_status = 'unavailable'
             else:
@@ -198,11 +202,13 @@ def _evaluate_capture(settings, capture_id, *, replay, evidence=None, exports=No
                         'erp_sku':order_preparation['proofs'][row['order_id']]['erp_sku'],'main_sku':row['main_sku']}
                     pricing_targets.append({'erp_shop':row['erp_shop'],'erp_sku':target['erp_sku'],
                         'main_sku':row['main_sku'],'key':row['target']})
-            official_history, pricing_targets, history_filter = filter_candidate_history(settings, pricing_targets)
+            official_history, pricing_targets, history_filter = filter_candidate_history(
+                settings, pricing_targets, client=client, auth=auth)
             platform_targets = [{'erp_shop':t['erp_shop'],'product_id':t['key']['product_id'],
                 'item_id':t['key']['item_id']} for t in pricing_targets]
             try:
-                platform = capture_platform_controls(settings,capture,platform_targets,progress=progress)
+                platform = capture_platform_controls(settings,capture,platform_targets,progress=progress,
+                                                     client=client,auth=auth)
             except SourceUnavailable:
                 platform_status = 'unavailable'
             else:
@@ -226,7 +232,7 @@ def _evaluate_capture(settings, capture_id, *, replay, evidence=None, exports=No
         if pricing_targets and all(source is not None for source in (sales,platform,fixed_fees)):
             # 参考不属于核心来源合同；其issues不合入在线准备或待处理清单。
             price_references = capture_sku_price_references(settings,capture,pricing_targets,
-                platform=platform,progress=progress)
+                platform=platform,progress=progress,client=client,auth=auth)
             online_preparation = prepare_online_states(capture,pricing_targets,sales=sales,
                 platform=platform,local_history=local_history,fixed_fees=fixed_fees,
                 official_history=official_history,price_references=price_references)

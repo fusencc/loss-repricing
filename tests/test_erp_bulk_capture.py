@@ -478,7 +478,7 @@ def test_default_bulk_uses_four_verified_candidate_sources(tmp_path):
         assert path.endswith('/dowDeficitOrder') and body['financecheck'] == '3'
     for path, body in calls[2:]:
         assert path == '/Api/order/list' and body['jzfh'] == '1'
-        assert 'financecheck' not in body and body['limit'] == 10000
+        assert 'financecheck' not in body and body['limit'] == 20
     for group in result['groups']:
         assert group['list_complete']
         assert group['status_discrepancies'] == []
@@ -486,20 +486,16 @@ def test_default_bulk_uses_four_verified_candidate_sources(tmp_path):
         assert group['batches'][0]['scope_check']['unexpected'] == []
 
 
-def test_blocked_pool_fits_one_verified_large_page_without_time_drift():
+def test_blocked_small_pages_have_disjoint_verified_ranges():
     from app.adapters.erp_bulk_capture import _blocked_ids
-
-    rows = [{'orderid':f'B{i:05d}', 'status':4, 'platform':'Tiktok', 'jzfh':'1'}
-            for i in range(2467)]
+    rows = [{'orderid': f'B{i}', 'status': 4, 'platform': 'Tiktok', 'jzfh': '1'} for i in range(21)]
     def post(path, body):
-        # 实际业务在翻页间处理订单：小页的第二页总数已变。
-        total = 2467 if body['page'] == 1 else 2466
         start = (body['page'] - 1) * body['limit']
-        return {'total':total, 'records':rows[:total][start:start+body['limit']]}
+        return {'total': 21, 'records': rows[start:start+body['limit']]}
     group = {'status':4, 'filters':{}, 'pages':[], 'total':None}
     orders = _blocked_ids(post, group)
-    assert len(orders) == 2467
-    assert group['pages'] == [{'page':1, 'total':2467, 'rows':2467}]
+    assert len(orders) == 21
+    assert [(p['start'],p['end']) for p in group['pages'] if p['verified']] == [(0,20),(20,21)]
 
 
 @pytest.mark.parametrize('drift', [False, True])
@@ -518,10 +514,10 @@ def test_blocked_pagination_preserves_full_pool_or_refuses_drift(tmp_path, drift
         if path == '/Api/order/list':
             pages.append(body['page'])
             assert body['jzfh'] == '1' and 'financecheck' not in body
-            start, stop = (0,10000) if body['page'] == 1 else (10000,10001)
+            start, stop = (0,20) if body['page'] == 1 else (20,21)
             records = [{'orderid':f'B{i:04d}','status':3,'platform':'Tiktok','jzfh':'1'}
                        for i in range(start,stop)]
-            total = 10002 if drift and body['page'] == 2 else 10001
+            total = 22 if drift and body['page'] == 2 else 21
             return httpx.Response(200, json={'code':0,'data':{'total':total,'records':records}})
         if path.endswith('/asyncOrderListDownload'):
             submissions.append(body)
@@ -536,11 +532,11 @@ def test_blocked_pagination_preserves_full_pool_or_refuses_drift(tmp_path, drift
     group = result['groups'][0]
     assert pages == [1,2]
     assert group['list_complete'] is not drift
+    assert submissions == [{'orderIdList':['B0000']}]
+    assert group['batches'][0]['status'] == 'complete'
     if drift:
-        assert submissions == []
-        assert group['candidate_order_ids'] == []
-        assert '分页总数' in group['error']
+        assert len(group['candidate_order_ids']) == 20 and group['failed_pages'] == [2]
+        assert '分页总数' in group['list_error']['error'] and not result['selection_complete']
     else:
-        assert len(group['candidate_order_ids']) == 10001
-        assert submissions == [{'orderIdList':['B0000']}]
+        assert len(group['candidate_order_ids']) == 21
         assert result['selection_complete'] and not result['capture_complete']

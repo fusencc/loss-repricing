@@ -30,20 +30,26 @@ def peer(i, quantity=1, retail='100', discount='50', **extra):
 
 
 def capture_reference(tmp_path, monkeypatch, rows, *, fail_product=None,
-                      core_age_seconds=0, query_clock=None, own_variant=None):
+                      core_age_seconds=0, query_clock=None, own_variant=None, older_core=False, query_seconds=31):
     from app.adapters.sales_auth import SalesAuth
     from app.adapters.sales_price_reference import capture_sku_price_references
-    monkeypatch.setattr(SalesAuth, 'get_token', lambda self: 'synthetic-token')
+    monkeypatch.setattr(SalesAuth, 'get_token', lambda self, **kwargs: 'synthetic-token')
     settings, capture, targets, platform = setup_reference(tmp_path)
     platform['records'][0]['observed_at']=(datetime.now(timezone.utc)-timedelta(seconds=core_age_seconds)).isoformat()
     if own_variant:
         platform['records'][0]['current_variants'].append(own_variant)
+    if older_core:
+        targets.append(dict(targets[0], erp_shop='OLDERPH',
+                            key=dict(targets[0]['key'], product_id='OLD', item_id='OLDER')))
+        platform['records'].append({'erp_shop':'OLDERPH', 'product_id':'OLD',
+            'observed_at':(datetime.now(timezone.utc)-timedelta(seconds=290)).isoformat(),
+            'current_variants':[{'sellerSkuId':'OLDER','localSellerSku':'S1'}]})
     requests = []
     def handler(request):
         import json
         body = json.loads(request.content); requests.append((request.url.path, body))
         if query_clock is not None:
-            query_clock[0]+=31
+            query_clock[0]+=query_seconds
         if request.url.path.endswith('/online/findByPage'):
             parents = [dict(shopName=v['shopName'], productId=v['productId'],
                 localMainSku=v.get('_parent_main', 'M1'), productStatus=4, bloc=settings.erp_capture_bloc,
@@ -145,3 +151,20 @@ def test_another_spec_on_the_target_link_is_not_another_comparable_link(tmp_path
     _, ref, _=capture_reference(tmp_path,monkeypatch,[own,peer(1),peer(2)],own_variant=own)
     assert ref is None
 
+
+
+def test_fewer_than_three_other_links_never_queries_variants(tmp_path, monkeypatch):
+    own = peer(9)
+    own.update(shopName='TARGETPH', productId='P0')
+    _, ref, requests = capture_reference(tmp_path, monkeypatch, [own, peer(1), peer(2)])
+    assert ref is None
+    assert len(requests) == 1 and requests[0][0].endswith('/online/findByPage')
+
+
+def test_optional_reference_respects_earliest_remaining_core_freshness(tmp_path, monkeypatch):
+    from app.adapters import sales_price_reference
+    clock = [0]
+    monkeypatch.setattr(sales_price_reference,'monotonic',lambda:clock[0])
+    _, ref, requests = capture_reference(tmp_path,monkeypatch,[peer(1),peer(2),peer(3)],
+                                         query_clock=clock,query_seconds=11,older_core=True)
+    assert ref is None and len(requests) == 1

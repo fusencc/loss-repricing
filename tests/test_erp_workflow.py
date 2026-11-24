@@ -97,11 +97,25 @@ def test_fresh_collection_runs_download_clean_evaluate_and_archive(tmp_path, mon
     collected = {}
     _, fee_rows, _, fee_client = setup_fees(tmp_path)
     fee_rows['_invalid'] = list(fee_rows)
-    monkeypatch.setattr(erp_workflow, 'refresh_daily_fees',
-        lambda settings: refresh_daily_fees(settings, client=fee_client, synthetic=True))
+    connections = {}
+    def refresh(settings, **kwargs):
+        connections['fees'] = (kwargs['client'], kwargs['auth'])
+        return refresh_daily_fees(settings, client=fee_client, synthetic=True)
+    monkeypatch.setattr(erp_workflow, 'refresh_daily_fees', refresh)
+
+    def observe_stage(name, keys):
+        capture_stage = getattr(erp_workflow, name)
+        def observed(*args, **kwargs):
+            connections[name] = tuple(kwargs[key] for key in keys)
+            return capture_stage(*args, **kwargs)
+        monkeypatch.setattr(erp_workflow, name, observed)
+    observe_stage('capture_order_headers', ('web_session',))
+    observe_stage('capture_erp_details', ('web_session',))
+    observe_stage('capture_sales_batch', ('client', 'auth'))
 
     # 替代外部 HTTP 服务；实际采集器、XLSX读取、归档、SQLite及规则均执行。
     def collect(settings, **kwargs):
+        connections['bulk'] = (kwargs['web_session'],)
         capture, _ = run(settings.runtime_dir)
         capture['synthetic'] = True
         capture['department'] = kwargs['department']
@@ -124,6 +138,9 @@ def test_fresh_collection_runs_download_clean_evaluate_and_archive(tmp_path, mon
     monkeypatch.setattr(erp_workflow, 'capture_recent_price_changes',
         lambda *args,**kwargs:pytest.fail('没有可算价目标时不应查询调价日志'))
     workflow = erp_workflow.run_workflow(Settings(_env_file=None, runtime_dir=tmp_path))
+    assert connections['bulk'][0] is not None
+    assert connections['bulk'] == connections['capture_order_headers'] == connections['capture_erp_details']
+    assert connections['fees'] == connections['capture_sales_batch']
     result, = workflow['departments']
     assert result['mode'] == 'capture' and result['status'] == 'blocked'
     assert result['summary']['unique_orders'] == 1

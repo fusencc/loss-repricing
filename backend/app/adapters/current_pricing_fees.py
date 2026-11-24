@@ -7,7 +7,6 @@ from hashlib import sha256
 from pathlib import Path
 import json
 import sqlite3
-from time import sleep
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -33,10 +32,9 @@ def _json(value):
     return json.dumps(_json_values(value), ensure_ascii=False, sort_keys=True, separators=(',', ':'))
 
 
-def _collect(settings, directory, client, *, skip_scopes=()):
+def _collect(settings, directory, client, auth, *, skip_scopes=()):
     """仅查询尚未成功的范围；店铺仅保留匹配费用所需的属性。"""
     result = {'raw': {}, 'issues': [], 'files': [], 'warnings': []}
-    auth = SalesAuth(settings, client)
     context = private_request.set(True)
     specs = [('overseas', OVERSEAS, {'blocNames': [settings.erp_capture_bloc]}),
              ('departments', DEPARTMENT, {'blocName': settings.erp_capture_bloc, 'authType': 2}),
@@ -52,11 +50,11 @@ def _collect(settings, directory, client, *, skip_scopes=()):
             limit = 1000 if name == 'shops' else 100
             try:
                 while True:
-                    token = auth.get_token()
-                    sleep(settings.sales_request_interval_seconds)
                     body = filters if name == 'shops' else {**filters, 'page': page, 'limit': limit}
                     response = client.post(ORIGIN + path, json=body,
-                        headers={'Authorization': 'Bearer ' + token}, timeout=40, follow_redirects=False)
+                        headers=auth.collection_headers(), timeout=40, follow_redirects=False)
+                    if response.status_code == 429:
+                        auth.observe_collection_response(response)
                     response.raise_for_status()
                     if not 200 <= response.status_code < 300:
                         raise ValueError('费用接口重定向未确认')
@@ -116,7 +114,10 @@ def _collect(settings, directory, client, *, skip_scopes=()):
                 result['raw'][name] = sorted(rows, key=lambda r: str(r['id']))
             except (httpx.HTTPError, SourceUnavailable, ValueError, KeyError, TypeError, ArithmeticError):
                 result['raw'][name] = []
-                result['issues'].append({'scope': name, 'code': 'daily_' + name + '_unavailable'})
+                issue = {'scope': name, 'code': 'daily_' + name + '_unavailable'}
+                if auth.stopped_http_status is not None:
+                    issue['http_status'] = auth.stopped_http_status
+                result['issues'].append(issue)
     finally:
         private_request.reset(context)
     return _json_values(result)
@@ -129,7 +130,7 @@ def _read_daily(checked):
     return {**json.loads(raw), **checked}
 
 
-def refresh_daily_fees(settings, *, client=None, now=None, synthetic=False):
+def refresh_daily_fees(settings, *, client=None, auth=None, now=None, synthetic=False):
     """持有SQLite事务锁，复用当日完整结果；当日未完成时只补查缺失项。"""
     if settings.vendor_api_url.rstrip('/') != ORIGIN:
         raise SourceUnavailable('销售费用来源地址尚未确认')
@@ -159,7 +160,8 @@ def refresh_daily_fees(settings, *, client=None, now=None, synthetic=False):
         owned = client is None
         active = client or httpx.Client(timeout=40, trust_env=False, follow_redirects=False)
         try:
-            collected = _collect(settings, directory, active, skip_scopes=successful)
+            collected = _collect(settings, directory, active, auth or SalesAuth(settings, active),
+                                 skip_scopes=successful)
         finally:
             if owned: active.close()
         content = {'raw': {**successful, **collected['raw']}, 'issues': collected['issues']}

@@ -24,6 +24,8 @@ def test_export_download_verifies_coverage_and_uses_original_headers(tmp_path):
     from openpyxl import Workbook
 
     from app.adapters.sales_batch_export import COLUMNS, EXPORT, TASKS, _export_file
+    from app.adapters.sales_auth import SalesAuth
+    from app.config import Settings
 
     first, second = '1234567890123456701', '1234567890123456702'
     book = Workbook()
@@ -36,14 +38,12 @@ def test_export_download_verifies_coverage_and_uses_original_headers(tmp_path):
     book.save(buffer)
     book.close()
 
-    class Auth:
-        def get_token(self):
-            return 'test-token'
-
     calls = []
     def route(request):
         path = request.url.path
         calls.append(path)
+        if path.endswith('/token'):
+            return httpx.Response(200, json={'access_token':'test-token','expires_in':3600})
         if path == EXPORT:
             import json
             assert json.loads(request.content)['productIdStr'].split()[0] == first
@@ -56,12 +56,14 @@ def test_export_download_verifies_coverage_and_uses_original_headers(tmp_path):
         return httpx.Response(200, content=buffer.getvalue())
 
     with httpx.Client(transport=httpx.MockTransport(route)) as client:
-        _, task_id, rows = _export_file(client, Auth(), [first, second], '集团二部')
+        auth = SalesAuth(Settings(_env_file=None,vendor_username='U',vendor_password='P',
+                                  sales_request_interval_seconds=0),client)
+        _, task_id, rows = _export_file(client, auth, [first, second], '集团二部')
         assert task_id == '1'
         assert [row['商品ID'] for _, row in rows] == [first + '0', second + '0']
         assert rows[0][1]['VAT费率'] == 7.5
         with pytest.raises(ValueError, match='sales_export_outside_request'):
-            _export_file(client, Auth(), [first, '1234567890123456703'], '集团二部')
+            _export_file(client, auth, [first, '1234567890123456703'], '集团二部')
 
 
 def test_official_history_filters_candidates_before_online_preparation(monkeypatch):
@@ -77,7 +79,7 @@ def test_official_history_filters_candidates_before_online_preparation(monkeypat
     protected, allowed = target('protected'), target('allowed')
     calls = []
 
-    def recent(settings, keys):
+    def recent(settings, keys, **kwargs):
         calls.append('official-history')
         assert [key.item_id for key in keys] == ['protected', 'allowed']
         return 'official-source'

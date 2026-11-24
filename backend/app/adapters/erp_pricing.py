@@ -91,6 +91,9 @@ class CaptureGroup(BaseModel):
     candidate_order_ids: list[Identifier]
     rows: list[FinanceRow]
     batches: list[ExportBatch]
+    missing_order_ids: list[Identifier] = Field(default_factory=list)
+    status_discrepancies: list[dict] = Field(default_factory=list)
+    failed_pages: list = Field(default_factory=list)
 
     def scope_bloc(self, department=None, salesperson=None):
         kind, expected_status = SOURCES[self.source]
@@ -129,6 +132,14 @@ class CaptureGroup(BaseModel):
                 return None
             bloc = self.filters.get("blocs")
         return bloc if isinstance(bloc, str) and bloc.strip() else None
+
+    @staticmethod
+    def row_in_scope(row, bloc, department, salesperson):
+        fields = row.fields
+        return (bloc is not None and fields.order_id == row.orderid and fields.bloc == bloc
+                and fields.platform.casefold() == 'tiktok'
+                and (salesperson is None or fields.salesperson == salesperson.name)
+                and (department is None or (fields.department or '').casefold() == department.casefold()))
 
     def finance_coverage(self, bloc, department=None, salesperson=None):
         ids = set(self.candidate_order_ids)
@@ -641,7 +652,9 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
                 continue
             if problem := order_problem or _line_problem(line, len(order.lines), sales_conflicts):
                 _add_issue(issues, order_id, sources, problem, line)
-                held_targets.add(line.mapping.key.target_identity())
+                # 实时订单状态冲突时，该订单不能作为当前亏损样本；独立正常订单即使同 SKU 也不受影响。
+                if live is None or problem != 'order_status_conflict':
+                    held_targets.add(line.mapping.key.target_identity())
                 continue
             row_id = json.dumps([order_id, line.detail_id], ensure_ascii=False, separators=(",", ":"))
             references[row_id] = {

@@ -95,7 +95,15 @@ def _decision_key(group, states) -> VariantKey | None:
 
 def evaluate(snapshot: Snapshot, now: datetime) -> list[Decision]:
     """纯计算，按在线子 SKU 产出一条判定，同一身份的仓配冲突不会产生两条提价建议。"""
-    batch_problem = snapshot_problem(snapshot, now)
+    return _evaluate(snapshot, now, snapshot_problem(snapshot, now))
+
+
+def evaluate_erp_readonly_preview(snapshot: Snapshot, now: datetime) -> list[Decision]:
+    """实时 ERP 预览的订单已逐批核对；只免除四名单齐备条件，不改变汇率和日期检查。"""
+    return _evaluate(snapshot, now, _snapshot_date_fx_problem(snapshot, now))
+
+
+def _evaluate(snapshot: Snapshot, now: datetime, batch_problem) -> list[Decision]:
     conflicted_sales = conflicting_main_sku_scopes(snapshot.online, now, business_date=snapshot.business_date)
     candidate_groups: dict[str, list[SourceLine | CandidateSourceIssue]] = defaultdict(list)
     online_groups: dict[str, list[OnlineState]] = defaultdict(list)
@@ -175,6 +183,10 @@ def snapshot_problem(snapshot: Snapshot, now: datetime, required_business_date: 
     sources = snapshot.complete_sources
     if len(sources) != len(REQUIRED_SOURCES) or set(sources) != REQUIRED_SOURCES:
         return "incomplete_sources", "ERP 四份候选来源尚未完整齐备"
+    return _snapshot_date_fx_problem(snapshot, now, required_business_date)
+
+
+def _snapshot_date_fx_problem(snapshot: Snapshot, now: datetime, required_business_date: date | None = None):
     today = now.astimezone(BEIJING).date()
     business_date = snapshot.business_date
     # 只容许完整的上一日快照在午夜后短时评估；采集日、业务日与汇率使用日仍须同属一批。

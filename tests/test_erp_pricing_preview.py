@@ -521,5 +521,38 @@ def test_status_changed_unknown_product_is_skipped_without_holding_its_shop(sour
                 row['fields']['订单状态']='作废'
     report=prepare_pricing(capture,order_preparation=prep).report
     assert len(report['evaluation_complete_sources'])==4
-    assert report['summary']['normalized_detail_lines']==1
+    assert report['summary']['normalized_detail_lines']==2
     assert any(row['order_id']=='000003' and row['code']=='order_status_conflict' for row in report['issues'])
+
+
+def test_live_changed_status_excludes_only_that_order_from_same_sku_minimum(source_files):
+    from copy import deepcopy
+    from app.adapters.erp_pricing import prepare_pricing
+    capture, evidence = source_files
+    prep = live_scoped_preparation(capture, evidence)
+    mapping = prep['orders'][0]['lines'][0]['mapping']
+    prep['orders'][1]['lines'][0]['mapping'] = deepcopy(mapping)
+    for group in capture['groups']:
+        for row in group['rows']:
+            if row['orderid'] == '000002':
+                row['fields']['店铺'] = mapping['erp_shop']
+                row['current_status_matches_source'] = False
+    report = prepare_pricing(capture, order_preparation=prep).report
+    assert len(report['evaluation_complete_sources']) == 4
+    assert [report['references']['lines'][rid]['order_id'] for rid in report['references']['retained_row_ids']] == ['000001']
+    assert any(row['code'] == 'order_status_conflict' and row['order_id'] == '000002' for row in report['issues'])
+
+
+def test_missing_live_mapping_is_local_but_missing_candidate_list_is_not(source_files):
+    from app.adapters.erp_pricing import prepare_pricing
+    capture, evidence = source_files
+    prep = live_scoped_preparation(capture, evidence)
+    prep['orders'][0]['lines'][0]['mapping'] = None
+    report = prepare_pricing(capture, order_preparation=prep).report
+    assert len(report['evaluation_complete_sources']) == 4
+    assert any(row['code'] == 'missing_online_mapping' and row['order_id'] == '000001' for row in report['issues'])
+    assert [report['references']['lines'][rid]['order_id'] for rid in report['references']['retained_row_ids']] == ['000002']
+    next(g for g in capture['groups'] if g['source'] == 'blocked_allocatable')['list_complete'] = False
+    report = prepare_pricing(capture, order_preparation=prep).report
+    assert 'blocked_allocatable' not in report['evaluation_complete_sources']
+    assert any('禁止发货 × 可配货' in reason for reason in report['global_issues'])
