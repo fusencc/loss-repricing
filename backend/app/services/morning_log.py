@@ -122,7 +122,11 @@ def publish_morning_log(config, filename):
     if config.ding_tk_morning_log_folder:
         if config.ding_tk_morning_log_folder == config.ding_cancellation_log_folder:
             raise ValueError('TK亏损提价与作废订单日志必须使用各自的钉盘目录')
-        publish_workbook(config.ding_tk_morning_log_folder, filename)
+        if config.ding_tk_drive_space_id:
+            from app.adapters.dingtalk_drive import publish_tk_workbook
+            publish_tk_workbook(config, filename)
+        else:
+            publish_workbook(config.ding_tk_morning_log_folder, filename)
 
 
 

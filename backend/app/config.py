@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     live_writer_exclusive: bool = False
     ding_alert_userid: str = ""  # 管理员告警的独立机器人私聊目标，不借用销售员归属。
     ding_enabled: bool = False
+    ding_roster_enabled: bool = False
     ding_roster_userids: dict[str, str] = Field(default_factory=dict, repr=False)
     ding_corp_id: str = ""
     ding_client_id: str = ""
@@ -59,6 +60,9 @@ class Settings(BaseSettings):
     public_base_url: str = ""
     notification_mode: str = "live"
     ding_tk_morning_log_folder: str = ""  # TK亏损提价日志目录。
+    ding_tk_drive_space_id: str = ""
+    ding_tk_drive_parent_id: str = ""
+    ding_tk_drive_operator_userid: str = ""
     ding_cancellation_log_folder: str = ""  # 作废订单日志目录。
 
     @model_validator(mode="after")

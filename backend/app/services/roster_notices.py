@@ -16,7 +16,7 @@ SCOPE_STATUS = {
 
 
 def enqueue_roster_notices(factory, config, day, capture):
-    if not config.ding_enabled or config.adapter_mode != 'live':
+    if not (config.ding_roster_enabled or config.ding_enabled) or config.adapter_mode != 'live':
         return
     for name in capture['salespersons']:
         scopes = [
@@ -46,7 +46,7 @@ def send_roster_notice(factory, config, job_id, owner):
 
         name = payload['salesperson']
         userid = config.ding_roster_userids.get(name, '')
-        if not (config.adapter_mode == 'live' and config.ding_enabled
+        if not (config.adapter_mode == 'live' and (config.ding_roster_enabled or config.ding_enabled)
                 and config.ding_client_id and config.ding_client_secret):
             result = {'state': 'failed', 'error': '钉钉机器人未启用或应用配置不完整'}
         elif not userid.strip() or list(config.ding_roster_userids.values()).count(userid) != 1:
