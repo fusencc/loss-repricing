@@ -84,13 +84,16 @@ const searchInput = ref<HTMLInputElement | null>(null)
             <dt>上传含税价</dt>
             <dd><strong>{{ recordPrice(item.execution?.uploaded_price, item) }}</strong></dd>
           </div>
+          <div class="records-stage-field" data-field="updated-time">
+            <dt>最近更新</dt>
+            <dd class="records-log-time"><time v-if="item.display_time" :datetime="item.display_time">{{ timeLabel(item.display_time) }}</time><span v-else>—</span></dd>
+          </div>
         </dl>
 
         <!-- 执行状态独立占最右列，不与上传价堆叠；请求金额不等同于受理或实际生效。 -->
         <div class="records-log-state" aria-label="执行状态">
           <span class="records-status" :class="recordTone(item.status)"><i></i>{{ recordStatusLabel(item.status) }}</span>
           <p class="records-log-reason">{{ recordStateReason(item) }}</p>
-          <p class="records-log-time">最近更新：<time v-if="item.display_time" :datetime="item.display_time">{{ timeLabel(item.display_time) }}</time><span v-else>—</span></p>
         </div>
         <SkuPriceReferenceView :reference="item.decision?.sku_price_reference" :price-limit="item.decision?.price_limit" />
       </article>

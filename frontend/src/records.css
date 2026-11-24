@@ -82,8 +82,8 @@
 /* 原因是本条保存的说明；保留换行、允许长文本断行，始终占用自身网格高度。 */
 .records-log-state .records-log-reason{margin:0;width:100%;font-size:11px;line-height:1.6;color:var(--r-muted);white-space:pre-wrap;overflow-wrap:anywhere}
 .records-log-time{margin:0;width:100%;font-size:11px;line-height:1.6;color:var(--r-muted);overflow-wrap:anywhere}
-/* 毛利、阶段价和上传价使用同层字段及统一标签/金额样式，宽屏保持同一顶线。 */
-.records-log-stages{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));align-items:start;gap:10px 16px;margin:0;min-width:0;max-width:100%}
+/* 毛利、阶段价、上传价和更新时间按顺序排列，宽屏保持同一顶线。 */
+.records-log-stages{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));align-items:start;gap:10px 16px;margin:0;min-width:0;max-width:100%}
 .records-stage-field{min-width:0}
 .records-stage-field dt{font-size:11px;color:var(--r-muted);margin-bottom:3px}
 .records-stage-field dd{margin:0;overflow-wrap:anywhere}
