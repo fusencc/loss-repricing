@@ -3,7 +3,7 @@ from sqlalchemy import select
 
 from app.adapters.dingtalk import DingTalkClient
 from app.db import transaction
-from app.models import Job
+from app.models import Execution, Item, Job
 from app.services.store import enqueue, stamp
 
 
@@ -18,6 +18,7 @@ SCOPE_STATUS = {
 def enqueue_roster_notices(factory, config, day, capture):
     if not (config.ding_roster_enabled or config.ding_enabled) or config.adapter_mode != 'live':
         return
+    pricing = {row['salesperson']: row for row in capture.get('pricing_batches', [])}
     for name in capture['salespersons']:
         scopes = [
             {key: row[key] for key in ('department', 'status', 'ready_prices')}
@@ -25,8 +26,21 @@ def enqueue_roster_notices(factory, config, day, capture):
         ]
         if not scopes:
             continue
-        enqueue(factory, 'erp_roster_notice',
-                {'date': day.isoformat(), 'salesperson': name, 'scopes': scopes},
+        payload = {'date': day.isoformat(), 'salesperson': name, 'scopes': scopes}
+        if name in pricing:
+            batch_id = pricing[name].get('batch_id')
+            if batch_id:
+                with factory() as session:
+                    execution_states = session.scalars(
+                        select(Execution.state).join(Item, Item.id == Execution.item_id)
+                        .where(Item.batch_id == batch_id)
+                    ).all()
+                payload['pricing'] = {'verified': execution_states.count('verified'),
+                                      'pending': sum(state in {'submitting', 'accepted', 'unknown', 'mismatch'}
+                                                     for state in execution_states)}
+            else:
+                payload['pricing'] = {'blocked': True}
+        enqueue(factory, 'erp_roster_notice', payload,
                 f'erp-roster-notice:{day.isoformat()}:{name}')
 
 
@@ -66,7 +80,14 @@ def send_roster_notice(factory, config, job_id, owner):
         f"算价通过 {scope['ready_prices']} 条"
         for scope in scopes
     ]
-    markdown = (f"**{title}**\n\n{payload['date']} · {name} · 算价通过 {ready} 条 · 未提交价格\n\n"
+    pricing = payload.get('pricing')
+    if pricing is None:
+        result_text = '未提交价格'
+    elif pricing.get('blocked'):
+        result_text = '正式提价待核对'
+    else:
+        result_text = f"已核验 {pricing['verified']} 条，待核验 {pricing['pending']} 条"
+    markdown = (f"**{title}**\n\n{payload['date']} · {name} · 算价通过 {ready} 条 · {result_text}\n\n"
                 + '\n'.join(rows))
     client = DingTalkClient(config)
     try:

@@ -40,7 +40,9 @@ def save_morning_log(config, day, *, factory=None, batch_id=None, capture=None):
         return filename
     book = Workbook(write_only=True)
     if capture is not None:
-        summary = [(day.isoformat(), '名单只读算价', capture['status'], capture['ready_prices'])]
+        pricing = capture.get('pricing_batches', [])
+        summary = [(day.isoformat(), '名单提价' if pricing else '名单只读算价',
+                    capture['status'], capture['ready_prices'])]
         details = []
         for scope in capture['departments']:
             artifact = scope.get('artifact_dir')
@@ -48,12 +50,16 @@ def save_morning_log(config, day, *, factory=None, batch_id=None, capture=None):
                 for decision in json.loads((Path(artifact) / name).read_text(encoding='utf-8'))['decisions']:
                     key = decision['key']
                     details.append((scope.get('department'), scope.get('salesperson'), key.get('sku'),
-                                    key.get('shop_id'), key.get('site'), '算价通过，未提交' if decision['ready']
+                                    key.get('shop_id'), key.get('site'), '算价通过' if decision['ready']
                                     else decision['status'], decision.get('upload_price'), decision.get('reason')))
         _sheet(book, '采集范围', ('部门', '销售员', '运行状态', '算价通过', '采集编号', '排查编号'),
                [(s.get('department'), s.get('salesperson'), s['status'], s['ready_prices'], s.get('capture_id'),
                  s.get('error_id')) for s in capture['departments']])
         _sheet(book, '明细', ('部门', '销售员', 'SKU', '店铺ID', '站点', '状态', '建议上传价', '原因'), details)
+        if pricing:
+            _sheet(book, '正式批次', ('销售员', '处理状态', '批次编号', '归属冲突数', '排查编号'),
+                   [(row['salesperson'], row['state'], row.get('batch_id'), row.get('conflicts', 0),
+                     row.get('error_id')) for row in pricing])
     else:
         with factory() as session:
             batch = session.get(Batch, batch_id)

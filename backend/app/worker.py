@@ -1,5 +1,6 @@
 """持久后台任务进程。日志仅提供技术排查，不改变租约、执行意图或未知不重传规则。"""
 from datetime import date, datetime, timezone
+from pathlib import Path
 from threading import Event, Thread
 from uuid import uuid4
 import time
@@ -114,9 +115,15 @@ class Worker:
                 state, error = "cancelled", "原定时任务已过业务日，按新业务日定时任务处理"
             elif daily and roster_date and scheduled_day == roster_date.isoformat():
                 from app.services.erp_workflow import run_workflow
-                # 试点名单走四类来源的逐人采集入口；通用正式任务没有名单过滤能力。
+                from app.services.erp_roster_pricing import run_roster_pricing
+                from app.services.erp_capture_store import write_verified
+                # 采集只读，再交给真实定价服务执行已有的提交和回读检查。
                 config = service_config.model_copy(update={'live_submit_enabled': False})
                 capture = run_workflow(config, roster_date=roster_date)
+                if (service_config.adapter_mode == 'live' and service_config.live_submit_enabled
+                        and capture['ready_prices']):
+                    capture['pricing_batches'] = run_roster_pricing(self.service, job.id, roster_date, capture)
+                    write_verified(Path(capture['artifact_dir']) / 'result.json', capture)
                 from app.services.roster_notices import enqueue_roster_notices
                 try:
                     enqueue_roster_notices(self.factory, config, roster_date, capture)

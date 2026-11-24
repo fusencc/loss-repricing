@@ -78,8 +78,11 @@ def _roster(settings, required_day):
     return list(dict.fromkeys(n.strip() for n in names))
 
 
-def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, progress=None, roster_date: date | None = None):
+def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, progress=None,
+                 roster_date: date | None = None, roster_person=None):
     """按部门串行完成只读采集和算价，显式指定采集编号时回放单批。"""
+    if roster_person is not None and (roster_date is None or roster_person not in ERP_ROSTER_DEPARTMENTS):
+        raise ValueError('名单刷新须绑定单日名单中的销售员')
     if capture_id is not None:
         if roster_date is not None:
             raise ValueError('名单采集不能与离线回放同时指定')
@@ -89,6 +92,10 @@ def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, prog
         raise ValueError('补充文件只可用于明确指定采集编号的离线对账')
 
     names = _roster(settings, roster_date)
+    if roster_person is not None:
+        if roster_person not in names:
+            raise ValueError('刷新销售员不在本轮名单中')
+        names = [roster_person]
     # 名单与部门归属先于登录和公共费用取数校验；缺少归属不得扩大为跨部门采集。
     if names is not None:
         if any(ERP_ROSTER_DEPARTMENTS.get(name) not in ERP_DEPARTMENTS for name in names):

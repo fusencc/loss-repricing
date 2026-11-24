@@ -227,3 +227,40 @@ def test_pilot_day_at_nine_routes_only_to_roster_and_publishes_once(tmp_path, mo
     finally:
         workbook.close()
         engine.dispose()
+
+
+def test_roster_with_ready_prices_hands_same_job_and_day_to_pricing(tmp_path, monkeypatch):
+    from datetime import date
+
+    engine, factory, service = setup(tmp_path)
+    pilot_day = date(2026, 11, 25)
+    service.config = Settings(_env_file=None, runtime_dir=tmp_path,
+                              coordination_required=False, live_submit_enabled=True)
+    calls = []
+    capture = {'status': 'completed', 'ready_prices': 1, 'departments': [],
+               'artifact_dir': str(tmp_path)}
+
+    def collect(config, *, roster_date):
+        assert not config.live_submit_enabled
+        assert roster_date == pilot_day
+        return capture
+
+    def submit(service_arg, run_key, day, collected):
+        assert service_arg is service
+        assert day == pilot_day
+        assert collected is capture
+        calls.append(run_key)
+        return [{'salesperson': '桂露', 'batch_id': 'price-batch', 'state': 'evaluated'}]
+
+    monkeypatch.setattr('app.services.erp_workflow.run_workflow', collect)
+    monkeypatch.setattr('app.services.erp_roster_pricing.run_roster_pricing', submit)
+    monkeypatch.setattr('app.services.roster_notices.enqueue_roster_notices', lambda *args: None)
+    monkeypatch.setattr(Worker, '_morning_log', lambda *args, **kwargs: None)
+    Worker(factory, service).tick(datetime(2026, 11, 25, 1, 0, tzinfo=timezone.utc).timestamp())
+
+    with factory() as session:
+        job = session.query(Job).one()
+        assert calls == [job.id]
+        assert job.state == 'done'
+    assert capture['pricing_batches'][0]['batch_id'] == 'price-batch'
+    engine.dispose()
