@@ -213,6 +213,14 @@ def batch_source_issues(batch_id: str, request: Request,
         return {"total": len(issues), "items": issues[offset:offset + limit]}
 
 
+@router.get("/records/stream")
+async def records_stream(request: Request, department: str | None = Query(None, max_length=200)):
+    """与免登录日志相同的只读范围；数据库提交后约一秒内推送，不执行改价。"""
+    from app.services.records_stream import records_payload, stream_response
+    factory = request.app.state.factory
+    return await stream_response(request, lambda: records_payload(factory, department))
+
+
 @router.get("/records")
 def records(request: Request, department: str | None = Query(None, max_length=200)):
     """免登录部门日志，仅投影保存数据；管理接口保持独立认证。"""

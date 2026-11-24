@@ -6,7 +6,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'backend'))
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import create_engine
@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 import uvicorn
 from app.config import get_settings
 from app.services.records import department_records
+from app.services.records_stream import encode_records, stream_response
 
 
 def create_records_app(database_path: Path, bindings_path: Path):
@@ -32,13 +33,9 @@ def create_records_app(database_path: Path, bindings_path: Path):
     def health():
         return {'mode': 'live', 'read_only': True}
 
-    @app.get('/api/records')
-    def records(department: str | None = None):
-        try:
-            with Session(engine) as session:
-                data = department_records(session, department, mode='live')
-        except ValueError as exc:
-            raise HTTPException(404, str(exc)) from exc
+    def read_records(department):
+        with Session(engine) as session:
+            data = department_records(session, department, mode='live')
         # 仅应用用户明确确认的展示归属，不写 Ownership 或更改任何账号权限。
         bindings = json.loads(bindings_path.read_text()) if bindings_path.exists() else []
         for item in data['items']:
@@ -47,6 +44,17 @@ def create_records_app(database_path: Path, bindings_path: Path):
                     item['seller'] = binding['seller']
                     break
         return data
+
+    @app.get('/api/records')
+    def records(department: str | None = None):
+        try:
+            return read_records(department)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.get('/api/records/stream')
+    async def records_stream(request: Request, department: str | None = Query(None, max_length=200)):
+        return await stream_response(request, lambda: encode_records(read_records(department)))
 
     @app.get('/')
     def index():

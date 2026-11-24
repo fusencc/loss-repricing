@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { Download, Search } from '@element-plus/icons-vue'
-import { api, errorMessage, timeLabel } from './api'
+import { timeLabel } from './api'
+import { connectRecords } from './records-live'
 import { groupBySeller, recordTone, recordStatusLabel, recordStatusCount, recordDisplayStates, recordDepartments, recordDateLabel, recordDateValue, type RecordData, type SellerGroup } from './records-model'
 import { formatDecimal } from './decimal-display'
 import { downloadSellerExcel } from './records-download'
@@ -16,7 +17,6 @@ const department = ref(recordDepartments.find(entry => entry.id === requestedDep
 const departments = recordDepartments
 const data = ref<RecordData | null>(null)
 const loading = ref(true)
-const refreshing = ref(false)
 const error = ref('')
 const downloadError = ref('')
 const dialogOpen = ref(false)
@@ -37,30 +37,39 @@ const logDateTitle = computed(() => recordDateLabel(activeSeller.value?.items ??
 const departmentName = computed(() => departments.find(entry => entry.id === department.value)?.name ?? '部门提价记录')
 const sellerCount = computed(() => groups.value.filter(group => group.assigned).length)
 const states = recordDisplayStates
-let controller: AbortController | undefined
+let disconnect: (() => void) | undefined
 let request = 0
-let timer: number | undefined
 let opener: HTMLElement | null = null
 
-async function load(quiet = false) {
-  const current = ++request
-  controller?.abort()
-  controller = new AbortController()
-  if (!quiet) loading.value = true
-  refreshing.value = true
+function stopLive() {
+  ++request
+  disconnect?.()
+  disconnect = undefined
+}
+
+function startLive() {
+  stopLive()
+  if (document.visibilityState !== 'visible') return
+  const current = request
   error.value = ''
-  try {
-    const response = await api.get<RecordData>('/records', { signal: controller.signal,
-      params: department.value ? { department: department.value } : {} })
+  disconnect = connectRecords<RecordData>(department.value, response => {
+    // 切部门或卸载后到达的旧连接消息不得覆盖新部门。
     if (current !== request) return
-    data.value = response.data
-    department.value = response.data.department ?? ''
+    data.value = response
+    department.value = response.department ?? ''
+    loading.value = false
+    error.value = ''
     if (dialogOpen.value && !activeSeller.value) dialogOpen.value = false
-  } catch (cause) {
-    if (current === request) error.value = errorMessage(cause)
-  } finally {
-    if (current === request) { loading.value = false; refreshing.value = false }
-  }
+  }, () => {
+    if (current !== request) return
+    loading.value = false
+    error.value = '实时连接中断，正在重新连接；当前记录可能不是最新状态。'
+  })
+}
+
+function onVisibilityChange() {
+  if (document.visibilityState === 'visible') startLive()
+  else stopLive()
 }
 
 function changeDepartment(id: string) {
@@ -71,7 +80,8 @@ function changeDepartment(id: string) {
   sellerQuery.value = ''
   data.value = null
   opener = null
-  void load()
+  loading.value = true
+  startLive()
 }
 
 function openSeller(group: SellerGroup, event: MouseEvent) {
@@ -96,12 +106,13 @@ function restoreFocus() {
 }
 
 onMounted(() => {
-  void load()
-  timer = window.setInterval(() => {
-    if (document.visibilityState === 'visible' && !refreshing.value) void load(true)
-  }, 60000)
+  startLive()
+  document.addEventListener('visibilitychange', onVisibilityChange)
 })
-onUnmounted(() => { ++request; controller?.abort(); window.clearInterval(timer) })
+onUnmounted(() => {
+  stopLive()
+  document.removeEventListener('visibilitychange', onVisibilityChange)
+})
 </script>
 
 <template>
