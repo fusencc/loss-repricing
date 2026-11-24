@@ -20,6 +20,7 @@ from fake_adapter import DemoAdapter
 def priced_roster(tmp_path, monkeypatch):
     class SalesTestTransport(DemoAdapter):
         mode = 'live'
+        synthetic = False
         submits = 0
         readback_ready = False
 
@@ -27,14 +28,20 @@ def priced_roster(tmp_path, monkeypatch):
             pytest.fail('名单批次不能走通用采集')
 
         def readiness(self):
-            return {'contract_ready': True, 'verified_sites': ['MY']}
+            return {'contract_ready': False, 'verified_sites': []}
 
         def submit(self, execution_id, decision):
+            pytest.fail('名单批次不能走通用上传')
+
+        def lookup(self, *args):
+            pytest.fail('名单批次不能走通用回读')
+
+        def accept_single(self, execution_id, decision):
             self.submits += 1
             super().submit(execution_id, decision)
             raise TimeoutError('模拟平台已接收，但回复中断')
 
-        def lookup(self, *args):
+        def read_single(self, *args):
             if not self.readback_ready:
                 return LookupResult('unknown')
             return super().lookup(*args)
@@ -46,10 +53,28 @@ def priced_roster(tmp_path, monkeypatch):
     monkeypatch.setattr('app.services.execution.recent_price_log_for', history_unavailable)
     engine, factory = create_database(f'sqlite:///{tmp_path / "live.db"}')
     Base.metadata.create_all(engine)
-    config = Settings(_env_file=None, runtime_dir=tmp_path, live_submit_enabled=True, coordination_required=False)
+    day = datetime.now(timezone.utc).astimezone(BEIJING).date()
+    config = Settings(_env_file=None, runtime_dir=tmp_path, live_submit_enabled=True, coordination_required=False,
+                      erp_roster_date=day, erp_roster_submit_date=day)
     adapter = SalesTestTransport(tmp_path)
     service = PricingService(factory, adapter, config)
-    day = datetime.now(timezone.utc).astimezone(BEIJING).date()
+
+    class SingleChannel:
+        available = True
+
+        def prepare(self, execution_id, batch_id, business_date, shop_name, decision):
+            assert business_date == day and shop_name == 'ERP测试店'
+            return {'scope': decision.trace['source_versions']['erp_roster_salesperson'],
+                    'business_date': business_date.isoformat()}
+
+        def submit(self, execution_id, decision):
+            return adapter.accept_single(execution_id, decision)
+
+        def lookup(self, execution_id, task_id, decision):
+            return adapter.read_single(execution_id, task_id, decision.key)
+
+    channel = SingleChannel()
+    monkeypatch.setattr(PricingService, '_roster_transport', lambda self: channel)
     initial = DemoAdapter(tmp_path).collect(day)
     initial.lines, initial.online = initial.lines[:2], initial.online[:1]
     person = next(iter(roster.ERP_ROSTER_DEPARTMENTS))
@@ -69,6 +94,8 @@ def priced_roster(tmp_path, monkeypatch):
         write_verified(preview, {'capture_id': capture_id, 'preview_id': preview_id,
             'department': department, 'business_date': day.isoformat(), 'synthetic': False,
             'consistent_capture_scope': True, '_snapshot': snapshot.model_dump(mode='json'),
+            'references': {'lines': {row.row_id: {'target': row.key.model_dump(mode='json'),
+                            'main_sku': row.main_sku, 'erp_shop': 'ERP测试店'} for row in snapshot.lines}},
             'decisions': [row.model_dump(mode='json') for row in evaluate(snapshot, snapshot.as_of)]})
         _, digest = roster._load_pricing_artifact(tmp_path, capture_id, preview_id)
         return {'capture_id': capture_id, 'preview_id': preview_id, 'preview_sha256': digest,
@@ -130,17 +157,25 @@ def test_fixed_roster_scope_crossing_day_does_not_enqueue_general_task(priced_ro
 
     factory, service, adapter, day, _, _, _, _ = priced_roster
     with pytest.raises(SourceUnavailable, match='跨北京时间'):
-        service.run_batch('roster', scoped_collect=lambda _: pytest.fail('跨日不得重新取数'),
-                          fixed_day=day - timedelta(days=1), approved_prices={})
+        service.run_batch('roster', roster=roster.RosterBatch(
+            day - timedelta(days=1), '桂露', lambda _: pytest.fail('跨日不得重新取数'), {},
+        ))
     with factory() as session:
         assert session.scalar(select(Job)) is None
     assert adapter.submits == 0
 
 
 
-def test_roster_without_pilot_preserves_batch_and_has_no_upload(priced_roster, monkeypatch):
+@pytest.mark.parametrize('pause', [None, 'global', 'site'])
+def test_roster_without_date_permission_or_paused_preserves_batch_and_has_no_upload(priced_roster, monkeypatch, pause):
     factory, service, adapter, day, _, initial, archive, capture = priced_roster
-    monkeypatch.setattr(roster, 'run_workflow', lambda *args, **kwargs: pytest.fail('缺少试点不能刷新后提交'))
+    if pause == 'global':
+        update_settings(factory, {'paused': True})
+    elif pause == 'site':
+        update_settings(factory, {'paused_sites': [initial.online[0].key.site]})
+    else:
+        service.config = service.config.model_copy(update={'erp_roster_submit_date': None})
+    monkeypatch.setattr(roster, 'run_workflow', lambda *args, **kwargs: pytest.fail('已暂停或未授权不能刷新后提交'))
     result = roster.run_roster_pricing(service, 'day-job', day, capture(archive(initial)))
     with factory() as session:
         item = session.scalars(select(Item).where(Item.batch_id == result[0]['batch_id'])).one()
@@ -169,9 +204,9 @@ def test_roster_changed_amount_during_refresh_is_held(priced_roster, monkeypatch
 
 def test_roster_retry_cannot_expand_first_saved_price_authorization(priced_roster, monkeypatch):
     factory, service, adapter, day, _, initial, archive, capture = priced_roster
+    service.config = service.config.model_copy(update={'erp_roster_submit_date': None})
     original = roster.run_roster_pricing(service, 'day-job', day, capture(archive(initial)))
-    key = initial.online[0].key
-    update_settings(factory, {'autonomous_enabled': True, 'site_enabled': [key.site], 'pilot_shops': [key.shop_id]})
+    service.config = service.config.model_copy(update={'erp_roster_submit_date': day})
     changed = initial.model_copy(deep=True)
     for line in changed.lines:
         line.loss_amount -= 1
@@ -179,5 +214,61 @@ def test_roster_retry_cannot_expand_first_saved_price_authorization(priced_roste
     retry = roster.run_roster_pricing(service, 'day-job', day, capture(archive(changed)))
     assert retry[0]['batch_id'] == original[0]['batch_id']
     with factory() as session:
+        assert session.scalar(select(Execution)) is None
+    assert adapter.submits == 0
+
+
+def test_enabled_roster_uses_single_upload_and_recovers_without_generic_contract(priced_roster, monkeypatch):
+    factory, service, adapter, day, person, initial, archive, capture = priced_roster
+    service.config = service.config.model_copy(update={
+        'erp_roster_date': day, 'erp_roster_submit_date': day, 'coordination_required': True,
+    })
+    monkeypatch.setattr(roster, 'run_workflow',
+                        lambda *args, **kwargs: {'departments': [archive(initial)]})
+
+    result = roster.run_roster_pricing(service, 'day-authorized', day, capture(archive(initial)))
+    with factory() as session:
+        execution = session.scalar(select(Execution))
+        item = session.scalars(select(Item)).one()
+        assert execution is not None, item.reason
+        assert execution.state == 'unknown'
+        assert execution.request['trace']['erp_roster_upload']['scope'] == person
+    adapter.readback_ready = True
+    # 日期授权关闭后，仍使用原单品入口回读已递交的请求。
+    after = service.config.model_copy(update={'erp_roster_submit_date': None})
+    PricingService(factory, adapter, after).reconcile()
+    with factory() as session:
+        assert session.scalars(select(Execution)).one().state == 'verified'
+    assert result[0]['batch_id'] and adapter.submits == 1
+
+
+def test_roster_does_not_override_manual_takeover(priced_roster, monkeypatch):
+    from app.services.price_control import lock_control
+
+    factory, service, adapter, day, _, initial, archive, capture = priced_roster
+    service.config = service.config.model_copy(update={'coordination_required': True})
+    with factory.begin() as session:
+        lock_control(session, initial.online[0].key).mode = 'manual'
+    monkeypatch.setattr(roster, 'run_workflow',
+                        lambda *args, **kwargs: pytest.fail('已人工接管的商品不能准备提交'))
+    roster.run_roster_pricing(service, 'authorized-day', day, capture(archive(initial)))
+    with factory() as session:
+        assert session.scalars(select(Item)).one().reason == '人工接管或交回后等待重新取数'
+        assert session.scalar(select(Execution)) is None
+    assert adapter.submits == 0
+
+
+def test_roster_does_not_submit_site_warehouse_without_verified_transport(priced_roster, monkeypatch):
+    factory, service, adapter, day, _, _, archive, capture = priced_roster
+    snapshot = DemoAdapter(service.config.runtime_dir).collect(day)
+    # PH 直发可按业务公式算价，已验证的 PH 单品上传及回读证据覆盖海外仓。
+    online = snapshot.online[1]
+    snapshot.lines = [row for row in snapshot.lines if row.key == online.key]
+    snapshot.online = [online]
+    monkeypatch.setattr(roster, 'run_workflow',
+                        lambda *args, **kwargs: pytest.fail('不适用的站点仓配不应该准备提交'))
+    roster.run_roster_pricing(service, 'authorized-day', day, capture(archive(snapshot)))
+    with factory() as session:
+        assert '站点与仓配' in session.scalars(select(Item)).one().reason
         assert session.scalar(select(Execution)) is None
     assert adapter.submits == 0

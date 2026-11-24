@@ -239,15 +239,15 @@ def test_worker_entry_records_shutdown_and_disposes_engine(tmp_path, monkeypatch
     sink = configure_logging(cfg, 'worker')
     disposed = []
     fake = SimpleNamespace(state=SimpleNamespace(
-        factory=None, service=SimpleNamespace(config=cfg), config=cfg, log_sink=sink,
-        engine=SimpleNamespace(dispose=lambda: disposed.append(True))))
+        factory=None, service=SimpleNamespace(config=cfg, close=lambda: disposed.append('sales')),
+        config=cfg, log_sink=sink, engine=SimpleNamespace(dispose=lambda: disposed.append('database'))))
     monkeypatch.setattr(entry, 'create_app', lambda **kwargs: fake)
     def stop(self, seconds):
         raise RuntimeError('stopped')
     monkeypatch.setattr(worker_entry.Worker, 'run_forever', stop)
     with pytest.raises(RuntimeError, match='stopped'):
         worker_entry.main()
-    assert disposed == [True]
+    assert disposed == ['sales', 'database']
     assert records(sink)[-1]['event'] == 'app.stopped'
 
 

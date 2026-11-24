@@ -121,10 +121,21 @@ def authorization_snapshot(session,key,locked=None):
     owner=_authorization_owner(session,key,locked);control=get_control(session,key)
     return {'control_version':control.version if control else 0,'ownership_id':owner.id if owner else None,'ownership_version':owner.version if owner else None}
 
-def automation_gate(session,key,authorization=None,locked=None):
-    owner=_authorization_owner(session,key,locked)
-    if not owner or not active_owner(session,owner.owner_id,locked): return False,'归属缺失或负责人已停用'
-    if not owner.autonomous: return False,'归属未开启自动托管'
+def automation_gate(session, key, authorization=None, locked=None, *, roster_salesperson=None):
+    owner = _authorization_owner(session, key, locked)
+    if owner is None:
+        # 名单任务的当日销售员归属由真实 ERP 和销售商品双向核对，缺网页账号时仍能完成该日授权。
+        if roster_salesperson is None:
+            return False, '归属缺失或负责人已停用'
+    else:
+        if not active_owner(session, owner.owner_id, locked):
+            return False, '归属缺失或负责人已停用'
+        if not owner.autonomous:
+            return False, '归属未开启自动托管'
+        if roster_salesperson is not None and owner.owner_id != 'admin':
+            user = locked.users.get(owner.owner_id) if locked is not None else session.get(UserAccount, owner.owner_id)
+            if not user or user.display_name != roster_salesperson:
+                return False, '网页有效归属与本轮 ERP 销售员不一致'
     control=get_control(session,key)
     if control and (control.mode!='auto' or control.handback_pending): return False,'人工接管或交回后等待重新取数'
     if authorization is not None and authorization!=authorization_snapshot(session,key,locked):return False,'管理状态或归属版本已变化，原自动方案失效'

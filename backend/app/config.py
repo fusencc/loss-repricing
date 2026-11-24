@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     # 2026-11-25 按代码内七人名单自动采集和算价；随部署启用，不依赖本机环境配置。
     erp_roster_date: date | None = date(2026, 11, 25)
     erp_roster_schedule_enabled: bool = True
+    # 固定名单的单日真实授权，与名单业务日一致才允许执行。普通自动任务另走原有授权。
+    erp_roster_submit_date: date | None = None
     erp_capture_request_interval_seconds: float = Field(default=16, ge=0, le=300)
     # 网页后端暂无批量销量开放合同；串行读取并限制请求频率，后续改用批量/增量来源。
     sales_request_interval_seconds: float = Field(default=2, ge=0, le=30)

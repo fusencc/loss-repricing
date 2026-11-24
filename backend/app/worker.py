@@ -234,9 +234,12 @@ def main():
     try:
         Worker(app.state.factory, app.state.service).run_forever(app.state.config.worker_poll_seconds)
     finally:
-        app.state.engine.dispose()
-        with bind_sink(app.state.log_sink):
-            event('app.stopped')
+        try:
+            app.state.service.close()
+        finally:
+            app.state.engine.dispose()
+            with bind_sink(app.state.log_sink):
+                event('app.stopped')
 
 
 if __name__ == "__main__":

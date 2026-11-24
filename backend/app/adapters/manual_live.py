@@ -72,21 +72,30 @@ def verify_price_evidence(authorization, previous_ids, log, detail, current, exp
     if (any(current.get(n) != k[n] for n in ('shop_id', 'product_id', 'item_id'))
             or current['currency'] != a['currency'] or not retail_matches
             or money(current['discount']) != money(a['discount_percent_off'])
-            or abs(money(current['actual']) - expected_actual) > Decimal('.02')):
+            or (expected_actual is not None and abs(money(current['actual']) - expected_actual) > Decimal('.02'))):
         raise ValueError('当前含税零售价、营销价、折扣或币种尚未与提交一致')
     return money(current['actual'])
+
+
+def effective_marketing_fields(variant, retail, activity):
+    # 已确认无营销活动且无有效折扣时，沿用在线算价入口的含税成交口径。
+    actual, discount = variant.get('marketPrice'), variant.get('discount')
+    if (activity is False and (actual in (None, '') or money(actual) == retail)
+            and (discount in (None, '') or money(discount) == 0)):
+        return retail, Decimal(0)
+    return money(actual), money(discount)
 
 
 class ManualLiveAdapter:
     mode = 'live'
 
-    def __init__(self, settings, authorization, directory, client=None):
+    def __init__(self, settings, authorization, directory, client=None, *, auth=None):
         self.settings, self.authorization = settings, authorization
         self.key = VariantKey.model_validate(authorization['key'])
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
         self.client = client or httpx.Client(timeout=60, trust_env=False, follow_redirects=False)
-        self.auth = SalesAuth(settings, self.client)
+        self.auth = auth or SalesAuth(settings, self.client)
         self.snapshot = None
 
     def readiness(self):
@@ -217,14 +226,22 @@ class ManualLiveAdapter:
 
     def submit(self, execution_id, decision):
         try:
-            validate_authorization(self.authorization, decision.key, decision.upload_price)
-            if not self.settings.live_submit_enabled or not decision.ready or not decision.trace.get('correction_id'):
-                raise ValueError('缺少人工修正授权或未启用')
+            if not decision.trace.get('correction_id'):
+                raise ValueError('缺少人工修正授权')
             if self.snapshot is None or (utcnow()-self.snapshot.online[0].observed_at).total_seconds() > 300:
                 raise ValueError('提交前实时数据缺失或过期')
-            if decision.upload_column != '税后价格': raise ValueError('上传列不一致')
+        except (ValueError, KeyError):
+            return SubmitResult('rejected', message='单商品授权或提交前数据未通过')
+        return self.upload_confirmed_price(execution_id, decision, self.previous_ids)
+
+    def upload_confirmed_price(self, execution_id, decision, previous_log_ids):
+        # 单商品授权与已获授权的名单批次共用正式上传。调用方先持久化执行、核对现价并记录原日志。
+        try:
+            validate_authorization(self.authorization, decision.key, decision.upload_price)
+            if (not self.settings.live_submit_enabled or not decision.ready or decision.upload_column != '税后价格'):
+                raise ValueError('真实开关或单商品上传字段无效')
             intent = {'execution_id': execution_id, 'authorization': self.authorization, 'decision': decision.model_dump(mode='json'),
-                'previous_log_ids': self.previous_ids, 'created_at': utcnow().isoformat()}
+                'previous_log_ids': previous_log_ids, 'created_at': utcnow().isoformat()}
             intent_path = self.directory / ('intent-'+execution_id+'.json')
             if intent_path.exists(): return SubmitResult('unknown', message='已有上传意图，仅核验，不重传')
             write_verified(intent_path, intent)
@@ -238,10 +255,11 @@ class ManualLiveAdapter:
         write_verified(self.directory / ('upload-response-'+execution_id+'.json'), value)
         return HttpAdapter._upload_result(value, {'single_data_row_number': 2})
 
-    def lookup(self, execution_id, task_id, key):
+    def lookup(self, execution_id, task_id, key, *, check_amount=True):
         try:
             intent = json.loads((self.directory / ('intent-'+execution_id+'.json')).read_text())
-            if key != self.key or intent['authorization'] != self.authorization: raise ValueError('核验身份冲突')
+            if key != self.key or intent['authorization'] != self.authorization:
+                raise ValueError('核验身份冲突')
             a, k = self.authorization, self.key
             rows = self._logs()
             matches = [r for r in rows if str(r['id']) not in intent['previous_log_ids'] and r.get('type') == 2
@@ -287,16 +305,20 @@ class ManualLiveAdapter:
             v, s = variants[0], skus[0]
             if (s['price']['currency'] != a['currency'] or money(s['price']['sale_price']) != money(v['priceIncludeVat'])
                     or s['seller_sku'] != k.sku or v['sellerSku'] != k.sku): raise ValueError('平台与公司当前价不同步')
-            current = {'retail': v['priceIncludeVat'], 'actual': v['marketPrice'], 'discount': v['discount'], 'currency': v['currency'],
+            retail = money(v['priceIncludeVat'])
+            actual, discount = effective_marketing_fields(v, retail, control.get('company_activity_locked'))
+            current = {'retail': str(retail), 'actual': str(actual), 'discount': str(discount), 'currency': v['currency'],
                        'tax_exclusive': s['price']['tax_exclusive_price'], 'logistics': v['logisticsCost'],
                        'vat_percent': control['company_parent']['taxVatRate'],
                        'product_id': v['productId'], 'item_id': v['sellerSkuId'], 'shop_id': v['shopId']}
-            expected = money(intent['decision']['trace']['rounded_actual'])
+            if v.get('marketPrice') in (None, ''):
+                current['marketing_source_field'] = 'company.priceIncludeVat (confirmed_no_activity)'
+            expected = money(intent['decision']['trace']['rounded_actual']) if check_amount else None
             actual = verify_price_evidence(a, intent['previous_log_ids'], log, detail['datas'], current, expected)
             full = FeeModel.model_validate(intent['decision']['trace']['online_rows'][0]['profit_check']['model'])
             upper = saved_price_limit(intent['decision']['trace'])
             actual_check = full.evaluate(MoneyRatio(actual))
-            if upper is None and not actual_check.meets_minimum_margin:
+            if check_amount and upper is None and not actual_check.meets_minimum_margin:
                 raise ValueError('回读营销价在线利润率未达到1%')
             observed = utcnow()
             # 官方统计/最新成功价只作独立证据补充，不代替已绑定任务和当前平台价。
@@ -308,15 +330,16 @@ class ManualLiveAdapter:
             price_record = build_price_record(execution_id, k, a['shop_name'], money(a['upload_price']),
                 log, current, observed, official, submitted_at=submitted_at)
             write_verified(self.directory / ('price-record-'+execution_id+'-'+uuid4().hex+'.json'), price_record)
-            write_verified(self.directory / ('verified-'+execution_id+'.json'), {'log': log, 'current': current,
+            archive_prefix = 'verified-' if check_amount else 'observed-'
+            write_verified(self.directory / (archive_prefix+execution_id+'.json'), {'log': log, 'current': current,
                 'actual_profit': str(actual_check.profit.decimal()),
                 'minimum_margin_required': upper is None,
                 'online_margin_passed': actual_check.meets_minimum_margin,
                 'observed_at': observed.isoformat(),
-                'freshness_basis': '提交前不同价格+本次新增任务平台成功回执+提交后平台及公司价格一致；首次确认时间',
+                'freshness_basis': '提交前价格及日志基线+本次新增任务平台成功回执+提交后平台及公司价格一致',
                 'platform_update_time': control['data'].get('update_time')})
             return LookupResult('accepted', actual, observed, None, 'actual_including_vat',
                 '平台任务'+str(log['id'])+'成功；上传含税'+a['upload_price']+'，回读含税'+str(current['retail'])+
-                '，营销价'+str(actual)+'；税前及物流换算已核对，实际价在0.02容限内，在线利润已记录', price_record=price_record)
+                '，营销价'+str(actual)+'；税前及物流换算已核对，在线利润已记录', price_record=price_record)
         except Exception as exc:
             return LookupResult('unknown', message='当前生效证据尚未齐备（'+type(exc).__name__+'），仅核验')

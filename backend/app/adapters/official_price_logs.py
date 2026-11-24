@@ -120,7 +120,8 @@ observed_at是本次完成回读的时间，不是平台源更新时间或执行
         'uploaded_tax_inclusive': (uploaded_price, 'execution.request.upload_price', 'local_execution_record'),
         'tax_exclusive': (log['priceNew'], 'operationLog.priceNew', 'sales_operation_log'),
         'actual_tax_inclusive': (current['retail'], 'platform.skus.price.sale_price / company.priceIncludeVat', 'current_platform_and_company'),
-        'marketing': (current['actual'], 'company.marketPrice', 'current_company_variant')}
+        'marketing': (current['actual'], current.get('marketing_source_field', 'company.marketPrice'),
+                      'current_company_variant')}
     prices = {}
     for name,(value,field,source) in definitions.items():
         amount = money(value)
