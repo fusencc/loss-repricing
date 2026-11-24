@@ -137,7 +137,8 @@ def test_fresh_collection_runs_download_clean_evaluate_and_archive(tmp_path, mon
     monkeypatch.setattr(erp_workflow, 'query_current_erp_fx', company_fx, raising=False)
     monkeypatch.setattr(erp_workflow, 'capture_recent_price_changes',
         lambda *args,**kwargs:pytest.fail('没有可算价目标时不应查询调价日志'))
-    workflow = erp_workflow.run_workflow(Settings(_env_file=None, runtime_dir=tmp_path))
+    # 这个用例覆盖普通部门采集，机器当天恰逢固定名单日也使用同一测试范围。
+    workflow = erp_workflow.run_workflow(Settings(_env_file=None, runtime_dir=tmp_path, erp_roster_date=None))
     assert connections['bulk'][0] is not None
     assert connections['bulk'] == connections['capture_order_headers'] == connections['capture_erp_details']
     assert connections['fees'] == connections['capture_sales_batch']
