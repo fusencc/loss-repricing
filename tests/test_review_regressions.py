@@ -101,6 +101,8 @@ def test_reevaluate_worker_submits_only_selected_target_and_unknown_only_queries
 @pytest.mark.parametrize("scheduled", [False, True])
 def test_midnight_stops_cached_submissions_and_queues_fresh_day(context, monkeypatch, scheduled):
     factory, cfg, source = context
+    # 这里检查常规跨日续跑，避免一次性名单日期恰好等于模拟次日。
+    cfg = cfg.model_copy(update={"erp_roster_date": None})
     today = utcnow().astimezone(BEIJING).date()
     clock = [datetime.combine(today, datetime.min.time(), BEIJING).replace(hour=23, minute=59, second=59).astimezone(timezone.utc)]
     template = source.collect(today)

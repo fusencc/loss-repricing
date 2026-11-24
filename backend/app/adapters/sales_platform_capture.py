@@ -19,6 +19,8 @@ PATH = '/Api/api-tiktok-sales/online/getEditOnlineDataByShopNameAndProductId'
 
 ACTIVITY_PATH = '/Api/api-tiktok-sales/online/findByPage'
 BATCH_SIZE = 100
+# 真实线上活动查询用 8 个产品完成两侧取数，12 个产品出现读超时。分页仍按原合同核对。
+ACTIVITY_PRODUCTS_PER_BATCH = 8
 
 
 def _archive(directory, result, response, filename, path, request):
@@ -84,7 +86,9 @@ def _activity_product_batches(shops_by_product, interval):
     max_links = max(1, int(240 / (2 * interval)) - 1) if interval > 0 else None
     batch, links = [], 0
     for product, shops in shops_by_product.items():
-        if batch and (len(batch) == BATCH_SIZE or (max_links is not None and links + len(shops) > max_links)):
+        if batch and (
+            len(batch) == ACTIVITY_PRODUCTS_PER_BATCH or (max_links is not None and links + len(shops) > max_links)
+        ):
             yield batch
             batch, links = [], 0
         batch.append(product)

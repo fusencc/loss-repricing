@@ -29,7 +29,7 @@ def _sheet(workbook, title, headers, rows):
 
 
 def _tk_filename(day):
-    return f'{day.month}.{day.day}上午运行日志.xlsx'
+    return f'{day.month}.{day.day}早上运行日志.xlsx'
 
 
 def save_morning_log(config, day, *, factory=None, batch_id=None, capture=None):
@@ -219,7 +219,7 @@ if __name__ == '__main__':
     import argparse
     from app.config import get_settings
 
-    parser = argparse.ArgumentParser(description='发布TK上午运行日志或查询罗迪的作废订单日志')
+    parser = argparse.ArgumentParser(description='发布TK早上运行日志或查询罗迪的作废订单日志')
     parser.add_argument('day', type=date.fromisoformat)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--check-cancellation', action='store_true')

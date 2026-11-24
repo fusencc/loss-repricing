@@ -121,7 +121,7 @@ def test_batch_activity_scope_and_pacing(tmp_path, monkeypatch, case):
         assert result['stopped_http_status'] == 429
 
 
-@pytest.mark.parametrize('interval, count, first_size', [(0,101,100),(30,4,3)])
+@pytest.mark.parametrize('interval, count, first_size', [(0,9,8),(30,4,3)])
 def test_invalid_activity_page_does_not_stop_next_product_batch(tmp_path, monkeypatch, interval, count, first_size):
     from app.adapters import sales_auth
     from app.adapters.sales_platform_capture import capture_platform_controls

@@ -216,7 +216,8 @@ def test_pilot_day_at_nine_routes_only_to_roster_and_publishes_once(tmp_path, mo
     import json
     lookup = tmp_path / 'cancellation-logs' / pilot_day.isoformat() / 'lookup.json'
     assert json.loads(lookup.read_text(encoding='utf-8'))['status'] == 'pending'
-    published = tmp_path / 'morning-logs' / pilot_day.isoformat() / '11.25上午运行日志.xlsx'
+    published = tmp_path / 'morning-logs' / pilot_day.isoformat() / '11.25早上运行日志.xlsx'
+    assert published.is_file()
     with factory() as session:
         job = session.query(Job).one()
         assert job.dedupe_key == 'daily:2026-11-25' and job.state == 'done'

@@ -75,7 +75,7 @@ Set-Location -LiteralPath 'D:\projects\loss-repricing'
 
 启用定时后，worker从北京时间09:00起按日唯一键建立任务；11:00是目标时间提示，不是停止处理的硬截止。来源未就绪时，从本次取数失败起等待5分钟后重查，不复用昨日文件。尚未开始的旧日定时任务跨日后取消，新日按自己的定时任务取数。worker正常轮询间隔5秒，待核验记录约每60秒查询一次。通知投递轮询异常单独记录为 `worker.notice_dispatch_failed`，取数、算价和已有调价核验继续按各自状态处理。
 
-上午任务完成后，工作簿保存在 `runtime/morning-logs/YYYY-MM-DD/M.D上午运行日志.xlsx`。名单日记录读取范围、建议价和待处理原因；正式批次记录已保存的实际运行结果，区分建议上传、提交和回读等证据。设置 `LR_DING_TK_MORNING_LOG_FOLDER` 后，用同一部署用户已认证的 `dws` 发布到「集团二部每日数据 → TK亏损提价日志」，已存在的同名文件不会被覆盖。写入失败会保留本地文件及排查编号，对已有工作簿可用 `PYTHONPATH=backend .venv/bin/python -m app.services.morning_log YYYY-MM-DD` 核实后单独补发。
+上午任务完成后，工作簿保存在 `runtime/morning-logs/YYYY-MM-DD/M.D早上运行日志.xlsx`。名单日记录读取范围、建议价和待处理原因；正式批次记录已保存的实际运行结果，区分建议上传、提交和回读等证据。设置 `LR_DING_TK_MORNING_LOG_FOLDER` 后，用同一部署用户已认证的 `dws` 发布到「集团二部每日数据 → TK亏损提价日志」，已存在的同名文件不会被覆盖。写入失败会保留本地文件及排查编号，对已有工作簿可用 `PYTHONPATH=backend .venv/bin/python -m app.services.morning_log YYYY-MM-DD` 核实后单独补发。
 
 「集团二部每日数据 → 作废订单日志」由 `LR_DING_CANCELLATION_LOG_FOLDER` 单独绑定。只处理上午时段，沿用罗迪的 `M.D上午运行日志.xlsx` 和成功清单、失败清单、汇总三张表。上游将当天真实作废结果放在 `runtime/cancellation-logs/YYYY-MM-DD/M.D上午运行日志.xlsx` 后，上午任务收尾时核对日期和表头并写入钉盘。已有同名文件保留。上游文件未就绪时，查询钉盘当天文件节点或记录待生成状态。手动发布用 `--publish-cancellation`，仅复查用 `--check-cancellation`。
 
