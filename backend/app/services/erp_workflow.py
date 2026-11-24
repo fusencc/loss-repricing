@@ -50,9 +50,20 @@ def filter_candidate_history(settings, targets, *, client=None, auth=None):
     return history,eligible,filtered
 
 
-# 2026-11-24 用户明确要求把这七人的采集名单写入代码，随部署交付；
-# 这是取数范围，不是店铺试点或真实价格提交授权。名单不再从环境变量或本地文件读取。
-ERP_ROSTER_NAMES = ('桂露', '莫雯舒', '赵亮亮', '刘付文昌', '李佳丽', '杨颖', '曹雪娇')
+# 2026-11-24 用户确认：11月10日至24日历史财务表清洗后的「销售员」「部门」
+# 字段显示这七人各自仅属于一个部门，无跨部门冲突；据此只采集各人的已确认部门，
+# 不再与四部门交叉组合。部门值使用既有 ERP 筛选合同的原始名称。
+# 这是取数范围，不是网页归属、店铺试点或真实价格提交授权；四类来源仍逐一读取。
+ERP_ROSTER_DEPARTMENTS = {
+    '桂露': 'Tiktok二十二部',
+    '莫雯舒': 'Tiktok一部',
+    '赵亮亮': 'Tiktok十二部',
+    '刘付文昌': 'Tiktok一部',
+    '李佳丽': 'Tiktok二十二部',
+    '杨颖': 'Tiktok十二部',
+    '曹雪娇': 'Tiktok五部',
+}
+ERP_ROSTER_NAMES = tuple(ERP_ROSTER_DEPARTMENTS)
 
 
 def _roster(settings, required_day):
@@ -78,8 +89,13 @@ def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, prog
         raise ValueError('补充文件只可用于明确指定采集编号的离线对账')
 
     names = _roster(settings, roster_date)
-    # 名单先于登录和公共费用取数校验；空名单不能变成不限人员。
-    scopes = [(department, name) for department in ERP_DEPARTMENTS for name in (names or [None])]
+    # 名单与部门归属先于登录和公共费用取数校验；缺少归属不得扩大为跨部门采集。
+    if names is not None:
+        if any(ERP_ROSTER_DEPARTMENTS.get(name) not in ERP_DEPARTMENTS for name in names):
+            raise ValueError('代码中的销售员名单缺少有效部门归属，不进行 ERP 采集')
+        scopes = [(ERP_ROSTER_DEPARTMENTS[name], name) for name in names]
+    else:
+        scopes = [(department, None) for department in ERP_DEPARTMENTS]
     directory = Path(settings.runtime_dir) / 'erp-workflows' / uuid4().hex
     directory.mkdir(mode=0o700, parents=True)
     departments = []
