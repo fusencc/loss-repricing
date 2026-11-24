@@ -194,7 +194,8 @@ def public_record(item, batch, execution, department, seller):
         'key': {field: item.key.get(field, '') for field in KEY_FIELDS},
         'seller': seller, 'department': department, 'shop_name': display_text(archive.get('shop_name')),
         'first_margin': first_margin,
-        'status': item.status, 'reason': item.reason, 'updated_at': item.updated_at,
+        # 仅投影本条持久阶段与结果类型；原因仍用本条商品记录，不读取其他尝试或推断查询异常。
+        'status': item.status, 'phase': item.phase, 'reason': item.reason, 'updated_at': item.updated_at,
         'decision': {field: display_text(decision.get(field))
                      for field in ('current_actual', 'target_actual', 'upload_price')} | {
             'trace': {'station_currency': currency}, 'price_change': price_change,
@@ -206,6 +207,8 @@ def public_record(item, batch, execution, department, seller):
         'corrected_first_margin': margin,
         'execution': {
             'state': execution.state, 'task_id': execution.task_id,
+            'submit_status': display_text((execution.response or {}).get('status')),
+            'row_status': display_text(evidence.get('row_status')),
             'uploaded_price': display_text((execution.request or {}).get('upload_price')),
             'actual_price': display_text(evidence.get('actual_price')),
             'confirmed_at': display_text(evidence.get('confirmed_at')),

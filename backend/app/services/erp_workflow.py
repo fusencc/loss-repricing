@@ -186,7 +186,7 @@ def _evaluate_capture(settings, capture_id, *, replay, evidence=None, exports=No
                 sales_ref['sha256'] = sha256(content).hexdigest()
                 sales_status = 'saved' if sales['acquisition_complete'] else 'partial'
             order_preparation = prepare_order_losses(capture, native, sales, order_headers=headers)
-            # 完整性、归属冲突及整店挂起仍由同一准备器判定，再按官方历史筛选可能算价对象。
+            # 订单缺项逐单保留；四类公共名单完整后，只对保留下来的目标查询官方历史。
             prepared = prepare_pricing(capture, order_preparation=order_preparation).report
             if len(prepared['evaluation_complete_sources']) == 4:
                 refs = prepared['references']

@@ -155,6 +155,35 @@ def test_fresh_collection_runs_download_clean_evaluate_and_archive(tmp_path, mon
     assert result['fixed_fee_status'] == 'unavailable'
 
 
+def test_manual_cli_stops_with_ready_prices_even_if_submit_enabled(tmp_path, monkeypatch, capsys):
+    from app import erp_workflow as cli
+    from app.adapters.http import HttpAdapter
+    from app.adapters.manual_live import ManualLiveAdapter
+
+    config, capture_id, evidence = inputs(tmp_path)
+    config.live_submit_enabled = True
+    monkeypatch.setattr(cli, 'get_settings', lambda: config)
+    def read_only_run(settings, **kwargs):
+        assert not settings.live_submit_enabled
+        return run_workflow(settings, **kwargs)
+    from app.services.erp_workflow import run_workflow
+    monkeypatch.setattr(cli, 'run_workflow', read_only_run)
+    def unexpected_upload(*args, **kwargs):
+        pytest.fail('手动测试不得调用价格上传')
+    for adapter in (HttpAdapter, ManualLiveAdapter):
+        monkeypatch.setattr(adapter, 'submit', unexpected_upload)
+    path = tmp_path / 'evidence.json'
+    path.write_text(json.dumps(evidence))
+    monkeypatch.setattr(sys, 'argv', ['erp_workflow', '--capture-id', capture_id, '--evidence', str(path)])
+    assert cli.main() == 2  # 两条可算，另一条缺项，不以就绪数覆盖原退出码。
+    output = capsys.readouterr()
+    result = json.loads(output.out)
+    assert config.live_submit_enabled  # 本次关闭不回写原配置。
+    assert '算价通过 2 条，未提交价格' in output.err
+    pending = Path(result['artifact_dir']) / 'pending-prices.json'
+    assert str(pending) in output.err and len(json.loads(pending.read_text())['decisions']) == 2
+
+
 def test_cli_missing_evidence_returns_nonzero_after_persisting_report(tmp_path):
     _, capture_id, _ = inputs(tmp_path)
     command = subprocess.run(

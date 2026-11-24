@@ -24,7 +24,7 @@ export interface RecordItem {
   process?: { id: string; updated_at: string; stage: string; reason: string }[]
   id: string; batch_id: string; key: Record<string, string>
   seller: { id: string | null; name: string }; department: string | null; shop_name: string | null
-  status: ItemStatus; reason: string; updated_at: string; business_date: string; mode: string; synthetic: boolean
+  status: ItemStatus; phase?: string | null; reason: string; updated_at: string; business_date: string; mode: string; synthetic: boolean
   first_margin: { amount: string; currency: string } | null
   decision: { current_actual: string | null; target_actual: string | null; upload_price: string | null
     price_change: string | null
@@ -33,7 +33,7 @@ export interface RecordItem {
     price_limit?: PriceLimit | null
     trace: { station_currency: string | null } } | null
   corrected_first_margin: { amount: string; currency: string } | null
-  execution: { state: string; task_id: string | null; uploaded_price: string | null; actual_price: string | null
+  execution: { state: string; submit_status?: string | null; row_status?: string | null; task_id: string | null; uploaded_price: string | null; actual_price: string | null
     confirmed_at: string | null; effective_at: string | null; effective_time_source: string | null; updated_at: string } | null
 }
 export interface RecordData {
@@ -134,10 +134,26 @@ export function recordStatusLabel(status: string): string {
   return ({ '已核验': '已提价', '待核验': '待处理', '待处理': '待处理' }[status] ?? status)
 }
 
-// 仅展示本条已保存的原因，不从销量、历史尝试或价格推导新的保护结论；空值明确未记录。
+// 类别只使用本条持久执行阶段及回执类型；原始原因完整保留，查询失败未持久化时不能猜测。
 export function recordStateReason(item: RecordItem): string {
   if (item.status === '已核验') return '商品符合调价'
-  return typeof item.reason === 'string' && item.reason.trim() ? item.reason : '原因未记录'
+  const reason = typeof item.reason === 'string' && item.reason.trim() ? item.reason : '原因未记录'
+  if (item.status !== '待处理' && item.status !== '待核验') return reason
+  const execution = item.execution
+  let category = ''
+  if (execution?.state === 'unknown') category = '提交结果未知，仅核验、不自动重传'
+  else if (execution?.state === 'submitting') category = '提交中或结果未确认，仅核验、不自动重传'
+  else if (execution?.state === 'accepted') category = '已受理，待回读实际价格'
+  else if (execution?.state === 'mismatch') category = '回读核验未通过'
+  else if (execution?.state === 'failed' && execution.row_status === 'rejected') category = '逐行处理失败'
+  else if (execution?.state === 'failed' && execution.submit_status === 'rejected') category = '提交被拒绝'
+  else if (execution?.state === 'failed' && execution.submit_status === 'not_submitted') category = '未提交'
+  else if (!execution && item.phase === 'proposed') category = '待提交'
+  // 历史代码在空回执消息时统一写入受理文案；其他状态不能以此证明受理，仍保留原文供核对。
+  if (execution && execution.state !== 'accepted' && reason === '上传已受理，等待实际价格回读') {
+    return `${category || '执行结果未明确'}；原记录说明（可能为默认文案）：${reason}`
+  }
+  return category && reason !== category ? `${category}；${reason}` : reason
 }
 
 export const recordDisplayStates = ['已核验', '待处理', '本轮不调'] as const

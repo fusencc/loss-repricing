@@ -447,18 +447,17 @@ def live_scoped_preparation(capture,evidence):
         'references':{'currency_contract':'erp-order-finance-rmb-20261111','order_headers':'headers'}}
 
 
-def test_live_unknown_product_holds_whole_proven_shop_but_preserves_other_shops(source_files):
+@pytest.mark.parametrize('has_shop_header', [True, False])
+def test_live_missing_native_order_only_skips_that_order(source_files, has_shop_header):
     from app.adapters.erp_pricing import prepare_pricing
     capture,evidence=source_files
     prep=live_scoped_preparation(capture,evidence)
+    if not has_shop_header:
+        prep['shop_scopes'] = {}
     report=prepare_pricing(capture,order_preparation=prep).report
-    assert report['summary']['normalized_detail_lines']==1
-    assert [report['references']['lines'][rid]['order_id'] for rid in report['references']['retained_row_ids']]==['000002']
-    assert 'loss_pending' in report['evaluation_complete_sources']
-    assert any(row['order_id']=='000001' and row['code']=='shop_held' for row in report['issues'])
-    prep['shop_scopes']={}
-    report=prepare_pricing(capture,order_preparation=prep).report
-    assert 'loss_pending' not in report['evaluation_complete_sources']
+    assert len(report['evaluation_complete_sources']) == 4
+    assert {report['references']['lines'][rid]['order_id'] for rid in report['references']['retained_row_ids']} == {'000001', '000002'}
+    assert [(row['order_id'], row['code']) for row in report['issues']] == [('000003', 'missing_order_details')]
 
 
 def test_live_conflicting_shop_scope_never_localizes_a_missing_order(source_files):
@@ -470,13 +469,12 @@ def test_live_conflicting_shop_scope_never_localizes_a_missing_order(source_file
 
 
 
-def test_missing_header_known_line_cannot_escape_shop_hold_using_a_different_sales_id(source_files):
+def test_positive_evidence_of_conflicting_shop_ids_still_blocks_preparation(source_files):
     from app.adapters.erp_pricing import prepare_pricing
     capture,evidence=source_files;prep=live_scoped_preparation(capture,evidence)
     prep['orders'][0]['lines'][0]['mapping']['key']['shop_id']='SALES-DIFFERENT-ID'
     report=prepare_pricing(capture,order_preparation=prep).report
-    assert report['summary']['normalized_detail_lines']==1
-    assert any(i['order_id']=='000001' and i['code']=='shop_held' for i in report['issues'])
+    assert report['evaluation_complete_sources'] == []
 
 
 
@@ -493,11 +491,7 @@ def test_live_online_bundle_uses_same_engine_and_cannot_cross_capture(source_fil
     from app.adapters.erp_pricing import prepare_pricing
     from app.domain.engine import evaluate
     capture,evidence=source_files;prep=live_scoped_preparation(capture,evidence)
-    # 第三单仍整店挂起，前两单属独立店；统一引擎可计算第一单。
-    prep['shop_scopes']['000003'].update(shop_id='HELD-ID',erp_shop='HELD-PH')
-    for group in capture['groups']:
-        for row in group['rows']:
-            if row['orderid']=='000003':row['fields']['店铺']='HELD-PH'
+    # 第三单缺原生明细，第一单同店也应进入统一引擎算价。
     online=deepcopy(evidence['online'][:1]);online[0]['state']['fee_scope']='erp-corrected-first-margin-v1'
     bundle={'schema_version':'erp-live-online-preparation-v2','version':'erp-live-online-v2',
         'erp_capture_id':capture['capture_id'],'synthetic':True,'sample_only':False,'pricing_ready':False,
@@ -517,7 +511,7 @@ def test_live_online_bundle_uses_same_engine_and_cannot_cross_capture(source_fil
         prepare_pricing(capture,current_fx=fx,order_preparation=prep,online_preparation=bundle)
 
 
-def test_status_changed_unknown_product_holds_proven_shop_without_poisoning_other_shops(source_files):
+def test_status_changed_unknown_product_is_skipped_without_holding_its_shop(source_files):
     from app.adapters.erp_pricing import prepare_pricing
     capture,evidence=source_files;prep=live_scoped_preparation(capture,evidence)
     for group in capture['groups']:

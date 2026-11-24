@@ -420,7 +420,6 @@ ISSUE_REASONS = {
     "missing_online_mapping": "缺少到具体在线子 SKU 的可靠映射",
     "missing_line_loss": "缺少可归属到该明细的亏损金额、数量或币种证据",
     "unreliable_order_loss": "整单金额需要可靠同SKU归属证明，不能向多个独立明细重复使用",
-    "shop_held": "同一稳定店铺仍有未解决的商品归属，暂挂该店铺全部候选",
     "target_held": "同一在线商品还有未解决的订单证据，暂不能确定最小有效亏损",
 }
 
@@ -575,7 +574,7 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
         evidence_refs.update(fx=current_fx.ref, current_fx=current_fx.model_dump(mode='json'))
 
     issues, normalized, references = [], [], {}
-    incomplete_sources, held_targets, held_shops, held_shop_names = set(), set(), set(), set()
+    incomplete_sources, held_targets = set(), set()
     if live is not None:
         shop_ids_by_name = defaultdict(set)
         for scope in live.shop_scopes.values():
@@ -594,15 +593,10 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
                  if row.fields.shop and row.fields.shop.strip()}
         order_problem = _order_problem(source_rows, groups, shops)
         scope = live.shop_scopes.get(order_id) if live is not None else None
-        localized = (scope is not None and shops == {scope.erp_shop}
-            and order_problem in (None,'order_status_conflict'))
-
-        def hold_unknown():
-            if localized:
-                held_shops.add(scope.shop_id)
-                held_shop_names.add(scope.erp_shop)
-            else:
-                incomplete_sources.update(sources)
+        # 实时采集已给出候选订单号；原生明细未就绪或缺子 SKU 映射时只排除该单，
+        # 不虚构商品键，也不把同店其他订单一起排除。财务缺行或店铺证据矛盾不属此例。
+        order_can_be_skipped = (live is not None and order_problem in (None, 'order_status_conflict')
+                                and (scope is None or shops == {scope.erp_shop}))
 
         details_problem = None
         if order is None:
@@ -616,7 +610,8 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
             if order_problem:
                 _add_issue(issues, order_id, sources, order_problem)
             _add_issue(issues, order_id, sources, details_problem)
-            hold_unknown()
+            if not order_can_be_skipped:
+                incomplete_sources.update(sources)
             continue
 
         if order_problem in {"missing_order_shop", "order_shop_conflict"}:
@@ -636,12 +631,12 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
                     _add_issue(issues, order_id, sources, order_problem, line)
                 code = "missing_online_mapping" if line.mapping is None else "mapping_shop_mismatch"
                 _add_issue(issues, order_id, sources, code, line)
-                # 未知商品可能与已有候选同 SKU，无法证明该来源的最小亏损。
-                hold_unknown()
+                if line.mapping is not None or not order_can_be_skipped:
+                    incomplete_sources.update(sources)
                 continue
             if scope is not None and line.mapping.key.shop_id != scope.shop_id:
                 _add_issue(issues, order_id, sources, "mapping_shop_mismatch", line)
-                hold_unknown()
+                incomplete_sources.update(sources)
                 held_targets.add(line.mapping.key.target_identity())
                 continue
             if problem := order_problem or _line_problem(line, len(order.lines), sales_conflicts):
@@ -663,9 +658,6 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
 
     lines = []
     for row_id, order_id, sources, line in normalized:
-        if (line.mapping.key.shop_id in held_shops or line.mapping.erp_shop in held_shop_names):
-            _add_issue(issues, order_id, sources, "shop_held", line)
-            continue
         if line.mapping.key.target_identity() in held_targets:
             _add_issue(issues, order_id, sources, "target_held", line)
             continue
@@ -725,7 +717,13 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
         ):
             global_issues.append(f"{source} 标记完成，但候选、财务行或子批证据未能对齐")
     if len(complete_sources) != len(SOURCES):
-        global_issues.append("四类候选覆盖或明细归属仍有未定位缺口")
+        unavailable_lists = [f"{'亏损订单' if kind == 'loss' else '禁止发货'} × {STATUS_LABELS[status]}"
+                             for source, (kind, status) in SOURCES.items()
+                             if source not in groups or not groups[source].list_complete]
+        if unavailable_lists:
+            global_issues.append(f"候选名单未取全：{'、'.join(unavailable_lists)}；不能按零订单算价")
+        else:
+            global_issues.append("四类候选覆盖或明细归属仍有未定位缺口")
     if fx is None:
         global_issues.append("缺少带日期及来源引用的汇率，尚未进入算价")
 

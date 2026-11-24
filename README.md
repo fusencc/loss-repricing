@@ -31,6 +31,8 @@
 
 ## 3. 本地启动与停止
 
+如果是手动测试真实来源、只想运行到算好价格，直接在 WSL 项目根目录执行 `PYTHONPATH=backend .venv/bin/python -m app.erp_workflow`。算好后保存清单并退出，不提交价格；结果位置见[手动算价测试说明](docs/erp-pricing-preview.md)。
+
 主要开发环境为 WSL2。在 WSL 终端进入自己的项目根目录，执行：
 
 ```bash
