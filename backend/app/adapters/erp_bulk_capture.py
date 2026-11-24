@@ -288,7 +288,7 @@ def write_comparison_workbook(folder, financial_paths, loss_path, *, filename='�
 
 
 def _blocked_ids(post, group, *, salesperson=None, evidence_dir=None):
-    """只发布整页校验通过的订单；保留其在候选数组中的半开区间，失败页不能贡献订单。"""
+    """按实际返回订单采集；动态总数及短页不报异常，身份与范围仍逐页核对。"""
     if salesperson is not None:
         seller_id = group['filters'].get('shopUsernameid')
         if not isinstance(seller_id, str) or not seller_id or seller_id != seller_id.strip():
@@ -299,7 +299,9 @@ def _blocked_ids(post, group, *, salesperson=None, evidence_dir=None):
     while True:
         evidence = []
         try:
-            # 11/24 两个大部门 limit=200 读超时；20 行首页实测成功。仍须逐页核对总数与范围。
+            # 11/24 用户取消动态名单的数量一致性拦截：total 是本次请求的观察值，
+            # 不是冻结快照。按当前页推进，短页或到达本页总数即结束，不回头补采。
+            # 20 行分页仍沿用实测合同；金额及订单归属校验不受本次调整影响。
             body = dict(group['filters'], page=page, limit=BLOCKED_PAGE_SIZE)
             kwargs = {'page_evidence': evidence.append} if evidence_dir is not None else {}
             data = post(BLOCKED_LIST, body, **kwargs)
@@ -307,8 +309,8 @@ def _blocked_ids(post, group, *, salesperson=None, evidence_dir=None):
             total = data.get('total') if isinstance(data, dict) else None
             if type(total) is not int or total < 0 or not isinstance(records, list):
                 raise SourceUnavailable('ERP禁止发货分页结构无效，不能判为零单')
-            if (page > 1 and total != group['total']) or len(records) != min(BLOCKED_PAGE_SIZE, total-len(ids)):
-                raise SourceUnavailable('ERP禁止发货分页总数或页长变化，本页未入选')
+            if len(records) > BLOCKED_PAGE_SIZE:
+                raise SourceUnavailable('ERP禁止发货分页返回超过请求页长')
             verified = {}
             for row in records:
                 order = row.get('orderid') if isinstance(row, dict) else None
@@ -336,7 +338,10 @@ def _blocked_ids(post, group, *, salesperson=None, evidence_dir=None):
         group['total'] = total
         group['pages'].append({'page': page, 'total': total, 'rows': len(verified),
                                'verified': True, 'start': start, 'end': len(ids)})
-        if len(ids) == total:
+        if len(records) < BLOCKED_PAGE_SIZE or page * BLOCKED_PAGE_SIZE >= total:
+            # 下游 total 表示本轮实际候选数量；各页原始 total 保留在 pages，
+            # 不把源端动态数量差异转成不完整或异常，不声称获得冻结名单。
+            group['total'] = len(ids)
             return ids
         page += 1
 
@@ -433,7 +438,7 @@ def capture_erp_bulk(settings, *, source=None, client=None, web_session=None, ma
                        'total':None,'error':None,'failed_pages':[],'files':[],'pages':[],
                        'list_complete':False,'stage':'not_attempted','batches':[],
                        'status_discrepancies':[],'missing_order_ids':[]})
-    result = {'source_version':'erp-web-bulk-four-20261109','collection_policy_version':'verified-pages-20261124','source_kind':'erp_web_backend',
+    result = {'source_version':'erp-web-bulk-four-20261109','collection_policy_version':'observed-pages-20261124','source_kind':'erp_web_backend',
               'sample_only':max_orders is not None,'selection_complete':False,
               'acquisition_mode':'bulk_download','queried_at':now.isoformat(),'groups':groups,
               'details':[],'capture_complete':False,'pricing_ready':False,'stopped_by_rate_limit':False,

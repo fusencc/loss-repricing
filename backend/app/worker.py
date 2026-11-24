@@ -117,7 +117,20 @@ class Worker:
                 # 试点名单走四类来源的逐人采集入口；通用正式任务没有名单过滤能力。
                 config = service_config.model_copy(update={'live_submit_enabled': False})
                 capture = run_workflow(config, roster_date=roster_date)
-                error = self._morning_log(config, roster_date, capture=capture)
+                from app.services.roster_notices import enqueue_roster_notices
+                try:
+                    enqueue_roster_notices(self.factory, config, roster_date, capture)
+                except Exception as exc:
+                    # 消息入队失败不影响结果存档，也不能因此重新采集。
+                    error_id = event('worker.roster_notice_enqueue_failed', exception=exc)
+                    error = f"固定名单钉钉通知入队失败，排查编号：{error_id}"
+                log_error = self._morning_log(config, roster_date, capture=capture)
+                error = "；".join(filter(None, (error, log_error))) or None
+            elif job.kind == "erp_roster_notice":
+                from app.services.roster_notices import send_roster_notice
+                result = send_roster_notice(self.factory, service_config, job.id, self.owner)
+                if result['state'] != 'accepted':
+                    state, error = 'failed', result['error']
             elif job.kind == "run":
                 batch_id = (self.service.run_batch(job.id, item_id=job.payload["item_id"])
                             if job.payload.get("item_id") else self.service.run_batch(job.id))

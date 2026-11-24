@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     live_writer_exclusive: bool = False
     ding_alert_userid: str = ""  # 管理员告警的独立机器人私聊目标，不借用销售员归属。
     ding_enabled: bool = False
+    ding_roster_userids: dict[str, str] = Field(default_factory=dict, repr=False)
     ding_corp_id: str = ""
     ding_client_id: str = ""
     ding_client_secret: str = ""

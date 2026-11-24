@@ -54,7 +54,7 @@ class DingTalkClient:
             raise ValueError('钉钉免登失败，请重新获取授权码') from None
 
     def send_notice(self, userid, title, markdown, url):
-        # 官方人与机器人会话接口；每次只传已核对归属的一名销售员 userId。
+        # 官方人与机器人会话接口；每次只传一个经业务路由确认的销售员 userId。
         # 网页未部署时直接发送摘要，不伪造外网详情地址。
         if url:
             parsed=urlsplit(url)
@@ -64,24 +64,43 @@ class DingTalkClient:
             token=self._token()
         except Exception:
             return {'state':'failed','error':'钉钉应用凭证获取失败，未提交消息'}
-        text=markdown + (f"\n\n[查看详情]({url})" if url else '')
+        text = markdown + (f"\n\n[查看详情]({url})" if url else '')
+        message = {'title': title[:100], 'text': text}
+        # 沿用本机预算项目机器人单聊的请求和回执处理，使用本项目的应用凭据。
         try:
-            r=self.http.post(SEND, headers={'x-acs-dingtalk-access-token':token}, json={
-                'robotCode':self.config.ding_client_id,'userIds':[userid],
-                'msgKey':'sampleMarkdown','msgParam':json.dumps({'title':title[:100],'text':text},ensure_ascii=False)})
-            if 400 <= r.status_code < 500:
-                return {'state':'failed','error':f'机器人接口明确拒绝消息，HTTP {r.status_code}'}
-            r.raise_for_status()
-            data=r.json()
-            for field in ('invalidStaffIdList','filteredStaffIdList','flowControlledStaffIdList'):
-                if userid in data.get(field,[]):
-                    return {'state':'failed','error':'机器人接口明确未发送：'+field}
-            key=data.get('processQueryKey')
-            if isinstance(key,str) and key:
-                return {'state':'accepted','task_id':key}
-            return {'state':'unknown','error':'机器人未返回消息标识，禁止自动重发'}
+            response = self.http.post(
+                SEND,
+                headers={'x-acs-dingtalk-access-token': token},
+                json={
+                    'robotCode': self.config.ding_client_id,
+                    'userIds': [userid],
+                    'msgKey': 'sampleMarkdown',
+                    'msgParam': json.dumps(message, ensure_ascii=False),
+                },
+            )
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            return {'state': 'failed', 'error': '连接发送接口失败，未发送消息'}
         except Exception:
-            return {'state':'unknown','error':'发送响应未知，禁止自动重发'}
+            return {'state': 'unknown', 'error': '发送响应未知，禁止自动重发'}
+
+        if response.status_code >= 500:
+            return {'state': 'unknown', 'error': '发送服务返回错误，结果不明'}
+        try:
+            result = response.json()
+        except ValueError:
+            return {'state': 'unknown', 'error': '发送返回无法识别，需核查回执'}
+        if not isinstance(result, dict):
+            return {'state': 'unknown', 'error': '发送返回无法识别，需核查回执'}
+        if result.get('invalidStaffIdList') or result.get('filteredStaffIdList'):
+            return {'state': 'failed', 'error': '钉钉拒绝接收人，请核对绑定与应用范围'}
+        if response.status_code == 429 or result.get('flowControlledStaffIdList'):
+            return {'state': 'failed', 'error': '钉钉限流，消息未受理'}
+        if response.is_error:
+            return {'state': 'failed', 'error': f'机器人接口明确拒绝消息，HTTP {response.status_code}'}
+        key = result.get('processQueryKey')
+        if not isinstance(key, str) or not key:
+            return {'state': 'unknown', 'error': '机器人未返回消息标识，禁止自动重发'}
+        return {'state': 'accepted', 'task_id': key}
 
     def query_notice(self, task_id, userid):
         try:

@@ -499,7 +499,7 @@ def test_blocked_small_pages_have_disjoint_verified_ranges():
 
 
 @pytest.mark.parametrize('drift', [False, True])
-def test_blocked_pagination_preserves_full_pool_or_refuses_drift(tmp_path, drift):
+def test_blocked_pagination_uses_observed_orders_despite_total_drift(tmp_path, drift):
     pages = []
     submissions = []
     headers = ['订单编号','订单状态','平台','集团','毛利','修正毛利','修正一次毛利']
@@ -507,7 +507,7 @@ def test_blocked_pagination_preserves_full_pool_or_refuses_drift(tmp_path, drift
         path = request.url.path
         if path == '/finance.xlsx':
             return httpx.Response(200, content=xlsx(headers, [
-                ['B0000','待处理','Tiktok','集团二部',-1,-1,-1]]))
+                [f'B{i:04d}','待处理','Tiktok','集团二部',-1,-1,-1] for i in range(21)]))
         body = json.loads(request.content)
         if path.endswith('/login'):
             return httpx.Response(200, json={'code':200,'data':{'token':'SECRET'}})
@@ -528,15 +528,42 @@ def test_blocked_pagination_preserves_full_pool_or_refuses_drift(tmp_path, drift
         pytest.fail(path)
     settings = Settings(_env_file=None,runtime_dir=tmp_path,erp_username='u',erp_password='p')
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        result = capture_erp_bulk(settings, source='blocked_pending', max_orders=1, client=client)
+        result = capture_erp_bulk(settings, source='blocked_pending', client=client)
     group = result['groups'][0]
     assert pages == [1,2]
-    assert group['list_complete'] is not drift
-    assert submissions == [{'orderIdList':['B0000']}]
+    assert group['list_complete']
+    assert submissions == [{'orderIdList':[f'B{i:04d}' for i in range(21)]}]
     assert group['batches'][0]['status'] == 'complete'
-    if drift:
-        assert len(group['candidate_order_ids']) == 20 and group['failed_pages'] == [2]
-        assert '分页总数' in group['list_error']['error'] and not result['selection_complete']
-    else:
-        assert len(group['candidate_order_ids']) == 21
-        assert result['selection_complete'] and not result['capture_complete']
+    assert len(group['candidate_order_ids']) == group['total'] == 21
+    assert group['failed_pages'] == [] and 'list_error' not in group
+    assert group['error'] is None
+    assert group['pages'][-1]['total'] == (22 if drift else 21)
+    assert result['selection_complete'] and result['capture_complete']
+    from app.adapters.erp_pricing import CaptureGroup
+    normalized = CaptureGroup.model_validate(group)
+    assert normalized.finance_coverage('集团二部') == (True, False)
+
+
+@pytest.mark.parametrize('totals, counts', [
+    ([286, 289], [20, 3]),
+    ([40, 20], [20, 0]),
+    ([20], [3]),
+    ([0], [0]),
+    ([21, 40], [20, 20]),
+])
+def test_blocked_dynamic_counts_end_without_incomplete_or_rescan(totals, counts):
+    from app.adapters.erp_bulk_capture import _blocked_ids
+    requested = []
+    def post(path, body):
+        page = body['page']
+        requested.append(page)
+        start = (page - 1) * 20
+        return {'total': totals[page - 1], 'records': [
+            {'orderid':f'B{i}', 'status':4, 'platform':'Tiktok', 'jzfh':'1'}
+            for i in range(start, start + counts[page - 1])
+        ]}
+    group = {'status':4, 'filters':{}, 'pages':[], 'total':None}
+    ids = _blocked_ids(post, group)
+    assert requested == list(range(1, len(counts) + 1))
+    assert len(ids) == group['total'] == sum(counts)
+    assert 'list_error' not in group and not group.get('failed_pages')
