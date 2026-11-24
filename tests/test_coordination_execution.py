@@ -118,11 +118,11 @@ def test_manual_price_keeps_profit_and_rounding_checks(world):
         manual_decision(snapshot,snapshot.online[0],Decimal("10"),"reason","c1",utcnow())
 
 @pytest.mark.parametrize(("identity_changes", "blocked"), [
-    ({"item_id": "SIBLING"}, True),
+    ({"item_id": "SIBLING"}, False),
     ({"sku": "ALIAS"}, True),
     ({"shop_id": "OTHER", "item_id": "SIBLING"}, False),
 ])
-def test_manual_price_requires_valid_online_sales_scope(world, identity_changes, blocked):
+def test_manual_price_field_issues_only_hold_same_target(world, identity_changes, blocked):
     from app.domain.types import OnlineSourceIssue
     from app.services.corrections import manual_decision
 

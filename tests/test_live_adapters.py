@@ -333,7 +333,7 @@ def test_invalid_candidate_still_counts_as_a_separate_order_line(contract, make_
 
 
 @pytest.mark.parametrize("bad_main", ["0003", "CONFLICTING-MAIN"])
-def test_bad_online_state_holds_its_target_and_shared_main_sku(contract, make_adapter, bad_main):
+def test_bad_online_state_holds_only_its_target(contract, make_adapter, bad_main):
     from app.domain.engine import evaluate
 
     same_main_key = {**PRODUCT, "item": "008", "sku": "SIBLING"}
@@ -360,15 +360,14 @@ def test_bad_online_state_holds_its_target_and_shared_main_sku(contract, make_ad
 
     assert {state.key.item_id for state in snapshot.online} == {"008", "009"}
     assert results["003"].reason_code == "source_record_invalid"
-    assert results["008"].reason_code == "source_record_invalid"
-    assert results["008"].trace["source_issues"][0]["source"] == "online"
-    assert results["008"].trace["source_issues"][0]["record_number"] == 2
+    assert results["008"].ready and "source_issues" not in results["008"].trace
+    assert results["003"].trace["source_issues"][0]["record_number"] == 2
     assert results["009"].ready
     assert "010" not in results
 
 
 
-def test_shared_sales_issue_evidence_is_bounded_per_candidate(contract, make_adapter):
+def test_unrelated_field_issues_remain_in_snapshot_not_sibling_decisions(contract, make_adapter):
     from app.domain.engine import evaluate
 
     candidates = [
@@ -389,10 +388,7 @@ def test_shared_sales_issue_evidence_is_bounded_per_candidate(contract, make_ada
 
     assert len(snapshot.source_issues) == 25 and len(results) == 10
     for result in results:
-        assert result.reason_code == "source_record_invalid" and not result.ready
-        assert len(result.trace["source_issues"]) == 1
-        assert result.trace["source_issues"][0]["record_number"] == 11
-        assert result.trace["source_issues"][0]["relation"] == "shared_main_sku"
+        assert result.ready and 'source_issues' not in result.trace
 
 
 

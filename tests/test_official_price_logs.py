@@ -91,7 +91,9 @@ def execution_db(tmp_path):
     engine,factory=create_database(f'sqlite:///{tmp_path}/live.db')
     Base.metadata.create_all(engine)
     decision=Decision(key=KEY,status='待核验',ready=True,reason_code='manual_correction',reason='test',source_row_ids=[],
-        target_actual=Decimal('34.872'),upload_price=Decimal('87.18'),upload_column='税后价格')
+        target_actual=Decimal('34.872'),upload_price=Decimal('87.18'),upload_column='税后价格',
+        trace={'online_rows':[{'profit_check':{'model':{
+            'revenue_factor':'0.64','fixed_cost':'20','fixed_cost_divisor':'1','version':'test','verified':True}}}]})
     with factory.begin() as s:
         s.add(Batch(id='batch',run_key='manual:test',mode='live',business_date='2026-11-17',created_at=stamp(),status='completed',snapshot={},summary={}))
         s.flush()
@@ -166,7 +168,9 @@ def test_manual_lookup_collects_official_logs_and_returns_four_prices(tmp_path,m
     adapter=module.ManualLiveAdapter(Settings(_env_file=None),a,tmp_path)
     adapter._logs=lambda:[log]
     adapter._request=lambda *args,**kwargs:{'resp_code':0,'datas':{'requestBody':{'skus':[{'id':'item-1','price':{'amount':'82.19','currency':'PHP'}}]},'responseResult':{'code':0}}}
-    raw={'acquisition_complete':True,'records':[{'data':{'update_time':1,'skus':[{'id':'item-1','seller_sku':'SKU-1',
+    # 税前价加物流为 87.19；零 VAT 证明回读含税价比上传价高一分的来源。
+    raw={'acquisition_complete':True,'records':[{'company_parent':{'taxVatRate':'0'},
+        'data':{'update_time':1,'skus':[{'id':'item-1','seller_sku':'SKU-1',
         'price':{'currency':'PHP','sale_price':'87.19','tax_exclusive_price':'82.19'}}]},'current_variants':[{
             'sellerSkuId':'item-1','sellerSku':'SKU-1','productId':'product-1','shopId':'shop-1','currency':'PHP',
             'priceIncludeVat':'87.19','marketPrice':'34.88','discount':'60','logisticsCost':'5'}]}]}

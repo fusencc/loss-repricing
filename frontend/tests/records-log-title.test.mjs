@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
-import { recordDateLabel } from '../src/records-model.ts'
+import { recordDateLabel, recordDateValue } from '../src/records-model.ts'
 
 const row = (overrides = {}) => ({ status: '已核验', updated_at: '2026-11-23T04:00:00Z',
   execution: null, ...overrides })
@@ -37,14 +37,34 @@ test('missing, invalid and timezone-less timestamps never become today or busine
   assert.equal(recordDateLabel([effective('invalid')]), '提价核验日期：2026/11/24（北京时间）')
 })
 
-test('title, date and Excel follow natural wrapping flex order without consuming close-button space', async () => {
+test('title date value shows only the newest day once, without pretending which date it is', () => {
+  const confirmation = row({ execution: { effective_at: '2026-11-22T17:00:00Z',
+    effective_time_source: 'confirmed_at', confirmed_at: '2026-11-22T17:00:00Z' } })
+  // 同一天只出现一次。
+  assert.equal(recordDateValue([confirmation]), '2026/11/23')
+  // 多个性质并存时选最新一天，只显示日期本身。
+  assert.equal(recordDateValue([effective('2026-11-21T01:00:00Z'), confirmation, row()]), '2026/11/23')
+  // 日期范围取最新端。
+  assert.equal(recordDateValue([effective('2026-11-23T17:00:00Z'), effective('2026-11-21T17:00:00Z')]), '2026/11/24')
+  assert.equal(recordDateValue([row({ updated_at: '2026-11-23T01:00:00Z' }), row({ updated_at: '2026-11-17T18:00:00Z' })]),
+    '2026/11/23')
+  assert.equal(recordDateValue([]), '日期未记录')
+  assert.equal(recordDateValue([row({ updated_at: 'invalid' })]), '日期未记录')
+})
+
+test('title, latest date and Excel stay on one flex row with the date before the download', async () => {
   const source = await readFile(new URL('../src/RecordsPage.vue', import.meta.url), 'utf8')
   const css = await readFile(new URL('../src/records.css', import.meta.url), 'utf8')
-  assert.match(source, /<div class="records-log-title">\s*<h2[^>]*>\{\{ logTitle \}\}<\/h2>\s*<p class="records-log-date">\{\{ logDate \}\}<\/p>\s*<button[^>]*records-log-download/)
+  assert.match(source, /<div class="records-log-title">\s*<h2[^>]*>\{\{ logTitle \}\}<\/h2>\s*<span class="records-log-date" :title="logDateTitle">\{\{ logDate \}\}<\/span>\s*<button[^>]*records-log-download/)
   assert.doesNotMatch(source, /logHitCount|logTotal|records-log-count|hit-count|records-log-title-text/)
-  assert.match(css, /\.records-log-title\{[^}]*display:flex;[^}]*flex-wrap:wrap/)
+  assert.match(source, /recordDateValue\(activeSeller\.value\?\.items \?\? \[\]\)/)
+  assert.match(css, /\.records-log-title\{[^}]*display:flex;[^}]*flex-wrap:nowrap/)
+  assert.match(css, /\.records-log-title h2\{[^}]*flex:1 1 auto/)
   const downloadRule = css.match(/\.records-log-title \.records-log-download\{([^}]*)\}/)[1]
   assert.doesNotMatch(downloadRule, /margin-left:auto|position:absolute|flex:1/)
+  const dateRule = css.match(/\.records-log-date\{([^}]*)\}/)[1]
+  assert.match(dateRule, /flex:none/)
+  assert.match(dateRule, /white-space:nowrap/)
   assert.doesNotMatch(css, /\.records-log-title-text/)
   assert.match(css, /\.records-dialog \.el-dialog__header\{padding:25px 64px 12px 28px/)
 })

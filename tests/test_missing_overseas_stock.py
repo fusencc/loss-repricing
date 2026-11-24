@@ -18,7 +18,7 @@ WARNING = '海外库存缺失，已按直发模型计算，请核实库存'
 def test_missing_stock_prepares_direct_model_without_fabricating_zero(stock):
     capture, targets, inputs = sources()
     variant = inputs['platform']['records'][0]['current_variants'][0]
-    variant.update(localWeight='21', costPrice='2')
+    variant.update(localWeight='21', costPrice='2', overseasStockWarehouseInfo='[]')
     if stock == 'absent':
         variant.pop('overseasStockSum')
     else:

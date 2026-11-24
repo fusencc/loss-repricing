@@ -90,9 +90,15 @@ def test_failed_cleaning_does_not_publish_pending_prices(tmp_path, monkeypatch):
 def test_fresh_collection_runs_download_clean_evaluate_and_archive(tmp_path, monkeypatch, fx_available):
     from app.services import erp_workflow
     from test_erp_bulk_capture import run
+    from test_daily_sales_fees import setup as setup_fees
     from datetime import datetime, timedelta, timezone
     from app.domain.engine import BEIJING
+    from app.adapters.current_pricing_fees import refresh_daily_fees
     collected = {}
+    _, fee_rows, _, fee_client = setup_fees(tmp_path)
+    fee_rows['_invalid'] = list(fee_rows)
+    monkeypatch.setattr(erp_workflow, 'refresh_daily_fees',
+        lambda settings: refresh_daily_fees(settings, client=fee_client, synthetic=True))
 
     # 替代外部 HTTP 服务；实际采集器、XLSX读取、归档、SQLite及规则均执行。
     def collect(settings, **kwargs):

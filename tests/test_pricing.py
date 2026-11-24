@@ -4,7 +4,7 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from app.domain.engine import allowed_error, evaluate
+from app.domain.engine import BEIJING, allowed_error, evaluate, snapshot_problem
 from app.domain.types import FeeModel, OnlineProfitCheck, OnlineState, SiteContract, Snapshot, SourceLine, VariantKey
 
 
@@ -260,6 +260,27 @@ def test_previous_day_fx_blocks_even_when_amounts_are_already_station_currency()
     result = single(snapshot_fields={"fx_date": date(2026, 11, 4)})
     assert result.status == "待处理"
     assert not result.ready
+
+
+@pytest.mark.parametrize(('age_minutes','expected'), [(10,'ready'), (15,'ready'), (16,'stale_snapshot')])
+def test_midnight_window_for_complete_previous_business_day_snapshot(age_minutes, expected):
+    seen = datetime(2026, 11, 5, 23, 55, tzinfo=BEIJING)
+    evaluated = seen + timedelta(minutes=age_minutes)
+    variant = key()
+    profit = online(variant).profit_check.model_copy(update={'inventory_observed_at': seen})
+    state = online(variant, observed_at=seen, profit_check=profit)
+    batch = snapshot([line(variant)], [state], as_of=seen)
+    result = evaluate(batch, evaluated)[0]
+    assert result.reason_code == expected
+    assert result.ready == (expected == 'ready')
+    # 新业务日任务不能用上一日快照替代重新采集；也不能拼接不属于快照业务日的汇率。
+    assert snapshot_problem(batch, evaluated, evaluated.date())[0] == 'stale_snapshot'
+    if expected == 'ready':
+        batch.fx_date = evaluated.date()
+        assert evaluate(batch, evaluated)[0].reason_code == 'invalid_fx'
+        batch.fx_date = batch.business_date
+        batch.online[0].observed_at = seen - timedelta(minutes=6)
+        assert evaluate(batch, evaluated)[0].reason_code == 'stale_online'
 
 
 @pytest.mark.parametrize("rates", [{"CNY": "1"}, {"CNY": "1", "MYR": "0"}, {"CNY": "2", "MYR": "0.6"}])

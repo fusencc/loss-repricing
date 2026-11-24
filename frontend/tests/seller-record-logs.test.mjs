@@ -43,7 +43,7 @@ test('dialog title shows evidence dates without total or hit counts, while filte
   const { readFile } = await import('node:fs/promises')
   const page = await readFile(new URL('../src/RecordsPage.vue', import.meta.url), 'utf8')
   const source = await readFile(new URL('../src/SellerRecordLogs.vue', import.meta.url), 'utf8')
-  assert.match(page, /#header="\{ titleId, titleClass \}"[\s\S]*<h2 :id="titleId"[^>]*>\{\{ logTitle \}\}<\/h2>\s*<p class="records-log-date">\{\{ logDate \}\}<\/p>/)
+  assert.match(page, /#header="\{ titleId, titleClass \}"[\s\S]*<h2 :id="titleId"[^>]*>\{\{ logTitle \}\}<\/h2>\s*<span class="records-log-date" :title="logDateTitle">\{\{ logDate \}\}<\/span>/)
   assert.doesNotMatch(page + source, /logHitCount|logTotal|records-log-count|hit-count|hitCount|defineEmits/)
   assert.match(source, /seller\.items\.length : recordStatusCount\(seller\.counts, state\)/)
   const seller = groupBySeller([item(), { ...item(), id: 'second', status: '待处理' }, { ...item(), id: 'third', status: '已核验' }])[0]

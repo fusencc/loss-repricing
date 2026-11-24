@@ -59,8 +59,10 @@ def setup(tmp_path):
 def at(day):return datetime(2026,11,day,8,tzinfo=ZoneInfo("Asia/Shanghai"))
 
 def source(settings, client, capture_id="C1"):
-    return fees.capture_current_fees(settings,{"capture_id":capture_id,"synthetic":True},
-        {"records":[{"company_parent":{"department":"D1","shopName":"SHOPPH","mainlandId":1}}]},client=client)
+    now = datetime.now(ZoneInfo('Asia/Shanghai'))
+    daily = fees.refresh_daily_fees(settings, client=client, now=now, synthetic=True)
+    return fees.capture_current_fees(settings, {'capture_id': capture_id, 'synthetic': True,
+                                     'queried_at': now.isoformat()}, daily=daily)
 
 
 def test_daily_cache_persists_restart_and_keeps_unchanged_version(tmp_path):
@@ -80,17 +82,28 @@ def test_daily_cache_persists_restart_and_keeps_unchanged_version(tmp_path):
     assert "SECRET_TEST_TOKEN" not in open(changed["artifact_file"]).read()
 
 
-def test_failed_today_does_not_reuse_yesterday_or_query_again(tmp_path):
+def test_failed_today_retries_only_missing_scopes_and_never_uses_yesterday(tmp_path):
     settings,data,calls,client=setup(tmp_path)
     fees.refresh_daily_fees(settings,client=client,now=at(23),synthetic=True)
-    data["departments"]=None
-    failed=fees.refresh_daily_fees(settings,client=client,now=at(24),synthetic=True)
-    assert not failed["acquisition_complete"]
-    assert failed["raw"]["departments"]==[]
-    assert failed["raw"]["overseas"]
-    count=len(calls)
-    fees.refresh_daily_fees(settings,client=client,now=at(24),synthetic=True)
-    assert len(calls)==count
+    departments = data['departments']
+    data['departments'] = None
+    failed = fees.refresh_daily_fees(settings,client=client,now=at(24),synthetic=True)
+    assert not failed['acquisition_complete'] and failed['raw']['departments'] == []
+    assert failed['raw']['overseas']
+    data['departments'] = departments
+    data['overseas'][0]['platformRate'] = '99'  # 已成功范围同日不重抓。
+    calls.clear()
+    recovered = fees.refresh_daily_fees(settings,client=client,now=at(24).replace(hour=9),synthetic=True)
+    assert recovered['acquisition_complete'] and recovered['issues'] == []
+    assert recovered['raw']['departments'] == departments
+    assert recovered['raw']['overseas'] == failed['raw']['overseas']
+    assert recovered['scope_checked_at']['overseas'] == failed['checked_at']
+    assert recovered['scope_checked_at']['departments'] == recovered['checked_at']
+    assert [p for p in calls if not p.endswith('/token')] == [fees.DEPARTMENT]
+    assert set(f['file'] for f in failed['files']) < set(f['file'] for f in recovered['files'])
+    count = len(calls)
+    assert fees.refresh_daily_fees(settings,client=client,now=at(24),synthetic=True) == recovered
+    assert len(calls) == count
 
 
 def test_department_and_logistics_match_mainland_and_have_no_old_table_dependency(tmp_path,monkeypatch):
@@ -189,18 +202,29 @@ def test_workflow_refreshes_daily_fees_before_erp_collection(tmp_path,monkeypatc
 
 
 def test_daily_config_is_bound_after_capture_without_falsifying_check_time(tmp_path):
-    from datetime import timedelta, timezone
+    from datetime import timezone
     from app.adapters.erp_order_loss import _bound
     settings,data,calls,client=setup(tmp_path)
-    captured=datetime.now(timezone.utc)-timedelta(seconds=1)
-    # 当天首次检查早于本批次；后续批次只读取已保存的当天配置。
-    checked=captured.replace(hour=0,minute=0,second=0,microsecond=0)
+    captured = datetime.now(timezone.utc)
+    checked = captured.astimezone(ZoneInfo('Asia/Shanghai')).replace(hour=0,minute=0,second=0,microsecond=0)
     daily=fees.refresh_daily_fees(settings,client=client,now=checked,synthetic=True)
     capture={'capture_id':'LATER','queried_at':captured.isoformat(),'synthetic':True,'sample_only':False}
-    current=fees.capture_current_fees(settings,capture,None,client=client)
+    current=fees.capture_current_fees(settings,capture,daily=daily)
     _bound(capture,current,fees.SCHEMA)
     assert current['daily_source']['checked_at']==daily['checked_at']
     assert current['observation_kind']=='local_daily_config_binding'
+
+
+def test_binding_rejects_wrong_business_day_or_environment(tmp_path):
+    from app.adapters.base import SourceUnavailable
+
+    settings,_,_,client=setup(tmp_path)
+    daily = fees.refresh_daily_fees(settings,client=client,now=at(23),synthetic=True)
+    capture = {'capture_id':'CROSS','queried_at':at(24).isoformat(),'synthetic':True}
+    with pytest.raises(SourceUnavailable, match='业务日'):
+        fees.capture_current_fees(settings,capture,daily=daily)
+    with pytest.raises(SourceUnavailable, match='运行环境'):
+        fees.capture_current_fees(settings,dict(capture,queried_at=at(23).isoformat(),synthetic=False),daily=daily)
 
 
 def test_nonobject_response_is_isolated_and_persisted_for_today(tmp_path):
@@ -209,14 +233,44 @@ def test_nonobject_response_is_isolated_and_persisted_for_today(tmp_path):
     result=fees.refresh_daily_fees(settings,client=client,now=at(23),synthetic=True)
     assert not result['acquisition_complete'] and result['raw']['departments']==[]
     assert result['raw']['overseas'] and result['raw']['logistics']
-    count=len(calls)
-    fees.refresh_daily_fees(settings,client=client,now=at(23),synthetic=True)
-    assert len(calls)==count
+    calls.clear()
+    retry = fees.refresh_daily_fees(settings,client=client,now=at(23),synthetic=True)
+    assert not retry['acquisition_complete']
+    assert [p for p in calls if not p.endswith('/token')] == [fees.DEPARTMENT]
 
 
-def test_category_bound_public_fee_cannot_be_silently_replaced_with_generic(tmp_path):
+def test_category_bound_public_fee_does_not_hide_generic(tmp_path):
     settings,data,calls,client=setup(tmp_path)
     data['public'].append(dict(data['public'][2],id=99,shopProperty='铺货店铺',associationCategory=True,expense='20'))
     current=source(settings,client)
+    parent = {'department':'D1','shopName':'SHOPPH','mainlandId':1}
+    assert fees.select_current_rate(current,{},parent,'PH','direct')['commissionRate'] == '7.3'
+    current['config']['public'] = [r for r in current['config']['public'] if r['id'] != 42]
     with pytest.raises(ValueError,match='类目'):
-        fees.select_current_rate(current,{}, {'department':'D1','shopName':'SHOPPH','mainlandId':1},'PH','direct')
+        fees.select_current_rate(current,{},parent,'PH','direct')
+
+
+def test_auth_scope_filter_retains_valid_rows_across_pages(tmp_path):
+    settings,data,calls,client=setup(tmp_path)
+    data['departments'][:0] = [dict(data['departments'][0], id=200+i, authType=5, blocName='OTHER')
+                               for i in range(100)]
+    data['overseas'].append(dict(data['overseas'][0], id=3, shopName='SHOP', authType=1))
+    current = source(settings,client)
+    assert current['acquisition_complete'] and current['issues'] == []
+    assert [r['id'] for r in current['config']['departments']] == [10,11]
+    assert len(current['config']['overseas']) == 1
+    assert calls.count(fees.DEPARTMENT) == 2
+    assert current['warnings'] == [
+        {'scope':'overseas','code':'non_group_overseas_fee_scope','skipped_count':1},
+        {'scope':'departments','code':'non_department_fee_scope','skipped_count':100},
+    ]
+
+
+def test_all_wrong_auth_scopes_remain_unavailable(tmp_path):
+    settings,data,calls,client=setup(tmp_path)
+    data['departments'] = [dict(r, authType=5) for r in data['departments']]
+    current = source(settings,client)
+    assert not current['acquisition_complete'] and current['config']['departments'] == []
+    assert current['issues'] == [{'scope':'departments','code':'daily_departments_empty'}]
+    assert current['warnings'][0]['skipped_count'] == 2
+    assert current['config']['overseas']

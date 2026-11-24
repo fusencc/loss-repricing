@@ -1,7 +1,6 @@
-"""销售系统是费用与物流配置的唯一来源；北京时间每天首次任务前查询一次。
+"""销售系统是费用与物流配置的唯一来源；北京时间每天首次任务前检查。
 
-配置内容按哈希归档，检查日期单独持久化；同日跨批次、重启及并发复用。
-失败范围不回退昨日或Excel；批次只绑定当天检查结果，不重新查询费用。
+配置按哈希归档；同日复用已成功的范围，后续批次只补查失败范围，不回退昨日或Excel。
 """
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -34,9 +33,9 @@ def _json(value):
     return json.dumps(_json_values(value), ensure_ascii=False, sort_keys=True, separators=(',', ':'))
 
 
-def _collect(settings, directory, client):
-    """五类配置统一读取；店铺仅投影匹配费用所需属性，避免无关在线统计导致换版。"""
-    result = {'raw': {}, 'issues': [], 'files': []}
+def _collect(settings, directory, client, *, skip_scopes=()):
+    """仅查询尚未成功的范围；店铺仅保留匹配费用所需的属性。"""
+    result = {'raw': {}, 'issues': [], 'files': [], 'warnings': []}
     auth = SalesAuth(settings, client)
     context = private_request.set(True)
     specs = [('overseas', OVERSEAS, {'blocNames': [settings.erp_capture_bloc]}),
@@ -46,6 +45,8 @@ def _collect(settings, directory, client):
              ('shops', SHOPS, {'blocNames': [settings.erp_capture_bloc]})]
     try:
         for name, path, filters in specs:
+            if name in skip_scopes:
+                continue
             rows, seen, total, page = [], set(), None, 1
             # 店铺属性使用前端原生完整选项列表；分页列表按动态字段排序会跨页重复。
             limit = 1000 if name == 'shops' else 100
@@ -80,23 +81,35 @@ def _collect(settings, directory, client):
                         if not isinstance(row, dict) or row.get('id') is None or str(row['id']) in seen:
                             raise ValueError('费用记录身份缺失或重复')
                         seen.add(str(row['id']))
-                        if name == 'public':
-                            if row.get('platform') != 'TIKTOK': raise ValueError('公共费率平台不符')
-                        elif row.get('blocName') != settings.erp_capture_bloc:
-                            raise ValueError('费用集团归属不符')
-                        if name == 'departments' and row.get('authType') != 2:
-                            raise ValueError('仅使用部门费率，不使用个人或店铺覆盖')
-                        if name == 'overseas' and (row.get('authType') != 1 or
-                                any(row.get(k) for k in ('departmentName','userGroupName','authUserName','shopName'))):
-                            raise ValueError('仅使用集团海外仓费率')
                     # 原件响应逐页留证，不记录请求头或认证响应。目录仅当前用户可读。
                     file = directory / f'{name}-{page:04d}.json'
                     file.write_bytes(response.content)
-                    result['files'].append({'file': str(file.resolve()), 'path': path, 'request': body,
+                    result['files'].append({'scope': name, 'file': str(file.resolve()), 'path': path, 'request': body,
                         'sha256': sha256(file.read_bytes()).hexdigest()})
                     rows.extend(batch)
                     if len(rows) == total: break
                     page += 1
+                # authType 过滤由客户端补做；原始页数和 ID 先核对，避免把过滤后的条数当分页总数。
+                unfiltered_count = len(rows)
+                if name == 'departments':
+                    rows = [r for r in rows if type(r.get('authType')) is int and r['authType'] == 2]
+                    skip_code = 'non_department_fee_scope'
+                elif name == 'overseas':
+                    rows = [r for r in rows if type(r.get('authType')) is int and r['authType'] == 1
+                            and not any(r.get(k) for k in ('departmentName','userGroupName','authUserName','shopName'))]
+                    skip_code = 'non_group_overseas_fee_scope'
+                if len(rows) < unfiltered_count:
+                    result['warnings'].append({'scope': name, 'code': skip_code,
+                                               'skipped_count': unfiltered_count - len(rows)})
+                if not rows:
+                    result['raw'][name] = []
+                    result['issues'].append({'scope': name, 'code': 'daily_' + name + '_empty'})
+                    continue
+                if name == 'public':
+                    if any(r.get('platform') != 'TIKTOK' for r in rows):
+                        raise ValueError('公共费率平台不符')
+                elif any(r.get('blocName') != settings.erp_capture_bloc for r in rows):
+                    raise ValueError('费用集团归属不符')
                 if name == 'shops':
                     rows = [{k: r.get(k) for k in ('id','shopName','blocName','site','mainlandId','shop3pf','property')}
                             for r in rows]
@@ -109,18 +122,22 @@ def _collect(settings, directory, client):
     return _json_values(result)
 
 
-def refresh_daily_fees(settings, *, client=None, now=None, synthetic=False):
-    """每天首次检查持有SQLite事务锁，其他进程等待并复用同一结果。
+def _read_daily(checked):
+    raw = Path(checked['artifact_file']).read_bytes()
+    if sha256(raw).hexdigest() != checked['sha256']:
+        raise SourceUnavailable('每日费用版本原件校验失败')
+    return {**json.loads(raw), **checked}
 
-    每日检查与内容版本分开。完整或部分失败的当日结果均记录，不以旧数据顶替。
-    翻日后的任务重查；版本文件只在内容改变时创建，不重写未变化的配置。
-    """
+
+def refresh_daily_fees(settings, *, client=None, now=None, synthetic=False):
+    """持有SQLite事务锁，复用当日完整结果；当日未完成时只补查缺失项。"""
     if settings.vendor_api_url.rstrip('/') != ORIGIN:
         raise SourceUnavailable('销售费用来源地址尚未确认')
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None: raise ValueError('费用检查时间必须带时区')
     day = now.astimezone(BEIJING).date().isoformat()
-    scope = sha256(_json([SCHEMA, ORIGIN, SHOPS, PUBLIC, settings.erp_capture_bloc, settings.adapter_mode, bool(synthetic)]).encode()).hexdigest()[:20]
+    scope = sha256(_json([SCHEMA, 'eligible-daily-retry-v1', ORIGIN, SHOPS, PUBLIC,
+                          settings.erp_capture_bloc, settings.adapter_mode, bool(synthetic)]).encode()).hexdigest()[:20]
     root = Path(settings.runtime_dir) / 'daily-sales-fees' / scope
     root.mkdir(parents=True, mode=0o700, exist_ok=True)
     connection = sqlite3.connect(root / 'checks.sqlite3', timeout=300)
@@ -129,44 +146,56 @@ def refresh_daily_fees(settings, *, client=None, now=None, synthetic=False):
         connection.commit()
         connection.execute('BEGIN IMMEDIATE')
         previous = connection.execute('SELECT payload FROM checks WHERE day=?', (day,)).fetchone()
-        if previous:
-            checked = json.loads(previous[0])
-        else:
-            directory = root / 'checks' / day
-            directory.mkdir(parents=True, mode=0o700, exist_ok=True)
-            owned = client is None
-            active = client or httpx.Client(timeout=40, trust_env=False, follow_redirects=False)
-            try:
-                collected = _collect(settings, directory, active)
-            finally:
-                if owned: active.close()
-            content = _json({'raw': collected['raw'], 'issues': collected['issues']})
-            digest = sha256(content.encode()).hexdigest()
-            artifact = root / 'versions' / (digest + '.json')
-            artifact.parent.mkdir(mode=0o700, exist_ok=True)
-            if not artifact.exists():
-                write_verified(artifact, {'schema_version': SCHEMA, 'version': 'sales-fees-' + digest,
-                                         **json.loads(content)})
-            checked = {'checked_on': day, 'checked_at': now.isoformat(),
-                       'finished_at': datetime.now(timezone.utc).isoformat(),
-                       'artifact_file': str(artifact.resolve()), 'sha256': sha256(artifact.read_bytes()).hexdigest(),
-                       'files': collected['files']}
-            write_verified(directory / 'check.json', checked)
-            connection.execute('INSERT INTO checks VALUES (?,?)', (day, _json(checked)))
-        raw = Path(checked['artifact_file']).read_bytes()
-        if sha256(raw).hexdigest() != checked['sha256']:
-            raise SourceUnavailable('每日费用版本原件校验失败')
-        result = {**json.loads(raw), **checked}
-        result['acquisition_complete'] = not result['issues']
+        prior = _read_daily(json.loads(previous[0])) if previous else None
+        if prior and prior['acquisition_complete']:
+            connection.commit()
+            return prior
+
+        # 每次尝试独立留存原件，重试不会覆盖已绑定到其他批次的证据。
+        directory = root / 'checks' / day / uuid4().hex
+        directory.mkdir(parents=True, mode=0o700)
+        successful = {name: rows for name, rows in prior['raw'].items() if rows} if prior else {}
+        checked_at = now.isoformat()
+        owned = client is None
+        active = client or httpx.Client(timeout=40, trust_env=False, follow_redirects=False)
+        try:
+            collected = _collect(settings, directory, active, skip_scopes=successful)
+        finally:
+            if owned: active.close()
+        content = {'raw': {**successful, **collected['raw']}, 'issues': collected['issues']}
+        digest = sha256(_json(content).encode()).hexdigest()
+        artifact = root / 'versions' / (digest + '.json')
+        artifact.parent.mkdir(mode=0o700, exist_ok=True)
+        if not artifact.exists():
+            write_verified(artifact, {'schema_version': SCHEMA, 'version': 'sales-fees-' + digest, **content})
+        checked = {'checked_on': day, 'checked_at': checked_at, 'synthetic': bool(synthetic),
+                   'finished_at': datetime.now(timezone.utc).isoformat(),
+                   'artifact_file': str(artifact.resolve()), 'sha256': sha256(artifact.read_bytes()).hexdigest(),
+                   'acquisition_complete': not collected['issues'],
+                   'scope_checked_at': {**({name: prior['scope_checked_at'][name] for name in successful}
+                                          if prior else {}),
+                                        **dict.fromkeys(collected['raw'], checked_at)},
+                   'warnings': [w for w in prior['warnings'] if w['scope'] in successful] + collected['warnings']
+                               if prior else collected['warnings'],
+                   'files': [f for f in prior['files'] if f['scope'] in successful] + collected['files']
+                            if prior else collected['files']}
+        write_verified(directory / 'check.json', checked)
+        connection.execute('INSERT INTO checks VALUES (?,?) ON CONFLICT(day) DO UPDATE SET payload=excluded.payload',
+                           (day, _json(checked)))
+        result = _read_daily(checked)
         connection.commit()
         return result
     finally:
         connection.close()
 
 
-def capture_current_fees(settings, capture, platform, *, client=None):
-    """给本批次绑定当天费用版本；不按商品、店铺或批次重复取数。"""
-    daily = refresh_daily_fees(settings, client=client, synthetic=bool(capture.get('synthetic', False)))
+def capture_current_fees(settings, capture, *, daily):
+    """只绑定任务启动时的当日检查结果；缺项留给后续批次重试。"""
+    captured_day = datetime.fromisoformat(capture['queried_at']).astimezone(BEIJING).date().isoformat()
+    if daily['synthetic'] != bool(capture.get('synthetic', False)):
+        raise SourceUnavailable('费用检查与本批次采集的运行环境不一致')
+    if daily['checked_on'] != captured_day:
+        raise SourceUnavailable('费用检查与本批次采集不属于同一北京时间业务日')
     source_id = 'current-fees-' + uuid4().hex
     directory = Path(settings.runtime_dir) / 'current-fee-sources' / source_id
     directory.mkdir(mode=0o700, parents=True)
@@ -182,8 +211,8 @@ def capture_current_fees(settings, capture, platform, *, client=None):
         'queried_at': bound_at, 'completed_at': bound_at,
         'observation_kind': 'local_daily_config_binding',
         'checked_on': daily['checked_on'], 'acquisition_complete': daily['acquisition_complete'],
-        'issues': daily['issues'], 'daily_source': {k: daily[k] for k in
-            ('version','artifact_file','sha256','checked_at','checked_on')},
+        'issues': daily['issues'], 'warnings': daily['warnings'], 'daily_source': {k: daily[k] for k in
+            ('version','artifact_file','sha256','checked_at','checked_on','scope_checked_at')},
         'config': {'version': daily['version'], 'overseas': overseas, 'departments': raw['departments'],
                    'public': raw['public'], 'freight': raw['logistics'], 'shops': raw['shops']},
         'artifact_file': str((directory / 'result.json').resolve())}
@@ -222,6 +251,7 @@ def _public_for(rows, shop, site):
     for kind in (0,1,2,4):
         if site == 'TH' and kind == 0: continue
         candidates = []
+        category_bound = False
         for row in rows:
             if row.get('rateType') != kind: continue
             conditions = [(row.get('site'), site, 'GLOBAL'),
@@ -229,10 +259,15 @@ def _public_for(rows, shop, site):
                           (row.get('shopMainland'), 1-shop['mainlandId'], -1),
                           (row.get('shop3pf'), 1-shop['shop3pf'], -1)]
             if all(actual in (expected, wildcard) for actual,expected,wildcard in conditions):
+                # 类目配置不参与通用费率竞争；仅剩类目配置时才需要该类目合同。
                 if row.get('associationCategory') is not False:
-                    raise ValueError('公共费用涉及类目关联，缺少适用类目合同，不能替换为普通费率')
+                    category_bound |= row.get('associationCategory') is True
+                    continue
                 candidates.append((tuple(actual==expected for actual,expected,_ in conditions),row))
-        if not candidates: raise ValueError('公共费用缺少唯一配置')
+        if not candidates:
+            if category_bound:
+                raise ValueError('公共费用只有类目配置，缺少适用类目合同')
+            raise ValueError('公共费用缺少唯一配置')
         # 精确站点优先于GLOBAL，其余属性只接受唯一的最具体匹配；不按列表顺序取首条。
         exact_site = [entry for entry in candidates if entry[0][0]]
         candidates = exact_site or candidates

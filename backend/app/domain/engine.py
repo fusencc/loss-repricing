@@ -19,7 +19,9 @@ REQUIRED_SOURCES = frozenset({"loss_allocatable", "loss_pending", "blocked_alloc
 # 依据：已确认设计“数据与算价说明”；完整变量/单位见 docs/calculation-and-sources.md。
 # ERP 修正一次毛利直接作为亏损来源；近72小时保护用官方计数，费用仅在完整在线利润校验。
 # 规则版本不是公司费率或接口验收标志，固定表另存内容版本。
-FORMULA_VERSION = "loss-erp-corrected-margin-reference-priority-20261120-v13"
+FORMULA_VERSION = "loss-erp-corrected-margin-reference-priority-20261123-v14"
+# 仅供完整旧日快照的跨午夜评估；真实提交依然重取当日数据。
+MIDNIGHT_EVALUATION_WINDOW = timedelta(minutes=15)
 # 保存/展示为50位有效数字；档位、容限、毛利正负以 Decimal 精确比值判定。
 # 不能先把循环小数近似为50位，再用其决定整档/半档或毛利是否为零。
 SITE_CURRENCIES: dict[Site, str] = {"MY": "MYR", "PH": "PHP", "SG": "SGD", "TH": "THB", "VN": "VND"}
@@ -46,15 +48,20 @@ def fx_ratio(snapshot: Snapshot, loss_currency: str, station_currency: str) -> M
     return MoneyRatio(to_rate, from_rate)
 
 
+def _valid_evaluation_observation(observed_at: datetime, now: datetime, business_date: date) -> bool:
+    return (observed_at.astimezone(BEIJING).date() == business_date and observed_at <= now
+            and (business_date == now.astimezone(BEIJING).date()
+                 or now - observed_at <= MIDNIGHT_EVALUATION_WINDOW))
+
+
 def conflicting_main_sku_scopes(
-    online: Iterable[OnlineState], now: datetime,
+    online: Iterable[OnlineState], now: datetime, *, business_date: date | None = None,
 ) -> set[tuple[str, str, Site, str]]:
-    """核对当日商品主SKU归属冲突。"""
-    today = now.astimezone(BEIJING).date()
+    """同一上传目标被有效记录指向多个主 SKU 才构成归属冲突。"""
+    business_date = business_date or now.astimezone(BEIJING).date()
     scopes_by_target = defaultdict(set)
     for state in online:
-        if (not state.main_sku.strip() or state.observed_at > now
-                or state.observed_at.astimezone(BEIJING).date() != today):
+        if not state.main_sku.strip() or not _valid_evaluation_observation(state.observed_at, now, business_date):
             continue
         scope = state.key.sales_scope(state.main_sku)
         scopes_by_target[state.key.target_identity()].add(scope)
@@ -88,9 +95,8 @@ def _decision_key(group, states) -> VariantKey | None:
 
 def evaluate(snapshot: Snapshot, now: datetime) -> list[Decision]:
     """纯计算，按在线子 SKU 产出一条判定，同一身份的仓配冲突不会产生两条提价建议。"""
-    today = now.astimezone(BEIJING).date()
-    batch_problem = snapshot_problem(snapshot, now, today)
-    conflicted_sales = conflicting_main_sku_scopes(snapshot.online, now)
+    batch_problem = snapshot_problem(snapshot, now)
+    conflicted_sales = conflicting_main_sku_scopes(snapshot.online, now, business_date=snapshot.business_date)
     candidate_groups: dict[str, list[SourceLine | CandidateSourceIssue]] = defaultdict(list)
     online_groups: dict[str, list[OnlineState]] = defaultdict(list)
     order_lines = defaultdict(set)
@@ -98,7 +104,6 @@ def evaluate(snapshot: Snapshot, now: datetime) -> list[Decision]:
     issues_by_identity = defaultdict(list)
     first_issue_by_target = {}
     first_issue_by_detail = {}
-    first_issue_by_sales = {}
     candidate_issues = []
     for index, issue in enumerate(snapshot.source_issues):
         issues_by_identity[issue.key.identity()].append(index)
@@ -106,9 +111,6 @@ def evaluate(snapshot: Snapshot, now: datetime) -> list[Decision]:
         if isinstance(issue, CandidateSourceIssue):
             candidate_issues.append(issue)
             first_issue_by_detail.setdefault((*_order_scope(issue), issue.row_id), index)
-        else:
-            for scope in issue.sales_scopes():
-                first_issue_by_sales.setdefault(scope, index)
     for row in chain(snapshot.lines, candidate_issues):
         identity = row.key.identity()
         candidate_groups[identity].append(row)
@@ -138,20 +140,14 @@ def evaluate(snapshot: Snapshot, now: datetime) -> list[Decision]:
             continue  # 完整在线身份未知。来源异常留在批次，仍参与前面的订单归属核对。
         target = key.target_identity()
         rows = [row for row in group if isinstance(row, SourceLine)]
-        # 全量异常保存在快照。商品保留自己的记录，关联目标、订单明细和共享主 SKU 各引用一条，
-        # 避免每个商品都保存同一组共享异常。引用保留原来源和记录序号。
+        # 字段异常影响同一在线目标或订单明细，不因共用主 SKU 扩大阻断范围。
         issue_links = dict.fromkeys(issues_by_identity.get(identity, ()))
-        sales_issue = next((
-            index for row in chain(rows, states)
-            if (index := first_issue_by_sales.get(row.key.sales_scope(row.main_sku))) is not None
-        ), None)
         detail_issue = next((
             index for row in group
             if (index := first_issue_by_detail.get((*_order_scope(row), row.row_id))) is not None
         ), None)
         for relation, index in (
             ("same_target", first_issue_by_target.get(target)),
-            ("shared_main_sku", sales_issue),
             ("same_order_detail", detail_issue),
         ):
             if index is not None:
@@ -165,7 +161,7 @@ def evaluate(snapshot: Snapshot, now: datetime) -> list[Decision]:
             elif identity in conflicting_mappings:
                 problem = ("conflicting_detail_mapping", "同一订单明细映射到多个在线变体，需核对来源")
             elif issues:
-                problem = ("source_record_invalid", "来源记录字段异常，需核对关联明细或在线主 SKU")
+                problem = ("source_record_invalid", "该子 SKU 的来源字段异常，需核对本商品或关联订单明细")
             elif conflicted_sales and any(
                 row.key.sales_scope(row.main_sku) in conflicted_sales for row in chain(rows, states)
             ):
@@ -174,20 +170,21 @@ def evaluate(snapshot: Snapshot, now: datetime) -> list[Decision]:
     return results
 
 
-def snapshot_problem(snapshot: Snapshot, now: datetime, today: date) -> tuple[str, str] | None:
+def snapshot_problem(snapshot: Snapshot, now: datetime, required_business_date: date | None = None) -> tuple[str, str] | None:
     # 待处理来源也必须完整，避免因漏源选了偏大的单件亏损。
     sources = snapshot.complete_sources
     if len(sources) != len(REQUIRED_SOURCES) or set(sources) != REQUIRED_SOURCES:
         return "incomplete_sources", "ERP 四份候选来源尚未完整齐备"
-    if (
-        snapshot.business_date != today
-        or snapshot.as_of.astimezone(BEIJING).date() != today
-        or snapshot.as_of > now
-    ):
-        return "stale_snapshot", "快照须在本北京时间业务日采集且采集时间有效"
-    # 汇率单位由fx_rate_unit明确；两种报价的CNY基准都须为1。过期数据挂起。
-    if snapshot.fx_date != today or snapshot.fx_rates.get("CNY") != Decimal("1"):
-        return "invalid_fx", "缺少本业务日以 CNY 为基准的有效汇率"
+    today = now.astimezone(BEIJING).date()
+    business_date = snapshot.business_date
+    # 只容许完整的上一日快照在午夜后短时评估；采集日、业务日与汇率使用日仍须同属一批。
+    if (required_business_date is not None and business_date != required_business_date
+            or business_date not in (today, today - timedelta(days=1))
+            or not _valid_evaluation_observation(snapshot.as_of, now, business_date)):
+        return "stale_snapshot", "快照采集时间无效或超过北京时间跨日评估的15分钟窗口"
+    # 两种报价的 CNY 基准都须为 1；不能拿旧汇率拼接新一天的快照。
+    if snapshot.fx_date != business_date or snapshot.fx_rates.get("CNY") != Decimal("1"):
+        return "invalid_fx", "缺少与快照业务日一致、以 CNY 为基准的有效汇率"
     return None
 
 
@@ -314,8 +311,8 @@ def _decide(
     trace["station_currency"] = station_currency
     if online.currency != station_currency:
         return finish("invalid_station_currency", f"在线币种与 {key.site} 站点币 {station_currency} 不一致")
-    if online.observed_at.astimezone(BEIJING).date() != snapshot.business_date or online.observed_at > now:
-        return finish("stale_online", "在线价格与保护数据须为本业务日有效快照")
+    if not _valid_evaluation_observation(online.observed_at, now, snapshot.business_date):
+        return finish("stale_online", "在线价格与保护数据不属于快照业务日或已过跨日评估窗口")
     if online.last_changed_at is not None and online.last_changed_at > online.observed_at:
         return finish("stale_online", "价格变更时间晚于该价格的观察时间")
 

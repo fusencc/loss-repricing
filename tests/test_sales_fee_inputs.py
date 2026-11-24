@@ -49,6 +49,14 @@ def test_direct_missing_inputs_never_become_zero(change):
         compile_direct_fee(variant,rate,site='PH',company_cny_per_currency='0.1')
 
 
+@pytest.mark.parametrize('stock', [None, 0])
+def test_direct_cannot_ignore_positive_overseas_inventory_detail(stock):
+    variant, rate = direct_source()
+    variant.update(overseasStockSum=stock, overseasStockWarehouseInfo='[{"quantity":1}]')
+    with pytest.raises(ValueError, match='仍有库存'):
+        compile_direct_fee(variant,rate,site='PH',company_cny_per_currency='0.1')
+
+
 def test_direct_extra_public_commission_is_not_a_formula_input():
     variant,rate=direct_source()
     rate['publicCommissionRate']='5'

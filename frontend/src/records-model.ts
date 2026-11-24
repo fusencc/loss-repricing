@@ -83,7 +83,7 @@ export function effectiveTimeLabel(source: string | null | undefined): string {
 
 // 标题日期只投影保存的执行证据。首次核验不是平台真实生效，更新时间也不是提交或生效时间。
 // 与 timeLabel 一致使用北京时间及中文年月日格式；无时区、无效或缺失的时间不猜今天。
-export function recordDateLabel(items: RecordItem[]): string {
+function recordDateEvidence(items: RecordItem[]): { dates: Map<string, string[]>; missing: boolean } {
   const dates = new Map<string, string[]>()
   const format = new Intl.DateTimeFormat('zh-CN', {
     timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
@@ -107,6 +107,12 @@ export function recordDateLabel(items: RecordItem[]): string {
     group.push(date)
     dates.set(label, group)
   }
+  return { dates, missing }
+}
+
+// 完整说明只用于标题悬浮提示，保留日期性质、范围与北京时间口径。
+export function recordDateLabel(items: RecordItem[]): string {
+  const { dates, missing } = recordDateEvidence(items)
   const labels = ['提价生效日期', '提价核验日期', '记录更新日期'].flatMap(label => {
     const sorted = [...new Set(dates.get(label) ?? [])].sort()
     if (!sorted.length) return []
@@ -114,6 +120,13 @@ export function recordDateLabel(items: RecordItem[]): string {
   })
   if (missing) labels.push('提价日期未记录')
   return `${labels.join('；')}${dates.size ? '（北京时间）' : ''}`
+}
+
+// 标题只展示一个最近日期：同日只显示一次，范围取最新端，不额外标注日期性质。
+export function recordDateValue(items: RecordItem[]): string {
+  const { dates } = recordDateEvidence(items)
+  const all = [...dates.values()].flat().sort()
+  return all.length ? all[all.length - 1]! : '日期未记录'
 }
 
 export function recordStatusLabel(status: string): string {

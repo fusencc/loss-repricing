@@ -1,4 +1,3 @@
-from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -231,17 +230,13 @@ class CandidateSourceIssue(BaseModel):
 
 
 class OnlineSourceIssue(BaseModel):
-    """可定位的在线记录字段异常。主 SKU 用于关联来源异常的影响范围。"""
+    """可定位的在线字段异常；主 SKU 供管理员回查，不扩大字段异常的阻断范围。"""
 
     source: Literal["online"]
     record_number: Annotated[StrictInt, Field(gt=0)]
     key: VariantReference
     main_sku: StrictStr
     related_main_skus: list[StrictStr] = Field(default_factory=list)
-
-    def sales_scopes(self) -> Iterator[tuple[str, str, Site, str]]:
-        for main_sku in (self.main_sku, *self.related_main_skus):
-            yield self.key.sales_scope(main_sku)
 
 
 SourceIssue = Annotated[CandidateSourceIssue | OnlineSourceIssue, Field(discriminator="source")]

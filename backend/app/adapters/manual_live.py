@@ -171,7 +171,7 @@ class ManualLiveAdapter:
         a, k = self.authorization, self.key
         validate_authorization(a, k, money(a['upload_price']))
         if business_date.isoformat() != a['business_date']: raise ValueError('单次授权已跨日')
-        refresh_daily_fees(self.settings, client=self.client)
+        daily_fees = refresh_daily_fees(self.settings, client=self.client)
         capture = {'capture_id': 'manual-' + uuid4().hex, 'synthetic': False, 'sample_only': True, 'queried_at': utcnow().isoformat(),
             'groups': [{'rows': [{'orderid': 'explicit-manual-price', 'fields': {'item ID': k.product_id}}]}]}
         target = {'key': k.model_dump(mode='json'), 'erp_shop': a['shop_name'], 'main_sku': a['main_sku'], 'erp_sku': k.sku}
@@ -182,7 +182,7 @@ class ManualLiveAdapter:
         if recent_price_log_for(official_history,k).count != 0:
             raise ValueError('近72小时已有调价日志，本轮不调')
         history = capture_local_price_history(self.settings, capture)
-        fixed = capture_current_fees(self.settings, capture, platform, client=self.client)
+        fixed = capture_current_fees(self.settings, capture, daily=daily_fees)
         fx = query_current_erp_fx(self.settings)
         for name, source in [('sales',sales),('platform',platform),('history',history),('fixed',fixed),('fx',fx)]:
             write_verified(self.directory / (capture['capture_id']+'-'+name+'.json'), source)

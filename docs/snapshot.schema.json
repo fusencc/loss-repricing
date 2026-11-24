@@ -150,7 +150,7 @@
       "type": "object"
     },
     "OnlineSourceIssue": {
-      "description": "可定位的在线记录字段异常。主 SKU 用于关联来源异常的影响范围。",
+      "description": "可定位的在线字段异常；主 SKU 供管理员回查，不扩大字段异常的阻断范围。",
       "properties": {
         "source": {
           "const": "online",

@@ -56,7 +56,7 @@ def test_documented_synthetic_example_and_formula_provenance():
     assert result.selected_row_id == "r1"
     assert (result.unit_loss, result.discount, result.target_actual, result.upload_price,
             result.predicted_profit) == tuple(map(Decimal, ["1", "0.5", "11", "22", "0.4"]))
-    assert result.trace["formula_version"] == FORMULA_VERSION == "loss-erp-corrected-margin-reference-priority-20261120-v13"
+    assert result.trace["formula_version"] == FORMULA_VERSION == "loss-erp-corrected-margin-reference-priority-20261123-v14"
     assert result.trace["decimal_precision"] == 50
 
 

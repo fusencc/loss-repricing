@@ -53,10 +53,10 @@ def manual_decision(snapshot, online, desired, reason, correction_id, now):
     scope = key.sales_scope(online.main_sku)
     if any(
         isinstance(issue, OnlineSourceIssue)
-        and (issue.key.target_identity() == target or scope in issue.sales_scopes())
+        and issue.key.target_identity() == target
         for issue in snapshot.source_issues
     ):
-        raise ValueError("目标或共享主 SKU 的在线数据异常，需核对后重新取数")
+        raise ValueError("目标在线数据异常，需核对后重新取数")
     if scope in conflicting_main_sku_scopes(snapshot.online, now):
         raise ValueError("共享主 SKU 的在线归属存在冲突，需核对后重新取数")
     if online.pending_submission:

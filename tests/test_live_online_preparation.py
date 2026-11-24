@@ -239,7 +239,7 @@ def test_th_online_vat_flows_into_profit_model_without_new_source():
     control=inputs['platform']['records'][0]
     parent=control['company_parent'];parent.update(taxVatRate='24.12',tkCategoryIdLeaf='600747')
     variant=control['current_variants'][0]
-    variant.update(currency='THB',overseasStockSum=0,localWeight='21',costPrice='2')
+    variant.update(currency='THB',overseasStockSum=0,overseasStockWarehouseInfo='[]',localWeight='21',costPrice='2')
     control['data']['skus'][0]['price']['currency']='THB'
     inputs['sales']['currency_rates']=[{'name':'CNY','rate':'1'},{'name':'THB','rate':'0.1'}]
     _,rate=direct_source()
@@ -274,7 +274,7 @@ def test_erp_loss_is_priced_even_when_current_full_online_profit_is_positive(mod
     inputs['sales']['currency_rates'][1]['rate'] = '0.1'
     if mode == 'direct':
         _, rate = direct_source()
-        variant.update(overseasStockSum=0, localWeight='21', costPrice='2')
+        variant.update(overseasStockSum=0, overseasStockWarehouseInfo='[]', localWeight='21', costPrice='2')
         config = inputs['fixed_fees']['config']
         configure_direct(config,rate,'PH')
     prepared = prepare_online_states(capture, targets, **inputs)
@@ -294,6 +294,28 @@ def test_erp_loss_is_priced_even_when_current_full_online_profit_is_positive(mod
     assert decision.ready, decision.reason
     assert decision.target_actual == Decimal('110')
     assert decision.upload_price == Decimal('220')
+
+
+def test_residual_overseas_stock_is_listed_for_the_affected_target_only():
+    from app.adapters.live_online_preparation import prepare_online_states
+    from test_sales_fee_inputs import direct_source
+
+    capture, targets, inputs = sources()
+    control = inputs['platform']['records'][0]
+    first = control['current_variants'][0]
+    first.update(overseasStockSum=0, localWeight='21', costPrice='2')
+    # 第一条汇总为零却仍有海外库存，第二条是同行主 SKU 下仓配证据齐全的子商品。
+    second = dict(first, sellerSkuId='I2', sellerSku='S2', localSellerSku='S2', overseasStockWarehouseInfo='[]')
+    control['current_variants'].append(second)
+    control['data']['skus'].append(dict(control['data']['skus'][0], id='I2', seller_sku='S2'))
+    targets.append(dict(targets[0], erp_sku='S2', key=dict(targets[0]['key'], item_id='I2', sku='S2')))
+    _, rate = direct_source()
+    configure_direct(inputs['fixed_fees']['config'], rate, 'PH')
+    prepared = prepare_online_states(capture, targets, **inputs)
+    assert [row['state']['key']['item_id'] for row in prepared['online']] == ['I2']
+    assert len(prepared['issues']) == 1
+    assert prepared['issues'][0]['target']['item_id'] == 'I1'
+    assert '仍有库存' in prepared['issues'][0]['reason']
 
 
 def test_unknown_official_history_still_prepares_online_state():

@@ -33,7 +33,8 @@ def test_overseas_full_model_includes_marketing():
     assert "model" not in result
 
 
-@pytest.mark.parametrize('change', ['missing_cost','wrong_warehouse','stock_ambiguous','wrong_total'])
+@pytest.mark.parametrize('change', ['missing_cost', 'missing_component', 'wrong_warehouse',
+                                    'stock_ambiguous', 'multiple_procurement', 'wrong_total'])
 def test_unknown_or_conflicting_fee_input_is_not_approved(change):
     from app.adapters.sales_fee_model import compile_overseas_fee
     v,r=source()
@@ -44,9 +45,30 @@ def test_unknown_or_conflicting_fee_input_is_not_approved(change):
     elif change=='stock_ambiguous':
         buckets=json.loads(v['overseasStockWarehouseInfo']);buckets.append(copy.deepcopy(buckets[0]))
         v['overseasStockWarehouseInfo']=json.dumps(buckets)
-    else:r['totalCost']='1.45'
+    elif change == 'multiple_procurement':
+        buckets = json.loads(v['overseasStockWarehouseInfo'])
+        buckets[0]['jqCostpriceList'] = ['1', '1.03']
+        v['overseasStockWarehouseInfo'] = json.dumps(buckets)
+    elif change == 'missing_component':
+        del r['publishFee']
+    else:
+        r['totalCost'] = '1.440299'  # 差 0.010001，超过展示尾差上限。
     with pytest.raises(ValueError):
         compile_overseas_fee(v,r,site='PH',warehouse='WH-PH',company_cny_per_currency='0.1042')
+
+
+@pytest.mark.parametrize(('total_rate', 'total_cost'), [('35.04', '1.45'), ('35.0511', '1.4403')])
+def test_display_total_difference_uses_exact_components(total_rate, total_cost):
+    from app.adapters.sales_fee_model import compile_overseas_fee
+
+    v,r=source()
+    r.update(totalRate=total_rate, totalCost=total_cost)
+    result = compile_overseas_fee(v,r,site='PH',warehouse='WH-PH',company_cny_per_currency='0.1042')
+    assert result['online_model'].revenue_factor == Decimal('0.649589')
+    assert result['online_model'].fixed_cost == Decimal('2.5592')
+    proof = result['proof']['display_total_check']
+    assert Decimal(proof['rate_delta_percentage_points']) == abs(Decimal('35.0411') - Decimal(total_rate))
+    assert Decimal(proof['cost_delta_cny_per_item']) == abs(Decimal('1.4503') - Decimal(total_cost))
 
 
 def test_overseas_extra_public_commission_is_not_a_formula_input():

@@ -469,7 +469,7 @@ class HttpAdapter:
                         held_main_skus[target].add(state.main_sku)
                     else:
                         online.append(state)
-                # 同一目标的记录若主 SKU 不同，所有销量范围均需核对。附加范围在该目标首条异常中记一次。
+                # 保留该目标的主 SKU 归属证据供回查；字段异常本身不挂起其他在线目标。
                 for target, main_skus in held_main_skus.items():
                     issue = held_targets[target]
                     issue.related_main_skus = sorted(main_skus - {issue.main_sku})

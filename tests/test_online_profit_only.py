@@ -17,8 +17,10 @@ def test_automatic_price_uses_only_full_online_profit():
                                       version='full-online', verified=True)
     result = evaluate(snapshot([line(variant)], [state]), NOW)[0]
     assert result.ready
-    assert result.target_actual == Decimal('12.5')
-    assert result.predicted_profit == 0
+    # 完整在线利润 0.8P - 10；达到 1% 需 P >= 10/0.79，进档到 12.66。
+    assert result.trace['online_profit']['target_margin'] == '0.01'
+    assert result.upload_price == Decimal('12.66')
+    assert result.predicted_profit == Decimal('0.128')
 
 
 def test_manual_price_uses_only_full_online_profit():
@@ -28,7 +30,8 @@ def test_manual_price_uses_only_full_online_profit():
     state.profit_check.model = FeeModel(revenue_factor='0.8', fixed_cost='10',
                                       version='full-online', verified=True)
     batch = snapshot([line(variant)], [state])
-    result = manual_decision(batch, state, Decimal('12.5'), 'test', 'correction', NOW)
-    assert result.ready and result.predicted_profit == 0
-    with pytest.raises(ValueError, match='在线利润率仍为负'):
-        manual_decision(batch, state, Decimal('12.49'), 'test', 'correction', NOW)
+    result = manual_decision(batch, state, Decimal('12.66'), 'test', 'correction', NOW)
+    assert result.ready and result.predicted_profit == Decimal('0.128')
+    # 12.65 仍有正利润，但不到 1%，不能仅凭不亏放行。
+    with pytest.raises(ValueError, match='在线利润率未达到1%'):
+        manual_decision(batch, state, Decimal('12.65'), 'test', 'correction', NOW)

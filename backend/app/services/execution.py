@@ -142,10 +142,11 @@ class PricingService:
             if self.adapter.mode == "live":
                 # 首次真实取数未就绪，保持当日任务可重试，不建空批次。
                 raise SourceUnavailable(problem[1])
-        authorizations={}
-        if self.config.coordination_required:
-            authorizations=observe_prices(self.factory, snapshot)
-        decisions = evaluate(snapshot, utcnow())
+        authorizations = {}
+        # 跨日判定仅供查看，不将上一日观察用于接管或外部改价冲突判断。
+        if self.config.coordination_required and evaluation_time.astimezone(BEIJING).date() == business_date:
+            authorizations = observe_prices(self.factory, snapshot)
+        decisions = evaluate(snapshot, evaluation_time)
         if self.config.coordination_required:
             with self.factory() as session:
                 for decision in decisions:

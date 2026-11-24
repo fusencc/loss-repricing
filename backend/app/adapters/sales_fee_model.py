@@ -15,6 +15,8 @@ PERCENT_FIELDS = ('costOfCapital','procedureRate','platformRate','returnRate',
                   'warehouseStorageRate','marketingRate','otherRate')
 COST_FIELDS = ('packageFee','warehouseCost','warehouseCostDomestic','overseaPackageFee',
                'publishFee','dischargeFee','orderProcessFee')
+# 合计展示尾差上限：费率 0.01 个百分点，固定成本 0.01 CNY/件；不用于利润或价格容限。
+DISPLAY_TOTAL_TOLERANCE = MoneyRatio(Decimal('0.01'))
 
 
 def _positive(value):
@@ -35,19 +37,22 @@ def _sum(values):
     return sum(values, MoneyRatio(Decimal(0)))
 
 
+def _stock_buckets(raw_stock):
+    if not isinstance(raw_stock, str):
+        raise ValueError('缺少海外仓库存原始字段')
+    buckets = json.loads(raw_stock, parse_float=Decimal)
+    if not isinstance(buckets, list) or any(not isinstance(row, dict) for row in buckets):
+        raise ValueError('海外仓库存结构无效')
+    return buckets, [_nonnegative(row.get('quantity')) for row in buckets]
+
+
 def compile_overseas_fee(variant, rate, *, site, warehouse, company_cny_per_currency):
     if site not in SITE_CURRENCIES or rate.get('siteCode') != site or variant.get('currency') != SITE_CURRENCIES[site]:
         raise ValueError('海外仓费率或币种不属于该站点')
     quote = _positive(company_cny_per_currency)
     actual = _positive(variant.get('marketPrice'))
     stock = _positive(variant.get('overseasStockSum'))
-    raw_stock = variant.get('overseasStockWarehouseInfo')
-    if not isinstance(raw_stock, str):
-        raise ValueError('缺少海外仓库存原始字段')
-    buckets = json.loads(raw_stock, parse_float=Decimal)
-    if not isinstance(buckets, list) or any(not isinstance(row, dict) for row in buckets):
-        raise ValueError('海外仓库存结构无效')
-    quantities = [_nonnegative(row.get('quantity')) for row in buckets]
+    buckets, quantities = _stock_buckets(variant.get('overseasStockWarehouseInfo'))
     positive = [row for row, quantity in zip(buckets, quantities) if quantity.numerator > 0]
     if (len(positive) != 1 or positive[0].get('overseasWarehouses') != [warehouse]
             or _sum(quantities) != MoneyRatio(stock)):
@@ -60,8 +65,13 @@ def compile_overseas_fee(variant, rate, *, site, warehouse, company_cny_per_curr
     rates = {key:_nonnegative(rate.get(key)) for key in PERCENT_FIELDS}
     costs = _sum(_nonnegative(rate.get(key)) for key in COST_FIELDS)
     total = _sum(rates.values())
-    if total != MoneyRatio(money(rate.get('totalRate'))) or costs != MoneyRatio(money(rate.get('totalCost'))):
-        raise ValueError('海外仓费率分项与公司合计不一致')
+    # totalRate 为百分数、totalCost 为 CNY/件，仅用来交叉检查；算价始终取完整分项精确求和。
+    reported_rate = _nonnegative(rate.get('totalRate'))
+    reported_cost = _nonnegative(rate.get('totalCost'))
+    rate_delta = (total - reported_rate).absolute()
+    cost_delta = (costs - reported_cost).absolute()
+    if rate_delta > DISPLAY_TOTAL_TOLERANCE or cost_delta > DISPLAY_TOTAL_TOLERANCE:
+        raise ValueError('海外仓费用分项与公司合计差异超过0.01（百分点或CNY/件）')
     fixed = costs + _nonnegative(procurement[0]) + _nonnegative(freight[0])
     vat = _nonnegative(rate.get('vatRate'))
     version = rate.get('version')
@@ -79,6 +89,8 @@ def compile_overseas_fee(variant, rate, *, site, warehouse, company_cny_per_curr
             'online_profit_includes_marketing':True,
             'recalculated_including_marketing_percent':str(included_percent.decimal()),
             'vat_percent':str(rate['vatRate']),
+            'display_total_check': {'rate_delta_percentage_points': str(rate_delta.decimal()),
+                                    'cost_delta_cny_per_item': str(cost_delta.decimal())},
             'rate_source':rate.get('rate_source'),
             'fee_source_ref':rate.get('source_ref'),
             'warehouse':warehouse}}
@@ -96,6 +108,12 @@ def compile_direct_fee(variant, rate, *, site, company_cny_per_currency):
     stock = variant.get('overseasStockSum')
     if stock not in (None, '') and money(stock) != 0:
         raise ValueError('有海外库存不能使用直发公式')
+    # 汇总为空或为零仍选直发，但明细明确有残余海外库存时，两个来源相互矛盾。
+    raw_stock = variant.get('overseasStockWarehouseInfo')
+    if raw_stock not in (None, ''):
+        _, quantities = _stock_buckets(raw_stock)
+        if any(quantity.numerator > 0 for quantity in quantities):
+            raise ValueError('海外仓明细仍有库存，与直发库存口径冲突')
     quote = _positive(company_cny_per_currency)
     weight = _positive(variant.get('localWeight'))
     freight = rate['freight']

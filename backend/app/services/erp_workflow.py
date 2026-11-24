@@ -101,8 +101,8 @@ def _run_workflow(settings, *, department=None, capture_id=None, evidence=None, 
         rebuild_clean_capture(settings.runtime_dir, capture_id)
         return _evaluate_capture(settings, capture_id, replay=True, evidence=evidence, exports=exports, progress=progress)
 
-    # 每日任务启动前统一检查费用；各部门共用持久缓存，不逐批重查。
-    refresh_daily_fees(settings)
+    # 每批只绑定启动时的当日检查；同日后续批次再补查失败的范围。
+    daily_fees = refresh_daily_fees(settings)
     collected = capture_erp_bulk(settings, department=department, progress=progress)
     saved = save_capture(settings.runtime_dir, collected)
     capture_id = saved['capture_id']
@@ -110,7 +110,7 @@ def _run_workflow(settings, *, department=None, capture_id=None, evidence=None, 
         # 原件成功但清洗失败时不得让后续空文件看起来像已完成。
         if saved['cleaning_status'] != 'saved':
             raise OSError('原件已存档，清洗失败；请按采集编号重建清洗')
-        return _evaluate_capture(settings, capture_id, replay=False, progress=progress)
+        return _evaluate_capture(settings, capture_id, replay=False, progress=progress, daily_fees=daily_fees)
     except Exception as error:
         # 算价或清洗失败时，仍保留已经写入的采集编号供核对。
         return {**_workflow_failure(error), 'capture_id': capture_id, 'department': department,
@@ -118,7 +118,7 @@ def _run_workflow(settings, *, department=None, capture_id=None, evidence=None, 
                 'stopped_by_rate_limit': saved.get('stopped_by_rate_limit', False) or isinstance(error, ErpAccountRateLimited)}
 
 
-def _evaluate_capture(settings, capture_id, *, replay, evidence=None, exports=None, progress=None):
+def _evaluate_capture(settings, capture_id, *, replay, evidence=None, exports=None, progress=None, daily_fees=None):
     capture = load_capture(settings.runtime_dir, capture_id)
     limited = capture.get('stopped_by_rate_limit', False)
     empty = capture['capture_complete'] and not any(group['candidate_order_ids'] for group in capture['groups'])
@@ -212,7 +212,7 @@ def _evaluate_capture(settings, capture_id, *, replay, evidence=None, exports=No
                     'acquisition_complete','artifact_file')}
                 platform_ref['sha256'] = sha256(content).hexdigest()
                 platform_status = 'saved' if platform['acquisition_complete'] else 'partial'
-        fixed_fees = capture_current_fees(settings,capture,platform)
+        fixed_fees = capture_current_fees(settings, capture, daily=daily_fees)
         fixed_fees_ref = {key:fixed_fees[key] for key in ('source_id','erp_capture_id','synthetic','sample_only',
             'acquisition_complete','artifact_file')}
         fixed_fees_ref['sha256'] = sha256(Path(fixed_fees['artifact_file']).read_bytes()).hexdigest()
