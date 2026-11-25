@@ -374,3 +374,40 @@ def test_unrelated_batch_cannot_claim_roster_department(client):
                                               'erp_roster_department': 'Tiktok五部'}}
     data = client.get('/api/records', params={'department': 'department:Tiktok一部'}).json()
     assert 'i3' in {row['id'] for row in data['items']}
+
+
+
+def test_executed_record_prices_use_its_bound_immutable_submission_decision(client):
+    from copy import deepcopy
+    with client.app.state.factory.begin() as session:
+        item = session.get(Item, 'i3')
+        submitted = deepcopy(item.decision)
+        submitted['key'] = key(3)
+        submitted['selected_row_id'] = 'order-line'
+        submitted['trace']['station_currency'] = 'MYR'
+        submitted['trace']['source_rows'] = [{'row_id': 'order-line', 'basis': 'order',
+            'fee_scope': 'erp-corrected-first-margin-v1', 'loss_amount': '-1.25', 'currency': 'CNY'}]
+        # A later reevaluation no longer has candidate prices; it must not erase the submitted calculation in logs.
+        item.decision = {'key': key(3), 'current_actual': None, 'target_actual': None,
+                         'trace': {'online_rows': deepcopy(submitted['trace']['online_rows'])}}
+        session.add(Execution(id='bound-decision', item_id=item.id, variant_id=item.variant_id,
+            state='verified', request=submitted, response={}, evidence={'actual_price': '15.12'},
+            created_at='2026-11-17T01:00:00+00:00', updated_at='2026-11-17T02:00:00+00:00'))
+    row = next(r for r in client.get('/api/records').json()['items'] if r['id'] == 'i3')
+    assert row['decision']['current_actual'] == '12.00'
+    assert row['decision']['target_actual'] == '15.123456789123456789'
+    assert row['decision']['trace']['station_currency'] == 'MYR'
+    assert row['first_margin'] == {'amount': '-1.25', 'currency': 'CNY'}
+    assert row['execution']['actual_price'] == '15.12'
+    with client.app.state.factory() as session:
+        assert session.get(Item, 'i3').decision['current_actual'] is None
+
+
+def test_unmatched_execution_request_cannot_supply_another_products_prices(client):
+    with client.app.state.factory.begin() as session:
+        item = session.get(Item, 'i3')
+        session.add(Execution(id='unmatched-decision', item_id=item.id, variant_id=item.variant_id,
+            state='verified', request={'key': key(1), 'current_actual': '999'}, response={}, evidence={},
+            created_at='2026-11-17T01:00:00+00:00', updated_at='2026-11-17T02:00:00+00:00'))
+    row = next(r for r in client.get('/api/records').json()['items'] if r['id'] == 'i3')
+    assert row['decision']['current_actual'] == '12.00'

@@ -187,7 +187,12 @@ def price_stages(decision, trace, snapshot, item_key):
 
 
 def public_record(item, batch, execution, department, seller):
-    decision = item.decision or {}
+    # 已执行记录的算价依据属于提交时保存的不可变请求，不属于后来重评的当前候选。
+    # 只有完整商品键一致才使用该执行档案；回读金额仍独立取 execution.evidence。
+    request = (execution.request or {}) if execution else {}
+    bound_request = request.get('key') or {}
+    decision = (request if bound_request and all(bound_request.get(k) == item.key.get(k) for k in KEY_FIELDS)
+                else item.decision or {})
     trace = decision.get('trace') or {}
     # 人工真实执行把站点币种保存在同商品 online_rows.currency；仅使用完整键匹配且一致的来源。
     currencies = {display_text(row.get('currency')) for row in trace.get('online_rows', [])
