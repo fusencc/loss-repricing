@@ -119,7 +119,8 @@ def test_batch_prices_are_used_only_when_current_platform_confirms_them():
     assert report['issues'][0]['reason'] == '批量导出价格与当前平台快照不一致'
 
 
-def test_batch_discount_uses_sales_off_when_current_marketing_price_is_rounded():
+@pytest.mark.parametrize(("off", "compatible"), [("50", True), ("90", False)])
+def test_batch_discount_matches_current_marketing_price_at_display_precision(off, compatible):
     from decimal import Decimal
 
     from app.adapters.live_online_preparation import prepare_online_states
@@ -132,11 +133,15 @@ def test_batch_discount_uses_sales_off_when_current_marketing_price_is_rounded()
     inputs['sales'].update(source_mode='online_sku_batch_export', variants=[
         {'shopName': 'SHOPPH', 'productId': 'P1', 'sellerSkuId': 'I1', 'export_ref': 'SALES/001.xlsx:2',
          'batch_pricing': {'币种': 'PHP', '含vat价格': '61.49', '营销价格': '30.75',
-                           '折扣': '50', '活动类型': '直接折扣', '海外仓库存': '114'}}
+                           '折扣': off, '活动类型': '直接折扣', '海外仓库存': '114'}}
     ])
     result = prepare_online_states(capture, targets, **inputs)
-    state = OnlineState.model_validate(result['online'][0]['state'])
-    assert state.actual_price_and_discount() == (Decimal('30.75'), MoneyRatio(Decimal('0.5')))
+    if compatible:
+        state = OnlineState.model_validate(result['online'][0]['state'])
+        assert state.actual_price_and_discount() == (Decimal('30.75'), MoneyRatio(Decimal('0.5')))
+    else:
+        assert not result['online']
+        assert result['issues'][0]['reason'] == '批量导出营销价与 OFF 折扣不一致'
 
 
 def test_direct_profit_uses_exported_erp_cost_and_grams():

@@ -134,20 +134,27 @@ def test_exact_manual_target_authorization_supports_current_test_sites(site,curr
     with pytest.raises(ValueError):validate_authorization({**a,'currency':'PHP'},VariantKey.model_validate(a['key']),Decimal('87.18'))
 
 
-def test_product_percentage_promotion_is_verified_against_current_variant(tmp_path):
+@pytest.mark.parametrize(('site', 'currency', 'retail', 'actual', 'off'), [
+    ('MY', 'MYR', '10', '4', '60'),
+    ('PH', 'PHP', '61.49', '30.745', '50'),
+    ('PH', 'PHP', '61.49', '30.75', '50'),
+])
+def test_product_percentage_promotion_is_verified_against_current_variant(tmp_path, site, currency, retail, actual, off):
     from app.adapters.manual_live import ManualLiveAdapter
-    a=auth();a['key']['site']='MY';a['currency']='MYR'
+    a=auth();a['key']['site']=site;a['currency']=currency;a['discount_percent_off']=off
     ad=ManualLiveAdapter(Settings(_env_file=None),a,tmp_path)
     parent={'shopid':'shop-1','promotionId':'promo','promotionType':2,'productType':1,'status':2}
-    product={'shopid':'shop-1','productId':'product-1','promotionId':'promo','sellerSkuId':None,'promotionPrice':None,'discount':'60','priceIncludeVat':None,'marketPrice':None}
+    product={'shopid':'shop-1','productId':'product-1','promotionId':'promo','sellerSkuId':None,'promotionPrice':None,'discount':off,'priceIncludeVat':None,'marketPrice':None}
     calls=[]
     def request(method,path,**kwargs):
         calls.append(kwargs['json'])
         return {'code':0,'count':1,'data':[parent if path.endswith('findByPage') else product]}
     ad._request=request
-    v={'promotionId':'promo','discount':'60','marketPrice':'4','priceIncludeVat':'10'}
+    v={'promotionId':'promo','discount':off,'marketPrice':actual,'priceIncludeVat':retail}
     assert ad._promotion(v)['kind']=='percentage_discount'
     assert calls[-1]['productType']==1 and 'sellerSkuIds' not in calls[-1]
+    with pytest.raises(ValueError, match='当前营销价不符合已授权折扣比例'):
+        ad._promotion({**v, 'marketPrice': str(Decimal(actual) + Decimal('1'))})
     product['promotionPrice']='4'
     with pytest.raises(ValueError):ad._promotion(v)
     product['promotionPrice']=None;product['productId']='other'

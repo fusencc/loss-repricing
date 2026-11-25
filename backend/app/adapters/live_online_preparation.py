@@ -13,6 +13,7 @@ from app.adapters.normalization import money, source_time
 from app.adapters.sales_fee_model import compile_overseas_fee, compile_direct_fee
 from app.adapters.current_pricing_fees import select_current_rate, SCHEMA as FEE_SCHEMA
 from app.domain.engine import BEIJING, SITE_CURRENCIES
+from app.domain.money import MoneyRatio
 from app.domain.types import VariantKey
 from app.adapters.official_price_logs import recent_price_log_for
 from app.adapters.sales_price_reference import price_reference_for
@@ -20,6 +21,15 @@ from app.adapters.sales_price_reference import price_reference_for
 SCHEMAS={'sales':'sales-source-observations-v1','platform':'sales-platform-controls-v1',
     'local_history':'local-live-price-history-v1',
     'fixed_fees':FEE_SCHEMA}
+
+
+def marketing_price_matches_discount(
+    retail: Decimal, actual: Decimal, discount_off: Decimal, currency: str,
+) -> bool:
+    # 营销实价可能保留原始精度或按币种显示。容许不足一个显示单位的尾差。
+    factor = MoneyRatio(Decimal(1)) - MoneyRatio(discount_off, Decimal(100))
+    display_unit = Decimal(1) if currency == 'VND' else Decimal('0.01')
+    return (MoneyRatio(retail) * factor - MoneyRatio(actual)).absolute() < MoneyRatio(display_unit)
 
 
 def prepare_online_states(capture,targets,*,sales,platform,local_history,fixed_fees,official_history,
@@ -107,6 +117,8 @@ def prepare_online_states(capture,targets,*,sales,platform,local_history,fixed_f
                     discount_off = money(export_values['折扣'])
                     if not 0 <= discount_off < 100:
                         raise ValueError('销售导出的 OFF 百分比无效')
+                    if not marketing_price_matches_discount(retail, actual, discount_off, currency):
+                        raise ValueError('批量导出营销价与 OFF 折扣不一致')
                 else:
                     raise ValueError('销售导出未确认当前活动为百分比折扣或无活动')
                 if (raw_actual not in (None, '') or not no_marketing) and money(raw_actual) != actual:

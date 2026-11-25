@@ -22,7 +22,7 @@ from app.adapters.sales_capture import capture_sales_sources, _json_values
 from app.adapters.sales_platform_capture import capture_platform_controls
 from app.adapters.current_pricing_fees import capture_current_fees, refresh_daily_fees
 from app.adapters.sales_price_reference import capture_sku_price_references
-from app.adapters.live_online_preparation import prepare_online_states
+from app.adapters.live_online_preparation import marketing_price_matches_discount, prepare_online_states
 from app.adapters.erp_rates import query_current_erp_fx
 from app.adapters.transport_privacy import private_request
 from app.domain.money import MoneyRatio
@@ -172,7 +172,8 @@ class ManualLiveAdapter:
                 or money(row['priceIncludeVat']) != money(variant['priceIncludeVat'])
                 or money(row['marketPrice']) != money(variant['marketPrice'])):
             raise ValueError('活动子商品或价格与当前变体不一致')
-        if MoneyRatio(money(variant['marketPrice'])) != MoneyRatio(money(variant['priceIncludeVat'])) * MoneyRatio(1-discount/100):
+        if not 0 <= discount < 100 or not marketing_price_matches_discount(
+                money(variant['priceIncludeVat']), money(variant['marketPrice']), discount, a['currency']):
             raise ValueError('当前营销价不符合已授权折扣比例')
         return {'kind': 'percentage_discount', 'discount_percent_off': str(discount), 'promotion_id': promotion, 'fixed_promotion_price': None}
 
