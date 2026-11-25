@@ -1,10 +1,12 @@
-"""固定名单的只读算价摘要，按 ERP 采集范围中的姓名定向投递。"""
+"""固定名单复用正式结果模板，按 ERP 采集范围中的姓名定向投递。"""
 from sqlalchemy import select
 
 from app.adapters.dingtalk import DingTalkClient
 from app.db import transaction
-from app.models import Execution, Item, Job
+from app.models import Batch, Execution, Item, Job
 from app.services.store import enqueue, stamp
+from app.services.notifications import _card_text, _markdown_text, _notice_category
+from app.services.records import combine_pricing_process
 
 
 SCOPE_STATUS = {
@@ -44,6 +46,40 @@ def enqueue_roster_notices(factory, config, day, capture):
                 f'erp-roster-notice:{day.isoformat()}:{name}')
 
 
+def roster_notice_content(session, payload, created_at):
+    # 仅取当日正式名单/库存补算中保存的本人记录，不借用网页默认归属或别人的批次。
+    name, day = payload['salesperson'], payload['date']
+    rows = session.execute(select(Item, Batch, Execution).join(Batch, Item.batch_id == Batch.id)
+        .outerjoin(Execution, Execution.item_id == Item.id)
+        .where(Batch.mode == 'live', Batch.business_date == day)
+        .order_by(Item.updated_at.desc(), Item.id.desc()))
+    chosen = [(item, execution) for item, batch, execution in rows
+        if batch.run_key.startswith('erp-roster:') and batch.run_key.endswith(f':{name}:{day}')
+        and (batch.snapshot.get('source_versions') or {}).get('erp_roster_salesperson') == name]
+    # 与已部署记录页共用流程合并：补算成功后，旧准备/失败尝试不再计作待处理。
+    projections = [{'id': item.id, 'business_date': day, 'mode': 'live', 'key': item.key,
+                    'decision': item.decision, 'updated_at': item.updated_at, 'reason': item.reason,
+                    'execution': {'state': execution.state} if execution else None}
+                   for item, execution in chosen]
+    retained = {row['id'] for row in combine_pricing_process(projections)}
+    chosen = [(item, execution) for item, execution in chosen if item.id in retained]
+
+    items = [item for item, _ in chosen]
+    # 展示沿用用户“提交已受理即已提价”的口径，不改写真实执行状态或回读证据。
+    categories = {item.id: ('已提价' if execution and
+        (execution.state in {'accepted', 'verified'} or (execution.response or {}).get('status') == 'accepted')
+        else _notice_category(item)) for item, execution in chosen}
+    title = '亏损提价处理结果'
+    text = _card_text({'title': title}, items, categories=categories, fallback_time=created_at)
+    text += f'\n\n销售员：{_markdown_text(name)}'
+    if not items:
+        text += '\n\n暂无已保存的提价记录，未提交价格。'
+    scopes = [f"- {_markdown_text(scope['department'])}：{SCOPE_STATUS.get(scope['status'], '状态待核对')}，"
+              f"算价通过 {scope['ready_prices']} 条" for scope in payload['scopes']]
+    return title, text + '\n\n采集状态：\n\n' + '\n'.join(scopes)
+
+
+
 def send_roster_notice(factory, config, job_id, owner):
     with transaction(factory) as session:
         job = session.scalar(select(Job).where(Job.id == job_id, Job.owner == owner).with_for_update())
@@ -67,28 +103,16 @@ def send_roster_notice(factory, config, job_id, owner):
             result = {'state': 'failed', 'error': '销售员姓名未配置唯一钉钉 User ID'}
         else:
             result = {'state': 'sending', 'userid': userid, 'at': stamp()}
-        job.payload = dict(payload, delivery=result)
+        if result['state'] == 'sending':
+            title, markdown = roster_notice_content(session, payload, job.created_at)
+            intent = {'title': title, 'markdown': markdown, 'at': result['at']}
+            job.payload = dict(payload, delivery=result, send_intent=intent)
+        else:
+            job.payload = dict(payload, delivery=result)
 
     if result['state'] != 'sending':
         return result
     # 先持久化发送意图，再调用钉钉。租约恢复后只记录未知，不重发。
-    scopes = payload['scopes']
-    ready = sum(scope['ready_prices'] for scope in scopes)
-    title = '亏损提价算价结果'
-    rows = [
-        f"- {scope['department']}：{SCOPE_STATUS.get(scope['status'], '状态待核对')}，"
-        f"算价通过 {scope['ready_prices']} 条"
-        for scope in scopes
-    ]
-    pricing = payload.get('pricing')
-    if pricing is None:
-        result_text = '未提交价格'
-    elif pricing.get('blocked'):
-        result_text = '正式提价待核对'
-    else:
-        result_text = f"已核验 {pricing['verified']} 条，待核验 {pricing['pending']} 条"
-    markdown = (f"**{title}**\n\n{payload['date']} · {name} · 算价通过 {ready} 条 · {result_text}\n\n"
-                + '\n'.join(rows))
     client = DingTalkClient(config)
     try:
         receipt = client.send_notice(userid, title, markdown, '')

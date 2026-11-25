@@ -103,7 +103,7 @@ def _markdown_text(value):
     return ''.join('\\'+char if char in '\\[]()*_`<>#' else char for char in value)
 
 
-def _card_text(summary, items):
+def _card_text(summary, items, *, categories=None, fallback_time=None):
     if summary.get('kind') == 'warning':
         details=[]
         for index,item in enumerate(items,1):
@@ -112,10 +112,15 @@ def _card_text(summary, items):
         return '**亏损提价告警**\n\n' + '\n\n'.join(details)
     # 仅渲染发送前按当前收件人权限检查过的 items；明细不暴露其他销售员商品。
     # 时间是这些记录的最近处理时间（北京时间），不以重发时间冒充处理时间。
-    processed_at=max(datetime.fromisoformat(item.updated_at) for item in items).astimezone(BEIJING)
-    counts=Counter(_notice_category(item) for item in items)
+    processed_at=max((datetime.fromisoformat(item.updated_at) for item in items),
+                     default=datetime.fromisoformat(fallback_time) if fallback_time else None)
+    if processed_at is None:
+        raise ValueError('通知缺少记录处理时间')
+    processed_at=processed_at.astimezone(BEIJING)
+    category=lambda item: categories[item.id] if categories is not None else _notice_category(item)
+    counts=Counter(category(item) for item in items)
     breakdown=' · '.join(f'{label} {counts[label]}' for label in ('待处理','已提价','本轮不调'))
-    manual=[item for item in items if _notice_category(item)=='待处理']
+    manual=[item for item in items if category(item)=='待处理']
     details=[]
     for index,item in enumerate(manual,1):
         key=item.key
