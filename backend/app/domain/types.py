@@ -15,7 +15,7 @@ from .price_reference import SkuPriceReference
 Site = Literal["MY", "PH", "SG", "TH", "VN"]
 Source = Literal["loss_allocatable", "loss_pending", "blocked_allocatable", "blocked_pending"]
 PriceRounding = Literal["ROUND_HALF_UP", "ROUND_DOWN", "ROUND_UP"]
-DecisionStatus = Literal["本轮不调", "待处理", "待核验", "已核验"]
+DecisionStatus = Literal["不调价", "待处理", "待核验", "已核验"]
 FiniteDecimal = Annotated[Decimal, Field(allow_inf_nan=False)]
 
 # 2026-11-20 用户确认：完整在线利润率统一最低 1%，直发与海外仓共用。

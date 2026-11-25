@@ -11,7 +11,7 @@ from app.adapters.dingtalk import DingTalkClient
 from app.services.store import stamp, utcnow, BEIJING
 
 
-NOTICE_ITEM_STATES = ('待处理', '待核验', '已核验', '本轮不调')
+NOTICE_ITEM_STATES = ('待处理', '待核验', '已核验', '不调价')
 
 
 def _coord():
@@ -92,8 +92,8 @@ def notice_batch_mode(session, notice):
 def _notice_category(item):
     if item.status == '已核验':
         return '已提价'
-    if item.status == '本轮不调':
-        return '本轮不调'
+    if item.status == '不调价':
+        return '不调价'
     return '待处理'
 
 
@@ -119,7 +119,7 @@ def _card_text(summary, items, *, categories=None, fallback_time=None):
     processed_at=processed_at.astimezone(BEIJING)
     category=lambda item: categories[item.id] if categories is not None else _notice_category(item)
     counts=Counter(category(item) for item in items)
-    breakdown=' · '.join(f'{label} {counts[label]}' for label in ('待处理','已提价','本轮不调'))
+    breakdown=' · '.join(f'{label} {counts[label]}' for label in ('待处理','已提价','不调价'))
     manual=[item for item in items if category(item)=='待处理']
     details=[]
     for index,item in enumerate(manual,1):

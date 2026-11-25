@@ -22,6 +22,6 @@ test('empty and long reasons and other records never substitute current reason',
   assert.equal(recordStateReason(row('accepted', long)), `上传已受理，待回读核验；${long}`)
   assert.equal(recordStateReason({...row('unknown', ''), process:[{reason:'其他尝试'}]}), '提交结果未知，仅核验、不自动重传；原因未记录')
   assert.ok(recordStateReason(row('unknown', '上传已受理，等待实际价格回读')).includes('原记录说明（可能为默认文案）'))
-  assert.equal(recordStateReason({...row('accepted', '保护'), status:'本轮不调'}), '保护')
+  assert.equal(recordStateReason({...row('accepted', '保护'), status:'不调价'}), '保护')
   assert.equal(recordStateReason({...row('unknown', '历史'), status:'已核验'}), '历史')
 })

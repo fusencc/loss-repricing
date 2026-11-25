@@ -212,7 +212,7 @@ def test_same_sku_and_row_id_in_different_stores_are_independent():
 @pytest.mark.parametrize(
     ("age", "status", "ready"),
     [
-        (timedelta(hours=72) - timedelta(seconds=1), "本轮不调", False),
+        (timedelta(hours=72) - timedelta(seconds=1), "不调价", False),
         (timedelta(hours=72), "待处理", True),
         (-timedelta(seconds=1), "待处理", True),
     ],
@@ -243,7 +243,7 @@ def test_unavailable_online_conditions_are_pending(online_fields):
 
 def test_manually_protected_variants_are_excluded():
     result = single(online_fields={"protected": True})
-    assert result.status == "本轮不调"
+    assert result.status == "不调价"
     assert not result.ready
 
 
@@ -401,7 +401,7 @@ def test_rounded_effective_price_must_stay_within_station_tolerance(site, curren
 )
 def test_station_price_precision_requires_a_matching_verified_contract(contracts):
     result = single(snapshot_fields={"contracts": contracts})
-    assert result.status == "本轮不调"
+    assert result.status == "不调价"
     assert not result.ready
 
 

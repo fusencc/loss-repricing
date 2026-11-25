@@ -37,7 +37,7 @@ def save_roster_filter_records(factory, runtime_dir, job_id, day, scope):
             or capture.get('synthetic', False) is not False or capture.get('department') != department
             or (capture.get('salesperson') or {}).get('name') != name):
         raise ValueError('过滤日志的日期、来源、人员或算价归档未通过')
-    # 仅明确 count>0 才产生本轮不调；未知不伪装成零，完整商品键去重，不按 SKU 文本合并。
+    # 仅明确 count>0 才产生不调价；未知不伪装成零，完整商品键去重，不按 SKU 文本合并。
     protected = {}
     for row in archived.get('history_filter', []):
         if row['status'] != 'history_protected':
@@ -77,16 +77,16 @@ def save_roster_filter_records(factory, runtime_dir, job_id, day, scope):
         with transaction(factory) as session:
             session.add(Batch(id=batch_id, run_key=run_key, business_date=day.isoformat(), mode='live',
                 status='completed', created_at=recorded, snapshot=snapshot,
-                summary={'本轮不调': len(protected)}))
+                summary={'不调价': len(protected)}))
             session.flush()
             for identity, (key, count) in protected.items():
-                reason = f'近72小时存在调价日志，本轮不调（官方记录 {count} 条）'
-                decision = Decision(key=key, status='本轮不调', ready=False,
+                reason = f'近72小时存在调价日志，不调价（官方记录 {count} 条）'
+                decision = Decision(key=key, status='不调价', ready=False,
                     reason_code='recent_price_change', reason=reason, source_row_ids=[],
                     trace={'source_versions': versions,
                            'recent_price_filter': {'count': count, 'window_hours': 72, **source}})
                 session.add(Item(id=str(uuid4()), batch_id=batch_id, variant_id=identity,
-                    key=key.model_dump(mode='json'), status='本轮不调', phase='excluded', reason=reason,
+                    key=key.model_dump(mode='json'), status='不调价', phase='excluded', reason=reason,
                     decision=decision.model_dump(mode='json'), updated_at=recorded))
             session.add(Audit(id=str(uuid4()), action='roster.history_logged', actor='system',
                 detail={'batch_id': batch_id, 'salesperson': name, 'items': len(protected),

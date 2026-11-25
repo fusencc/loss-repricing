@@ -43,7 +43,7 @@ def test_engine_blocks_official_count_without_inventing_last_effective_time():
     decision=single(online_fields={'recent_price_log':{'count':3,'window_start':now-timedelta(hours=72),
         'window_end':now,'source_id':'official-test'},'last_increase_at':None})
     assert decision.reason_code=='recent_price_change' and not decision.ready
-    assert decision.status=='本轮不调'
+    assert decision.status=='不调价'
 
 
 def test_live_service_overrides_empty_local_archive_with_official_count(tmp_path,monkeypatch):
@@ -104,7 +104,7 @@ def test_preparation_uses_official_history_and_keeps_missing_unknown(count):
         assert state['last_increase_at'] is None and state['recent_price_log']['count']==count
 
 
-@pytest.mark.parametrize('count,expected_status',[(3,'本轮不调'),(None,'待处理')])
+@pytest.mark.parametrize('count,expected_status',[(3,'不调价'),(None,'待处理')])
 def test_pre_submit_rechecks_official_log_and_only_blocks_positive(tmp_path,monkeypatch,count,expected_status):
     from test_execution_safety import SyntheticAdapter
     from app.services.execution import PricingService

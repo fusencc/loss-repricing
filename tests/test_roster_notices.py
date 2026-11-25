@@ -83,7 +83,7 @@ def test_roster_template_uses_only_persisted_personal_results_and_acceptance(tmp
             {'date': day, 'salesperson': '桂露', 'scopes': []}, at)
         assert title == '亏损提价处理结果'
         assert '共处理**2**条' in text
-        assert '待处理 1 · 已提价 1 · 本轮不调 0' in text
+        assert '待处理 1 · 已提价 1 · 不调价 0' in text
         assert 'SKU-b' in text and '原因-b' in text
         assert 'SKU-c' not in text and '原因-c' not in text and '莫雯舒' not in text
         assert '查询提价数据下载' in text and '2026-11-25 10:30:00' in text
@@ -101,7 +101,7 @@ def test_roster_template_uses_only_persisted_personal_results_and_acceptance(tmp
         _, text = roster_notice_content(session,
             {'date': day, 'salesperson': '桂露', 'scopes': []}, at)
         assert '共处理**1**条' in text
-        assert '待处理 0 · 已提价 1 · 本轮不调 0' in text
+        assert '待处理 0 · 已提价 1 · 不调价 0' in text
         assert '待处理的明细：\n\n无' in text
 
     engine.dispose()

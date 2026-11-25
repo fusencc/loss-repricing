@@ -136,13 +136,13 @@ def write_decisions(session, batch_id, decisions, *, ready_hold=None):
             session.add(item)
         item.decision = decision.model_dump(mode="json")
         item.status, item.reason = decision.status, decision.reason
-        item.phase = "proposed" if decision.ready else "excluded" if decision.status == "本轮不调" else "blocked"
+        item.phase = "proposed" if decision.ready else "excluded" if decision.status == "不调价" else "blocked"
         if decision.ready and ready_hold is not None:
             item.phase, item.reason = "blocked", ready_hold
         item.updated_at = stamp()
     for identity, item in existing.items():
         if identity not in seen and item.id not in executed and item.phase in {"proposed", "blocked", "excluded"}:
-            item.status, item.phase, item.reason = "本轮不调", "excluded", "重新取数后已不在当前亏损候选中"
+            item.status, item.phase, item.reason = "不调价", "excluded", "重新取数后已不在当前亏损候选中"
             item.updated_at = stamp()
 
 

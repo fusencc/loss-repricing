@@ -34,7 +34,7 @@ def test_history_backfill_deduplicates_full_keys_and_is_idempotent_without_execu
     assert save_roster_filter_records(factory, service.config.runtime_dir, 'daily-job', day, scope) == first
     with factory() as session:
         items = session.scalars(select(Item)).all()
-        assert len(items) == 1 and items[0].status == '本轮不调'
+        assert len(items) == 1 and items[0].status == '不调价'
         assert items[0].key == key
         assert items[0].decision['ready'] is False
         assert items[0].decision['trace']['recent_price_filter']['count'] == 2
@@ -46,7 +46,7 @@ def test_history_backfill_deduplicates_full_keys_and_is_idempotent_without_execu
         for model in (Execution, Job, VariantGuard):
             assert session.scalar(select(func.count()).select_from(model)) == 0
         view = department_records(session, 'department:' + scope['department'], mode='live')
-        assert view['counts'] == {'本轮不调': 1}
+        assert view['counts'] == {'不调价': 1}
         assert view['items'][0]['seller']['name'] == name
         assert view['scope_issues'] == []
     assert adapter.submits == 0

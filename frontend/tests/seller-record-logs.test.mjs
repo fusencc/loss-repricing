@@ -49,7 +49,7 @@ test('dialog title shows evidence dates without total or hit counts, while filte
   const seller = groupBySeller([item(), { ...item(), id: 'second', status: '待处理' }, { ...item(), id: 'third', status: '已核验', execution:{state:'verified'} }])[0]
   const saved = structuredClone(seller)
   const html = await renderToString(createSSRApp(Component, { seller }))
-  for (const [name, count] of [['全部', 3], ['已提价', 1], ['待核验', 1], ['待处理', 1], ['本轮不调', 0]]) {
+  for (const [name, count] of [['全部', 3], ['已提价', 1], ['待处理', 2], ['不调价', 0]]) {
     assert.ok(html.includes(`${name} <span class="records-log-filter-count">${count}</span>`))
   }
   assert.deepEqual(seller, saved)
@@ -63,7 +63,7 @@ test('compact log retains identity, status, three horizontal stage fields and up
   assert.match(html, /<p>合成测试店铺 \/ PH<\/p>/)
   assert.doesNotMatch(html, /PH \/ Tiktok/)
   assert.equal(row.key.platform, 'Tiktok')
-  assert.match(html, /class="attention records-status"><i><\/i>待核验/)
+  assert.match(html, /class="attention records-status"><i><\/i>待处理/)
   assert.equal((html.match(/data-stage=/g) ?? []).length, 3)
   assert.equal((html.match(/class="records-stage-field"/g) ?? []).length, 6)
   assert.doesNotMatch(html, /<table|<thead|<tbody|<tr|scope="col"/)
@@ -94,8 +94,8 @@ test('compact log retains identity, status, three horizontal stage fields and up
 
 test('upload is a peer price field and all execution statuses occupy a separate rightmost top-aligned column', async () => {
   for (const [status, tone, label] of [
-    ['已核验', 'verified', '已提价'], ['待核验', 'attention', '待核验'],
-    ['待处理', 'attention', '待处理'], ['本轮不调', 'neutral', '本轮不调'],
+    ['已核验', 'verified', '已提价'], ['待核验', 'attention', '待处理'],
+    ['待处理', 'attention', '待处理'], ['不调价', 'neutral', '不调价'],
   ]) {
     const row = item()
     row.status = status
@@ -226,7 +226,7 @@ test('identity copy buttons expose distinct accessible names and missing IDs rem
 })
 
 test('saved reasons appear below the badge for pending and skipped records without using earlier attempts', async () => {
-  for (const status of ['待处理', '待核验', '本轮不调']) {
+  for (const status of ['待处理', '待核验', '不调价']) {
     const row = item()
     row.status = status
     row.reason = '近72小时内有调价记录\n人工保护；来源待核实'
@@ -240,7 +240,7 @@ test('saved reasons appear below the badge for pending and skipped records witho
 })
 
 test('missing saved reasons are explicit and never inferred from other evidence', async () => {
-  for (const status of ['待处理', '待核验', '本轮不调']) {
+  for (const status of ['待处理', '待核验', '不调价']) {
     for (const reason of [undefined, null, '', '   ']) {
       const row = item()
       Object.assign(row, { status, reason, seven_days_sales: 22 })
@@ -264,7 +264,7 @@ test('verified records use the requested fixed explanation and historical reason
 
 test('saved historical threshold reasons are displayed as text, escaped, and never re-evaluated', async () => {
   const row = item()
-  row.status = '本轮不调'
+  row.status = '不调价'
   row.reason = '历史原因：7天销量>21；<script>不执行</script>'
   const html = await render(row)
   assert.match(html, /历史原因：7天销量&gt;21；&lt;script&gt;不执行&lt;\/script&gt;/)

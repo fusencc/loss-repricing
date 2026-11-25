@@ -153,7 +153,17 @@ class CaptureGroup(BaseModel):
                     and (department is None or (row.fields.department or "").casefold() == department.casefold())
                     for row in self.rows)
         )
-        if not list_known or not rows_in_scope or not self._batches_cover_orders(ids):
+        if not rows_in_scope:
+            return False, False
+        # 2026-11-25 用户授权“抓到多少处理多少”：名单后页或财务后批失败，
+        # 不否定此前已绑定任务、成功下载且逐批核对的财务行。完整性仍如实报告，
+        # 未返回订单不当作零亏损；只使用已观察样本，不声称取得全量最小亏损。
+        partial_capture = self.stage not in ("complete", "not_attempted") and (
+            self.error is not None or bool(self.failed_pages)
+        )
+        if partial_capture and self._batches_cover_orders(ids, allow_partial=True):
+            return False, True
+        if not list_known or not self._batches_cover_orders(ids):
             return False, False
         # 最终导出中已知订单的缺行或重复可按目标挂起。未完成导出无法证明这类缺口已定位。
         has_duplicates = len(row_ids) != len(self.rows)
@@ -164,26 +174,32 @@ class CaptureGroup(BaseModel):
         )
         return complete, known_issue
 
-    def _batches_cover_orders(self, candidate_ids):
+    def _batches_cover_orders(self, candidate_ids, *, allow_partial=False):
         # 采集按子批依次追加财务行。按记录行数分段核对，不能用整组订单并集证明子批无串单。
         requested = set()
         offset = 0
         for number, batch in enumerate(self.batches, 1):
             ids = set(batch.order_ids)
             if (
-                batch.number != number or batch.scope_check is None
+                batch.number != number
                 or not ids or len(ids) != len(batch.order_ids) or ids & requested
-                or not batch.polls or batch.polls[-1].status != "success"
+                or not ids <= candidate_ids
             ):
+                return False
+            requested.update(ids)
+            if allow_partial and batch.status in ("not_attempted", "submitting", "polling", "failed"):
+                # 此批无可信财务行；不消耗 rows，后续成功子批仍独立核对。
+                continue
+            if (batch.scope_check is None or not batch.polls
+                    or batch.polls[-1].status != "success"):
                 return False
             end = offset + batch.scope_check.downloaded_rows
             scope = finance_batch_scope(batch.order_ids, [row.orderid for row in self.rows[offset:end]])
             expected_status = "partial" if scope["missing"] or scope["duplicate_rows"] else "complete"
             if scope["unexpected"] or scope != batch.scope_check.model_dump() or batch.status != expected_status:
                 return False
-            requested.update(ids)
             offset = end
-        return requested == candidate_ids and offset == len(self.rows)
+        return (allow_partial or requested == candidate_ids) and offset == len(self.rows)
 
 
 class CaptureSalesperson(BaseModel):
@@ -700,12 +716,10 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
         source: group.finance_coverage(scope_by_source[source], capture.department, capture.salesperson)
         for source, group in groups.items()
     }
-    any_known_issue = any(known_issue for _, known_issue in finance_coverage.values())
     complete_sources = [
         source for source in SOURCES
         if any(finance_coverage.get(source, (False, False))) and source not in incomplete_sources
         and scope_matches and valid_observation_window and not capture.sample_only
-        and (capture.capture_complete or any_known_issue)
     ]
     coverage = [
         {

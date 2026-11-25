@@ -577,7 +577,7 @@ def test_protection_added_inside_cached_batch_blocks_only_matching_target(safety
     with factory() as session:
         items = session.scalars(select(Item).where(Item.batch_id == batch_id)).all()
         protected = next(item for item in items if item.key["item_id"] == "I1")
-        assert protected.status == "本轮不调"
+        assert protected.status == "不调价"
         assert protected.phase == "excluded"
         assert "提交前命中人工保护" in protected.reason
         assert session.scalar(select(Execution).where(Execution.item_id == protected.id)) is None

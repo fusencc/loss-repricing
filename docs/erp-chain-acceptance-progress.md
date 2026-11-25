@@ -218,7 +218,7 @@ LR_DATABASE_URL=sqlite:///runtime/module-acceptance/notification-migration.sqlit
 
 ## 2026-11-10 浏览器演示验收
 
-本机回环地址启动独立 demo 应用与 worker。使用临时 SQLite 和独立演示账号，给虚拟店铺配置演示归属。浏览器依次登录、运行演示批次、进入通知收件箱、打开涉及商品列表并确认知悉。页面显示 8 条商品，4 条已核验、2 条待处理、2 条本轮不调。通知详情核对目标实际价 11 MYR、回读 11.00 MYR，以及单独记录的业务确认时间。
+本机回环地址启动独立 demo 应用与 worker。使用临时 SQLite 和独立演示账号，给虚拟店铺配置演示归属。浏览器依次登录、运行演示批次、进入通知收件箱、打开涉及商品列表并确认知悉。页面显示 8 条商品，4 条已核验、2 条待处理、2 条不调价。通知详情核对目标实际价 11 MYR、回读 11.00 MYR，以及单独记录的业务确认时间。
 
 隔离数据库只读核对通过。批次已完成，4 条执行均已核验，唯一通知为模拟投递，外部任务号为空，管理员确认已持久化。外键检查通过。启动脚本与运行目录保存在本机 `runtime/module-acceptance`，启动命令为 `PYTHONPATH=backend .venv/bin/python runtime/module-acceptance/run_browser_demo.py`。此轮未修改业务代码。真实样本算价仍待同一业务日的明细金额与在线证据。
 

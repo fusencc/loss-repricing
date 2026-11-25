@@ -22,7 +22,7 @@ test('first confirmation and updates are explicitly different from real effectiv
     '记录更新日期：2026/11/23（北京时间）')
   assert.equal(recordDateLabel([row({ execution: { effective_at: '2026-11-20T00:00:00Z' } })]),
     '记录更新日期：2026/11/23（北京时间）')
-  assert.equal(recordDateLabel([row({ status: '本轮不调' })]), '记录更新日期：2026/11/23（北京时间）')
+  assert.equal(recordDateLabel([row({ status: '不调价' })]), '记录更新日期：2026/11/23（北京时间）')
   assert.equal(recordDateLabel([effective('2026-11-21T01:00:00Z'), confirmation, row()]),
     '提价生效日期：2026/11/21；提价核验日期：2026/11/23；记录更新日期：2026/11/23（北京时间）')
 })

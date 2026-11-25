@@ -2,7 +2,7 @@
 
 本期范围：真实只读抓取、原件和清洗存档、亏损筛选、统一引擎算价、待提价归档。程序计算不调用大模型；当前真实上传保持关闭。
 
-近72小时调价保护查询开放接口`getOperationLogCountBySellerSkuIdsAndTypeAndCompleteTime`，使用具体子商品ID、type=2及北京时间滚动72小时完成范围。count>0本轮不调，明确0通过；失败/缺行/异常为待处理。接口未确认只统计成功记录，不限定操作者及涨跌。自动提交前重查当前SKU。本地`runtime/live-history.db`继续保存实际核验证据、人工保护和未完成执行锁，由`LR_LIVE_HISTORY_DATABASE_URL`绑定；真实运行库须与该库一致。
+近72小时调价保护查询开放接口`getOperationLogCountBySellerSkuIdsAndTypeAndCompleteTime`，使用具体子商品ID、type=2及北京时间滚动72小时完成范围。count>0不调价，明确0通过；失败/缺行/异常为待处理。接口未确认只统计成功记录，不限定操作者及涨跌。自动提交前重查当前SKU。本地`runtime/live-history.db`继续保存实际核验证据、人工保护和未完成执行锁，由`LR_LIVE_HISTORY_DATABASE_URL`绑定；真实运行库须与该库一致。
 
 
 含VAT上传价PH、MY、TH、SG步长0.01；VN步长100；统一向上取整。列为“税后价格”，合同版本 `user-approved-ceiling-20261111-v1`。`d=当前实际价/当前含VAT零售价`，除以d是折扣逆算，不额外乘一次VAT。

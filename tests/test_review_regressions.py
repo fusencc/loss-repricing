@@ -162,7 +162,7 @@ def test_current_items_and_counts_omit_resolved_history_but_preserve_batches(cli
     pending = client.get('/api/items?status=待处理').json()
     assert not any(row['key']['item_id'] in verified for row in pending)
     assert len(current) == 8
-    assert client.get('/api/overview').json()['counts'] == {**dict.fromkeys(['本轮不调', '待处理', '待核验', '已核验'], 0), **Counter(row['status'] for row in current)}
+    assert client.get('/api/overview').json()['counts'] == {**dict.fromkeys(['不调价', '待处理', '待核验', '已核验'], 0), **Counter(row['status'] for row in current)}
     history = client.get('/api/items', params={'batch_id': first, 'status': '待处理'}).json()
     assert any(row['key']['item_id'] in verified for row in history)
     assert len(client.get(f'/api/batches/{first}').json()['items']) == 8

@@ -406,7 +406,7 @@ class PricingService:
                 Protection.site == decision.key.site, Protection.main_sku == rows[0]["main_sku"]
             ).limit(1))
             if protection:
-                item.status, item.phase = "本轮不调", "excluded"
+                item.status, item.phase = "不调价", "excluded"
                 item.reason = "提交前命中人工保护名单：" + protection.reason
                 item.updated_at = stamp()
                 return None
@@ -452,8 +452,8 @@ class PricingService:
                 decision.trace.setdefault('warning_codes', []).append('unknown_history')
                 decision.trace.setdefault('warnings', []).append('提交前近72小时调价历史无法确认，仅告警')
             if recent is not None and recent.count > 0:
-                decision.ready, decision.status = False, '本轮不调'
-                decision.reason_code, decision.reason = 'recent_price_change', '提交前查到近72小时调价日志，本轮不调'
+                decision.ready, decision.status = False, '不调价'
+                decision.reason_code, decision.reason = 'recent_price_change', '提交前查到近72小时调价日志，不调价'
                 self._hold(item_id,decision.reason,decision.status,decision=decision)
                 return
         if roster is not None:

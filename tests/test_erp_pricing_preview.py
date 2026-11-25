@@ -1,3 +1,4 @@
+from copy import deepcopy
 import json
 from decimal import Decimal
 from pathlib import Path
@@ -250,13 +251,16 @@ def test_known_missing_finance_holds_its_mapped_target_and_independent_pricing_c
     pending.update(stage="complete_with_missing", error="部分财务未返回")
     pending["batches"][0]["status"] = "partial"
     pending["batches"][0]["scope_check"].update(downloaded_rows=1, downloaded_unique=1, missing=["000003"])
+    evidence["orders"][2]["lines"][0]["mapping"] = deepcopy(evidence["orders"][0]["lines"][0]["mapping"])
     report = preview_pricing(capture, evidence)
     coverage = next(row for row in report["source_coverage"] if row["source"] == "loss_pending")
     assert not coverage["finance_complete"] and coverage["preparation_complete"]
     assert any(issue["order_id"] == "000003" and issue["code"] == "missing_order_finance"
                for issue in report["issues"])
-    assert any(decision["key"]["item_id"] == "0001001" and decision["ready"]
-               for decision in report["decisions"])
+    # 文件补充仍按已知商品挂起：缺行订单与第一单同目标，第一单不能绕过挂起。
+    assert [decision["key"]["item_id"] for decision in report["decisions"] if decision["ready"]] == ["0001002"]
+    assert any(issue["order_id"] == "000001" and issue["code"] == "target_held"
+               for issue in report["issues"])
 
 
 @pytest.mark.parametrize("target_known", [True, False])
@@ -556,3 +560,160 @@ def test_missing_live_mapping_is_local_but_missing_candidate_list_is_not(source_
     report = prepare_pricing(capture, order_preparation=prep).report
     assert 'blocked_allocatable' not in report['evaluation_complete_sources']
     assert any('禁止发货 × 可配货' in reason for reason in report['global_issues'])
+
+
+def partial_finance_batches(group, *, successful_first=True):
+    """保留第二单的可靠财务；第三单失败且不占用返回行的分段偏移。"""
+    template = deepcopy(group['batches'][0])
+    successful = dict(template, order_ids=['000002'], scope_check={
+        'requested': 1, 'downloaded_rows': 1, 'downloaded_unique': 1,
+        'missing': [], 'unexpected': [], 'duplicate_rows': 0,
+    })
+    failed = dict(template, order_ids=['000003'], status='failed', polls=[], scope_check=None)
+    batches = [successful, failed] if successful_first else [failed, successful]
+    for number, batch in enumerate(batches, 1):
+        batch['number'] = number
+    group.update(stage='poll_order_export', error='部分财务批次失败', batches=batches,
+                 rows=[row for row in group['rows'] if row['orderid'] == '000002'])
+
+
+@pytest.mark.parametrize('successful_first', [True, False], ids=['success_then_failure', 'failure_then_success'])
+def test_successful_finance_batches_survive_an_independent_failed_batch(source_files, successful_first):
+    capture, evidence = source_files
+    capture['capture_complete'] = False
+    pending = capture['groups'][1]
+    partial_finance_batches(pending, successful_first=successful_first)
+
+    report = preview_pricing(capture, evidence)
+
+    coverage = next(row for row in report['source_coverage'] if row['source'] == 'loss_pending')
+    assert not coverage['finance_complete']
+    assert coverage['preparation_complete']
+    assert coverage['finance_rows'] == 1 and coverage['candidate_orders'] == 2
+    assert len(report['evaluation_complete_sources']) == 4
+    assert {row['key']['item_id'] for row in report['decisions'] if row['ready']} == {'0001001', '0001002'}
+    assert any(row['order_id'] == '000003' and row['code'] == 'missing_order_finance'
+               for row in report['issues'])
+    assert {report['references']['lines'][rid]['order_id']
+            for rid in report['references']['retained_row_ids']} == {'000001', '000002'}
+
+
+def test_later_candidate_page_failure_keeps_already_aligned_finance(source_files):
+    capture, evidence = source_files
+    capture['capture_complete'] = False
+    group = capture['groups'][2]
+    group.update(list_complete=False, stage='list_failed', error='后页请求失败',
+                 failed_pages=[{'page': 2, 'error': '请求失败'}], total=None)
+
+    report = preview_pricing(capture, evidence)
+
+    coverage = next(row for row in report['source_coverage'] if row['source'] == group['source'])
+    assert not coverage['list_complete'] and not coverage['finance_complete']
+    assert coverage['preparation_complete']
+    assert coverage['finance_rows'] == coverage['candidate_orders'] == 1
+    assert len(report['evaluation_complete_sources']) == 4
+    assert {row['key']['item_id'] for row in report['decisions'] if row['ready']} == {'0001001', '0001002'}
+    first = next(row for row in report['decisions'] if row['key']['item_id'] == '0001001')
+    assert any(row['source'] == 'blocked_allocatable' for row in first['trace']['source_rows'])
+
+
+@pytest.mark.parametrize('failure', ['first_page', 'all_finance_batches'])
+def test_completely_failed_source_is_never_reported_as_complete_empty_source(source_files, failure):
+    capture, evidence = source_files
+    capture['capture_complete'] = False
+    group = capture['groups'][2]
+    group.update(stage='list_failed', error='来源请求失败', rows=[], batches=[])
+    if failure == 'first_page':
+        group.update(list_complete=False, candidate_order_ids=[], total=None,
+                     failed_pages=[{'page': 1, 'error': '请求失败'}])
+    else:
+        group.update(stage='poll_order_export', batches=[{
+            'number': 1, 'order_ids': ['000001'], 'status': 'failed', 'polls': [],
+        }])
+
+    report = preview_pricing(capture, evidence)
+
+    coverage = next(row for row in report['source_coverage'] if row['source'] == group['source'])
+    assert coverage['finance_rows'] == 0
+    assert not coverage['finance_complete'] and not coverage['preparation_complete']
+    assert group['source'] not in report['evaluation_complete_sources']
+    assert not any(row['ready'] for row in report['decisions'])
+
+
+@pytest.mark.parametrize('defect', ['swapped_requests', 'wrong_count', 'wrong_order_identity', 'wrong_bloc'])
+def test_partial_capture_still_rejects_successful_batch_scope_conflicts(source_files, defect):
+    capture, evidence = source_files
+    capture['capture_complete'] = False
+    pending = capture['groups'][1]
+    partial_finance_batches(pending)
+    successful, failed = pending['batches']
+    if defect == 'swapped_requests':
+        successful['order_ids'], failed['order_ids'] = failed['order_ids'], successful['order_ids']
+    elif defect == 'wrong_count':
+        successful['scope_check']['downloaded_rows'] = 2
+    elif defect == 'wrong_order_identity':
+        pending['rows'][0]['fields']['订单编号'] = '000003'
+    else:
+        pending['rows'][0]['fields']['集团'] = '其他集团'
+
+    report = preview_pricing(capture, evidence)
+
+    coverage = next(row for row in report['source_coverage'] if row['source'] == 'loss_pending')
+    assert not coverage['finance_complete'] and not coverage['preparation_complete']
+    assert 'loss_pending' not in report['evaluation_complete_sources']
+    assert not any(row['ready'] for row in report['decisions'])
+
+
+@pytest.mark.parametrize('has_order_details', [True, False])
+def test_live_missing_finance_excludes_only_that_order_even_for_the_same_target(source_files, has_order_details):
+    from app.adapters.erp_pricing import prepare_pricing
+
+    capture, evidence = source_files
+    prep = live_scoped_preparation(capture, evidence)
+    first_mapping = prep['orders'][0]['lines'][0]['mapping']
+    prep['orders'][1]['lines'][0]['mapping'] = deepcopy(first_mapping)
+    for group in capture['groups']:
+        for row in group['rows']:
+            if row['orderid'] == '000002':
+                row['fields']['店铺'] = first_mapping['erp_shop']
+    capture['capture_complete'] = False
+    pending = capture['groups'][1]
+    pending['rows'] = [row for row in pending['rows'] if row['orderid'] != '000002']
+    pending.update(stage='complete_with_missing', error='第二单财务未返回')
+    pending['batches'][0]['status'] = 'partial'
+    pending['batches'][0]['scope_check'].update(downloaded_rows=1, downloaded_unique=1, missing=['000002'])
+    if not has_order_details:
+        prep['orders'] = prep['orders'][:1]
+        prep['proofs'].pop('000002')
+
+    online = deepcopy(evidence['online'][:1])
+    online[0]['state']['fee_scope'] = 'erp-corrected-first-margin-v1'
+    bundle = {
+        'schema_version': 'erp-live-online-preparation-v2', 'version': 'erp-live-online-v2',
+        'erp_capture_id': capture['capture_id'], 'synthetic': True, 'sample_only': False,
+        'pricing_ready': False, 'observed_at': evidence['evaluated_at'],
+        'evaluated_at': evidence['evaluated_at'], 'online': online,
+        'contracts': evidence['contracts'], 'issues': [], 'references': {'sales_source': 'S1'},
+    }
+    fx = {
+        'date': '2026-11-09', 'display_units_per_cny': {'CNY': '1', 'MYR': '0.5'},
+        'source_rates': {'CNY': '1', 'MYR': '2'}, 'version': 'erp-current-config-usage-day-v1',
+        'ref': 'FX', 'queried_at': '2026-11-09T15:01:00+08:00',
+        'source_effective_date': None, 'date_policy': 'current_config_on_usage_day', 'synthetic': True,
+    }
+    report = prepare_pricing(capture, order_preparation=prep).report
+
+    assert len(report['evaluation_complete_sources']) == 4
+    assert [report['references']['lines'][rid]['order_id']
+            for rid in report['references']['retained_row_ids']] == ['000001']
+    assert any(row['order_id'] == '000002' and row['code'] == 'missing_order_finance'
+               for row in report['issues'])
+    assert not any(row['order_id'] == '000001' and row['code'] == 'target_held'
+                   for row in report['issues'])
+    from app.domain.engine import evaluate
+
+    prepared = prepare_pricing(capture, order_preparation=prep, current_fx=fx, online_preparation=bundle)
+    decisions = evaluate(prepared.snapshot, prepared.evaluated_at)
+    assert len(decisions) == 1
+    assert decisions[0].ready and decisions[0].key.item_id == '0001001'
+    assert decisions[0].upload_price > Decimal('20')

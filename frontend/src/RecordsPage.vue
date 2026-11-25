@@ -132,7 +132,7 @@ onUnmounted(() => {
 
       <div class="records-overview" aria-live="polite">
         <div><strong>{{ departmentName }}</strong><span v-if="data">{{ sellerCount }} 位销售员，全部 {{ data.total }} 条记录<span v-if="groups.some(group => !group.assigned)">，含待分配记录</span></span></div>
-        <div v-if="data" class="records-counts"><span v-for="state in states" :key="state"><i :class="recordTone(state)"></i>{{ state === '本轮不调' ? '不调价' : state }} <b>{{ counts[state] }}</b></span><span class="records-activity-placeholder"><i class="neutral"></i>活动中</span></div>
+        <div v-if="data" class="records-counts"><span v-for="state in states" :key="state"><i :class="recordTone(state)"></i>{{ state === '不调价' ? '不调价' : state }} <b>{{ counts[state] }}</b></span><span class="records-activity-placeholder"><i class="neutral"></i>活动中</span></div>
       </div>
       <p v-if="error" class="records-error motion-reveal" role="alert"><strong>{{ data ? '更新未成功，以下保留最近读取的数据。' : '暂时无法读取记录。' }}</strong>{{ error }}。可切换部门或刷新页面，系统也会自动重试。</p>
 

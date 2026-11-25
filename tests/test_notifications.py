@@ -418,7 +418,7 @@ def test_notice_detail_pages_current_results_and_rechecks_recipient(notices_cont
 
     factory, cfg = notices_context
     with factory.begin() as session:
-        for sku, status in (("checked", "待处理"), ("awaiting", "待核验"), ("protected", "本轮不调")):
+        for sku, status in (("checked", "待处理"), ("awaiting", "待核验"), ("protected", "不调价")):
             key = dict(session.get(Item, "i").key, item_id=sku, sku=sku)
             session.add(Item(
                 id=sku, batch_id="b", variant_id=sku, key=key, status=status, phase="proposed",
@@ -452,7 +452,7 @@ def test_notice_detail_pages_current_results_and_rechecks_recipient(notices_cont
         result = page.json()
         assert result["batch_mode"] == "live"
         assert result["total"] == 4
-        assert result["statuses"] == {"待处理": 1, "待核验": 1, "已核验": 1, "本轮不调": 1}
+        assert result["statuses"] == {"待处理": 1, "待核验": 1, "已核验": 1, "不调价": 1}
         assert result["delivery_state"] == "pending" and result["ack_at"] is None
         assert [item["id"] for item in result["items"]] == ["i", "awaiting"]
 
@@ -497,7 +497,7 @@ def test_robot_result_template_uses_authorized_details_and_download_link(notices
     assert userid=='ding-seller' and url==''
     assert title=='亏损提价处理结果'
     assert '**2026-11-19 10:30:00** · 共处理**1**条' in text
-    assert '待处理 1 · 已提价 0 · 本轮不调 0' in text
+    assert '待处理 1 · 已提价 0 · 不调价 0' in text
     assert '待处理的明细：' in text
     assert 'sku' in text and 'MY' in text and 'shop' in text and '缺少费用数据' in text
     assert '查询提价数据下载[http://8.133.252.166:50003](http://8.133.252.166:50003)' in text
@@ -670,9 +670,9 @@ def test_result_template_historical_activity_is_pending_and_verified_is_increase
     from app.services.notifications import _card_text, _summary
     def item(status,code,sku):
         return SimpleNamespace(status=status,decision={'reason_code':code},key={'sku':sku,'site':'PH','shop_id':'s'},reason='原因',updated_at='2026-11-19T02:30:00+00:00')
-    items=[item('待处理','activity_locked','active-sku'),item('待核验','pending_submission','manual-sku'),item('已核验','ready','done-sku'),item('本轮不调','recent_price_change','skip-sku')]
+    items=[item('待处理','activity_locked','active-sku'),item('待核验','pending_submission','manual-sku'),item('已核验','ready','done-sku'),item('不调价','recent_price_change','skip-sku')]
     text=_card_text(_summary(items),items)
-    assert '待处理 2 · 已提价 1 · 本轮不调 1' in text
+    assert '待处理 2 · 已提价 1 · 不调价 1' in text
     assert '活动中' not in text
     assert 'manual-sku' in text and 'active-sku' in text
     assert 'done-sku' not in text and 'skip-sku' not in text
@@ -696,7 +696,7 @@ def test_warning_notice_goes_to_admin_independent_of_owner(notices_context, monk
     factory,cfg=notices_context
     cfg.notification_mode='live';cfg.ding_enabled=True;cfg.ding_alert_userid='ding-self'
     with factory.begin() as session:
-        item=session.get(Item,'i');item.status='本轮不调'
+        item=session.get(Item,'i');item.status='不调价'
         item.decision={'trace':{'warning_codes':['unverified_online_profit'],'warnings':['费用模型无效']}}
     assert enqueue_batch_notices(factory,'b')==2
     sent=[]

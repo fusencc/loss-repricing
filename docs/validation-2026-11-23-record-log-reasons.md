@@ -3,7 +3,7 @@
 ## 修改范围
 
 - `frontend/src/SellerRecordLogs.vue`：独立右侧状态列中，徽标下展示本条原因；店铺行仅保留店铺／站点，不改底层平台字段或下载数据。
-- `frontend/src/records-model.ts`：已核验的显示说明固定为「商品符合调价」；待处理、待核验和本轮不调只读本条保存的 `reason`，缺失或空白显示「原因未记录」。不借历史尝试、销量或价格推导原因。
+- `frontend/src/records-model.ts`：已核验的显示说明固定为「商品符合调价」；待处理、待核验和不调价只读本条保存的 `reason`，缺失或空白显示「原因未记录」。不借历史尝试、销量或价格推导原因。
 - `frontend/src/records.css`：说明支持保存的换行及长文本断行，参与自身网格高度；窄屏保持状态独立右列，价格另起一行。
 - `frontend/tests/seller-record-logs.test.mjs`：更新状态列和店铺行断言，新增真实保存多原因、缺失原因、固定说明及历史阈值文本转义测试。
 - `docs/engineering-standards.md`：补充当前展示合同。

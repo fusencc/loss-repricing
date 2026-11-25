@@ -190,7 +190,7 @@ class ManualLiveAdapter:
         official_history = capture_recent_price_changes(self.settings,[k],client=self.client)
         from app.adapters.official_price_logs import recent_price_log_for
         if recent_price_log_for(official_history,k).count != 0:
-            raise ValueError('近72小时已有调价日志，本轮不调')
+            raise ValueError('近72小时已有调价日志，不调价')
         history = capture_local_price_history(self.settings, capture)
         fixed = capture_current_fees(self.settings, capture, daily=daily_fees)
         fx = query_current_erp_fx(self.settings)

@@ -41,11 +41,13 @@ export interface RecordData {
   departments: { id: string; name: string; total: number }[]; department: string | null
   total: number; shops: number; counts: Partial<Record<ItemStatus, number>>; items: RecordItem[]
 }
-export const recordDisplayStates = ['已提价', '待核验', '待处理', '本轮不调'] as const
+// 用户 2026-11-25 明确要求：待核验直接归类为待处理，页面只保留三态。
+// 受理、提交中、结果未知等未终结证据仍按原执行状态保存在记录中，由原因说明区分。
+export const recordDisplayStates = ['已提价', '待处理', '不调价'] as const
 export type RecordDisplayState = typeof recordDisplayStates[number]
 
 function emptyRecordStatusCounts(): Record<RecordDisplayState, number> {
-  return { '已提价': 0, '待核验': 0, '待处理': 0, '本轮不调': 0 }
+  return { '已提价': 0, '待处理': 0, '不调价': 0 }
 }
 
 export interface SellerGroup {
@@ -80,7 +82,7 @@ export function recordSource(item: RecordItem): string {
 }
 
 export function recordTone(status: RecordDisplayState): string {
-  return ({ '已提价': 'verified', '待核验': 'attention', '待处理': 'attention', '本轮不调': 'neutral' }[status])
+  return ({ '已提价': 'verified', '待处理': 'attention', '不调价': 'neutral' }[status])
 }
 
 export function effectiveTimeLabel(source: string | null | undefined): string {
@@ -141,9 +143,10 @@ export function recordStatusLabel(item: RecordItem): RecordDisplayState {
   // 已提价只投影已落库的核验成功状态；受理回执不能覆盖后续核验失败。
   const state = item.execution?.state
   if (item.status === '已核验' && state === 'verified') return '已提价'
+  // 待核验并入待处理展示；具体处于受理、提交中还是结果未知，由 recordStateReason 说明。
   if (state === 'mismatch' || state === 'failed') return '待处理'
-  if (state === 'accepted' || state === 'unknown' || state === 'submitting' || item.status === '待核验') return '待核验'
-  return item.status === '本轮不调' ? '本轮不调' : '待处理'
+  if (state === 'accepted' || state === 'unknown' || state === 'submitting' || item.status === '待核验') return '待处理'
+  return item.status === '不调价' ? '不调价' : '待处理'
 }
 
 export function countRecordStatuses(items: RecordItem[]): Record<RecordDisplayState, number> {

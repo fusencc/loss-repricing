@@ -36,7 +36,7 @@ test('active price cap shows the saved reduction and is not described as advisor
   assert.match(html,/目标营销价上限/)
   assert.match(html,/0\.7 MYR/)
   assert.match(html,/参考价优先/)
-  assert.doesNotMatch(html,/本轮不调|利润要求/)
+  assert.doesNotMatch(html,/不调价|利润要求/)
   assert.doesNotMatch(html,/仅供参考/)
 })
 
@@ -45,5 +45,5 @@ test('reference priority is displayed when no finite one-percent floor exists',a
   const priceLimit={upper_actual:'9',applied:true,reduction_amount:null}
   const html=await renderToString(createSSRApp(Component,{reference,priceLimit}))
   assert.match(html,/参考价优先/)
-  assert.doesNotMatch(html,/本轮不调|null|利润要求/)
+  assert.doesNotMatch(html,/不调价|null|利润要求/)
 })

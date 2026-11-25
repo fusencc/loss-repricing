@@ -245,7 +245,7 @@ def _decide(
                 })
         trace["source_issues"] = issue_trace
 
-    # 2026-11-20：历史未知、不可售仅告警；计算依据无效本轮不调，不伪造价格。
+    # 2026-11-20：历史未知、不可售仅告警；计算依据无效不调价，不伪造价格。
     def warn(code, message):
         trace.setdefault("warning_codes", []).append(code)
         trace["warnings"].append(message)
@@ -336,7 +336,7 @@ def _decide(
     if online.last_increase_at is not None and online.last_increase_at > now:
         warn("unknown_history", "上次确认生效时间晚于评估时间，历史无法确认，仅告警")
     if online.protected:
-        return finish("manual_protection", "命中人工保护名单", status="本轮不调")
+        return finish("manual_protection", "命中人工保护名单", status="不调价")
     if online.recent_price_log is not None:
         history = online.recent_price_log
         if (not history.source_id or history.window_end-history.window_start != timedelta(hours=72)
@@ -344,11 +344,11 @@ def _decide(
                 or history.window_end.astimezone(BEIJING).date()!=snapshot.business_date):
             warn("unknown_history", "开放调价日志查询窗口无效或不属于本业务日，仅告警")
         elif history.count > 0:
-            return finish("recent_price_change", "近72小时存在调价日志，本轮不调", status="本轮不调")
+            return finish("recent_price_change", "近72小时存在调价日志，不调价", status="不调价")
     elif online.last_increase_at is not None and online.last_increase_at <= now:
         elapsed = now.astimezone(timezone.utc) - online.last_increase_at.astimezone(timezone.utc)
         if elapsed < timedelta(hours=72):
-            return finish("recent_increase", "距离上次确认生效不足 72 小时", status="本轮不调")
+            return finish("recent_increase", "距离上次确认生效不足 72 小时", status="不调价")
 
     # 2026-11-20用户暂停活动限制：参加活动不再拦截算价；营销价、折扣及有效价核验保持不变。
     if not online.sellable:
@@ -363,21 +363,21 @@ def _decide(
         or not contract.version.strip()
     ):
         warn("unverified_site_contract", "缺少经确认的站点上传字段、价格档位或合同版本")
-        return finish("unverified_site_contract", "缺少经确认的站点上传字段、价格档位或合同版本", status="本轮不调")
+        return finish("unverified_site_contract", "缺少经确认的站点上传字段、价格档位或合同版本", status="不调价")
     if key.warehouse not in contract.warehouses:
         warn("unsupported_warehouse", "当前仓配未包含在已确认站点上传及费用合同的适用范围")
-        return finish("unsupported_warehouse", "当前仓配未包含在已确认站点上传及费用合同的适用范围", status="本轮不调")
+        return finish("unsupported_warehouse", "当前仓配未包含在已确认站点上传及费用合同的适用范围", status="不调价")
 
     profit_check = online.profit_check
     if profit_check is None:
         warn("unverified_online_profit", "缺少库存分流、部门费率及完整在线利润公式")
-        return finish("unverified_online_profit", "缺少库存分流、部门费率及完整在线利润公式", status="本轮不调")
+        return finish("unverified_online_profit", "缺少库存分流、部门费率及完整在线利润公式", status="不调价")
     upper = reference_upper_price(price_reference, station_currency)
     minimum_margin_required = upper is None
     if issue := profit_check.validation_issue(now, snapshot.business_date,
                                               minimum_margin_required=minimum_margin_required):
         warn("unverified_online_profit", issue.value)
-        return finish("unverified_online_profit", issue.value, status="本轮不调")
+        return finish("unverified_online_profit", issue.value, status="不调价")
 
     conversion = fx_ratio(snapshot, loss_currency, station_currency)
     if conversion is None:
@@ -491,7 +491,7 @@ def _decide(
     if upload_price <= 0 or error_ratio > MoneyRatio(tolerance):
         return finish("rounding_error", "站点价格档位导致实际价无效或超出误差容限", **prices)
     if upper is not None and rounded_ratio > upper:
-        return finish('reference_price_exceeded', '进档后营销价超过参考上限，本轮不调', status='本轮不调', **prices)
+        return finish('reference_price_exceeded', '进档后营销价超过参考上限，不调价', status='不调价', **prices)
     if minimum_margin_required and (not target_result.meets_minimum_margin or not rounded_result.meets_minimum_margin):
         return finish("online_profit_shortfall", "目标价或档位后在线利润率未达到1%", **prices)
     reason = ("已按参考价优先确定价格，预计在线利润已记录" if upper is not None else

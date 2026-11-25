@@ -298,8 +298,6 @@ def _blocked_ids(post, group, *, salesperson=None, evidence_dir=None):
     page = 1
     while True:
         evidence = []
-        validation_reason = None
-        validation_row = None
         try:
             # 11/24 用户取消动态名单的数量一致性拦截：total 是本次请求的观察值，
             # 不是冻结快照。按当前页推进，短页或到达本页总数即结束，不回头补采。
@@ -311,12 +309,10 @@ def _blocked_ids(post, group, *, salesperson=None, evidence_dir=None):
             total = data.get('total') if isinstance(data, dict) else None
             if type(total) is not int or total < 0 or not isinstance(records, list):
                 raise SourceUnavailable('ERP禁止发货分页结构无效，不能判为零单')
-            if len(records) > BLOCKED_PAGE_SIZE:
-                raise SourceUnavailable('ERP禁止发货分页返回超过请求页长')
             verified = {}
             duplicate_rows = 0
+            invalid_rows = []
             for row_number, row in enumerate(records, start=1):
-                validation_row = row_number
                 order = row.get('orderid') if isinstance(row, dict) else None
                 checks = (
                     ('invalid_order_id', not isinstance(order, str) or not order.strip(), '订单编号无效'),
@@ -327,13 +323,19 @@ def _blocked_ids(post, group, *, salesperson=None, evidence_dir=None):
                     ('status_mismatch', str(row.get('status')) != str(group['status'])
                      if isinstance(row, dict) else True, '订单状态范围不符'),
                 )
-                for reason, invalid, label in checks:
-                    if invalid:
-                        validation_reason = reason
-                        raise SourceUnavailable('ERP禁止发货名单' + label)
-                if salesperson is not None and row.get('shopUsername') != salesperson:
-                    validation_reason = 'salesperson_mismatch'
-                    raise SourceUnavailable('ERP禁止发货名单销售员字段缺失或与指定销售员不一致')
+                invalid_check = next(((reason, label) for reason, invalid, label in checks if invalid), None)
+                if invalid_check is None and salesperson is not None and row.get('shopUsername') != salesperson:
+                    invalid_check = ('salesperson_mismatch', '销售员字段缺失或与指定销售员不一致')
+                if invalid_check is not None:
+                    # 11/25 按有效行继续：问题订单不进入导出，同页正常订单不陪同作废。
+                    # 页码、行号与订单号只留受控业务证据；不写入技术日志。
+                    reason, label = invalid_check
+                    issue = {'page': page, 'row_number': row_number,
+                             'validation_reason': reason, 'reason': 'ERP禁止发货名单' + label}
+                    if isinstance(order, str):
+                        issue['order_id'] = order
+                    invalid_rows.append(issue)
+                    continue
                 # 实时名单插入/移出会使页边界移动。先核对身份与范围，再对已观察的
                 # 有效订单去重；不能把重复观察当成名单失败，也不能跳过归属检查。
                 if order in seen or order in verified:

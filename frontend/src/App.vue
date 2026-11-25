@@ -108,7 +108,7 @@ const modeCopy = computed(() => ({
   live: '使用正式数据源，按已启用的店铺和站点范围执行。',
 }[mode.value] ?? '正在读取当前运行环境。'))
 const statusCards = [
-  { label: '本轮不调', color: 'slate', hint: '按当前规则无需调价' },
+  { label: '不调价', color: 'slate', hint: '按当前规则无需调价' },
   { label: '待处理', color: 'amber', hint: '需补齐数据或重新评估' },
   { label: '待核验', color: 'blue', hint: '等待逐行结果或有效价回读' },
   { label: '已核验', color: 'teal', hint: '有效价已完成核验' },
