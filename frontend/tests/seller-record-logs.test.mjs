@@ -46,10 +46,10 @@ test('dialog title shows evidence dates without total or hit counts, while filte
   assert.match(page, /#header="\{ titleId, titleClass \}"[\s\S]*<h2 :id="titleId"[^>]*>\{\{ logTitle \}\}<\/h2>\s*<span class="records-log-date" :title="logDateTitle">\{\{ logDate \}\}<\/span>/)
   assert.doesNotMatch(page + source, /logHitCount|logTotal|records-log-count|hit-count|hitCount|defineEmits/)
   assert.match(source, /seller\.items\.length : seller\.counts\[state\]/)
-  const seller = groupBySeller([item(), { ...item(), id: 'second', status: '待处理' }, { ...item(), id: 'third', status: '已核验' }])[0]
+  const seller = groupBySeller([item(), { ...item(), id: 'second', status: '待处理' }, { ...item(), id: 'third', status: '已核验', execution:{state:'verified'} }])[0]
   const saved = structuredClone(seller)
   const html = await renderToString(createSSRApp(Component, { seller }))
-  for (const [name, count] of [['全部', 3], ['已提价', 1], ['待处理', 2], ['本轮不调', 0]]) {
+  for (const [name, count] of [['全部', 3], ['已提价', 1], ['待核验', 1], ['待处理', 1], ['本轮不调', 0]]) {
     assert.ok(html.includes(`${name} <span class="records-log-filter-count">${count}</span>`))
   }
   assert.deepEqual(seller, saved)
@@ -63,7 +63,7 @@ test('compact log retains identity, status, three horizontal stage fields and up
   assert.match(html, /<p>合成测试店铺 \/ PH<\/p>/)
   assert.doesNotMatch(html, /PH \/ Tiktok/)
   assert.equal(row.key.platform, 'Tiktok')
-  assert.match(html, /class="attention records-status"><i><\/i>待处理/)
+  assert.match(html, /class="attention records-status"><i><\/i>待核验/)
   assert.equal((html.match(/data-stage=/g) ?? []).length, 3)
   assert.equal((html.match(/class="records-stage-field"/g) ?? []).length, 6)
   assert.doesNotMatch(html, /<table|<thead|<tbody|<tr|scope="col"/)
@@ -94,14 +94,15 @@ test('compact log retains identity, status, three horizontal stage fields and up
 
 test('upload is a peer price field and all execution statuses occupy a separate rightmost top-aligned column', async () => {
   for (const [status, tone, label] of [
-    ['已核验', 'verified', '已提价'], ['待核验', 'attention', '待处理'],
+    ['已核验', 'verified', '已提价'], ['待核验', 'attention', '待核验'],
     ['待处理', 'attention', '待处理'], ['本轮不调', 'neutral', '本轮不调'],
   ]) {
     const row = item()
     row.status = status
+    if (status === '已核验') row.execution.state = 'verified'
     const original = structuredClone(row)
     const html = await render(row)
-    assert.match(html, new RegExp(`<div class="records-stage-field" data-field="uploaded-price"><dt>上传含税价</dt><dd><strong>18\\.24 PHP</strong></dd></div><div class="records-stage-field" data-field="updated-time"><dt>最近更新</dt><dd class="records-log-time"><span>—</span></dd></div></dl>(?:<!--.*?-->)*<div class="records-log-state" aria-label="执行状态"><span class="${tone} records-status"><i></i>${label}</span><p class="records-log-reason">${status === '已核验' ? '商品符合调价' : '原因未记录'}</p></div>`))
+    assert.match(html, new RegExp(`<div class="records-stage-field" data-field="uploaded-price"><dt>上传含税价</dt><dd><strong>18\\.24 PHP</strong></dd></div><div class="records-stage-field" data-field="updated-time"><dt>最近更新</dt><dd class="records-log-time"><span>—</span></dd></div></dl>(?:<!--.*?-->)*<div class="records-log-state" aria-label="执行状态"><span class="${tone} records-status"><i></i>${label}</span><p class="records-log-reason">${status === '已核验' ? '实际有效价已回读核验成功' : '原因未记录'}</p></div>`))
     assert.equal((html.match(/class="records-log-state"/g) ?? []).length, 1)
     assert.doesNotMatch(html, /<dl[^>]*>(?:(?!<\/dl>).)*records-log-state/s)
     assert.doesNotMatch(html, /<header class="records-log-heading">(?:(?!<\/header>).)*records-log-state/s)
@@ -233,7 +234,7 @@ test('saved reasons appear below the badge for pending and skipped records witho
     const original = structuredClone(row)
     const html = await render(row)
     assert.match(html, /<p class="records-log-reason">近72小时内有调价记录\n人工保护；来源待核实<\/p>/)
-    assert.doesNotMatch(html, /旧尝试原因|商品符合调价/)
+    assert.doesNotMatch(html, /旧尝试原因|实际有效价已回读核验成功/)
     assert.deepEqual(row, original)
   }
 })
@@ -245,7 +246,7 @@ test('missing saved reasons are explicit and never inferred from other evidence'
       Object.assign(row, { status, reason, seven_days_sales: 22 })
       const html = await render(row)
       assert.match(html, /<p class="records-log-reason">原因未记录<\/p>/)
-      assert.doesNotMatch(html, /三天调价保护|7天销量|商品符合调价/)
+      assert.doesNotMatch(html, /三天调价保护|7天销量|实际有效价已回读核验成功/)
     }
   }
 })
@@ -253,9 +254,10 @@ test('missing saved reasons are explicit and never inferred from other evidence'
 test('verified records use the requested fixed explanation and historical reasons stay unchanged', async () => {
   const row = item()
   row.status = '已核验'
+  row.execution.state = 'verified'
   row.reason = '保存的旧执行文案'
   const html = await render(row)
-  assert.match(html, /<p class="records-log-reason">商品符合调价<\/p>/)
+  assert.match(html, /<p class="records-log-reason">实际有效价已回读核验成功<\/p>/)
   assert.doesNotMatch(html, /保存的旧执行文案/)
   assert.equal(row.reason, '保存的旧执行文案')
 })

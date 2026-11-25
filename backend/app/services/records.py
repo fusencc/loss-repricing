@@ -31,12 +31,28 @@ def record_display_time(item, evidence):
     return next(iter(times)) if len(times) == 1 and None not in times else None
 
 
-def record_department(item):
-    """按判定当时留存的完整在线商品键关联部门，不借主管/操作人推断归属。
+def roster_record_source(batch):
+    """仅已绑定业务日及销售员的真实名单批次使用其留存归属。"""
+    source = (batch.snapshot or {}).get('source_versions') or {}
+    seller = display_text(source.get('erp_roster_salesperson'))
+    if (batch.mode == 'live' and seller and batch.run_key.startswith('erp-roster:')
+            and batch.run_key.endswith(f':{seller}:{batch.business_date}')):
+        return source
+    return {}
+
+
+def record_department(item, batch):
+    """名单使用已校验批次部门；其他记录按完整在线商品键关联销售来源部门。
 
     online_rows 是领域引擎为所有判定保留的规范快照，部门源于销售父商品 department。
-    同商品多行有空值或矛盾时保留未知，不能挑一个部门；内部费用及来源行不对外输出。
+    普通记录同商品多行有空值或矛盾时保留未知，不借主管/操作人推断归属。
     """
+    # 名单及库存补算的部门来自本批经校验的 ERP 范围；部分成功回读重建了在线快照，
+    # 未携带费用部门，不应因此把已有明确批次归属的成功记录隐藏到未知部门。
+    roster_department = display_text(roster_record_source(batch).get('erp_roster_department'))
+    if roster_department:
+        return ('Tiktok' + roster_department[6:] if roster_department[:6].lower() == 'tiktok'
+                else roster_department)
     identity = tuple(item.key.get(k) for k in KEY_FIELDS)
     trace = (item.decision or {}).get('trace') or {}
     departments = [display_text((row.get('profit_check') or {}).get('department'))
@@ -50,10 +66,9 @@ def record_department(item):
 
 def record_seller(item, batch, ownerships, names):
     # 名单批次保存了本次经校验的 ERP 销售员。普通提价和库存补算按同一个名字归档。
-    source = (batch.snapshot or {}).get('source_versions') or {}
+    source = roster_record_source(batch)
     roster_seller = display_text(source.get('erp_roster_salesperson'))
-    if (batch.mode == 'live' and roster_seller and batch.run_key.startswith('erp-roster:')
-            and batch.run_key.endswith(f':{roster_seller}:{batch.business_date}')):
+    if roster_seller:
         return {'id': f'erp-roster:{roster_seller}', 'name': roster_seller}
     # 与现有权限规则共用 scope 顺序：目标级优先，其次店铺/站点；这里只展示，不改变授权。
     owner = next((ownerships[s] for s in ownership_scopes(item.key) if s in ownerships), None)
@@ -281,7 +296,7 @@ def department_records(session, department=None, *, mode=None):
         .order_by(Item.updated_at.desc(), Batch.business_date.desc(), Item.id.desc()))
     if mode is not None:
         query = query.where(Batch.mode == mode)
-    rows = [(item, batch, execution, record_department(item))
+    rows = [(item, batch, execution, record_department(item, batch))
             for item, batch, execution in session.execute(query)]
     counts = Counter(row[3] for row in rows)
     fixed_names = ['Tiktok一部', 'Tiktok五部', 'Tiktok十二部', 'Tiktok二十二部']

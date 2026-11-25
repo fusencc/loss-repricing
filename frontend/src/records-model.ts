@@ -40,11 +40,11 @@ export interface RecordData {
   departments: { id: string; name: string; total: number }[]; department: string | null
   total: number; shops: number; counts: Partial<Record<ItemStatus, number>>; items: RecordItem[]
 }
-export const recordDisplayStates = ['已提价', '待处理', '本轮不调'] as const
+export const recordDisplayStates = ['已提价', '待核验', '待处理', '本轮不调'] as const
 export type RecordDisplayState = typeof recordDisplayStates[number]
 
 function emptyRecordStatusCounts(): Record<RecordDisplayState, number> {
-  return { '已提价': 0, '待处理': 0, '本轮不调': 0 }
+  return { '已提价': 0, '待核验': 0, '待处理': 0, '本轮不调': 0 }
 }
 
 export interface SellerGroup {
@@ -79,7 +79,7 @@ export function recordSource(item: RecordItem): string {
 }
 
 export function recordTone(status: RecordDisplayState): string {
-  return ({ '已提价': 'verified', '待处理': 'attention', '本轮不调': 'neutral' }[status])
+  return ({ '已提价': 'verified', '待核验': 'attention', '待处理': 'attention', '本轮不调': 'neutral' }[status])
 }
 
 export function effectiveTimeLabel(source: string | null | undefined): string {
@@ -137,8 +137,11 @@ export function recordDateValue(items: RecordItem[]): string {
 }
 
 export function recordStatusLabel(item: RecordItem): RecordDisplayState {
-  // 平台受理后立即显示已提价。回读及实价证据仍按持久执行状态单独记录。
-  if (item.execution?.state === 'accepted' || item.execution?.submit_status === 'accepted' || item.status === '已核验') return '已提价'
+  // 已提价只投影已落库的核验成功状态；受理回执不能覆盖后续核验失败。
+  const state = item.execution?.state
+  if (item.status === '已核验' && state === 'verified') return '已提价'
+  if (state === 'mismatch' || state === 'failed') return '待处理'
+  if (state === 'accepted' || state === 'unknown' || state === 'submitting' || item.status === '待核验') return '待核验'
   return item.status === '本轮不调' ? '本轮不调' : '待处理'
 }
 
@@ -150,12 +153,13 @@ export function countRecordStatuses(items: RecordItem[]): Record<RecordDisplaySt
 
 // 类别只使用本条持久执行阶段及回执类型；原始原因完整保留，查询失败未持久化时不能猜测。
 export function recordStateReason(item: RecordItem): string {
-  if (recordStatusLabel(item) === '已提价') return '商品符合调价'
+  if (recordStatusLabel(item) === '已提价') return '实际有效价已回读核验成功'
   const reason = typeof item.reason === 'string' && item.reason.trim() ? item.reason : '原因未记录'
   if (item.status !== '待处理' && item.status !== '待核验') return reason
   const execution = item.execution
   let category = ''
-  if (execution?.state === 'unknown') category = '提交结果未知，仅核验、不自动重传'
+  if (execution?.state === 'accepted') category = '上传已受理，待回读核验'
+  else if (execution?.state === 'unknown') category = '提交结果未知，仅核验、不自动重传'
   else if (execution?.state === 'submitting') category = '提交中或结果未确认，仅核验、不自动重传'
   else if (execution?.state === 'mismatch') category = '回读核验未通过'
   else if (execution?.state === 'failed' && execution.row_status === 'rejected') category = '逐行处理失败'

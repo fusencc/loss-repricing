@@ -13,9 +13,9 @@ before(async () => {
 })
 after(async () => { await server?.close() })
 
-test('only the three status filters have decorative tone dots before their unchanged labels and counts', async () => {
+test('all four status filters have decorative tone dots before their unchanged labels and counts', async () => {
   const rows = ['已核验', '待核验', '待处理', '本轮不调'].map((status, index) => ({
-    id: `synthetic-dot-${index}`, status,
+    id: `synthetic-dot-${index}`, status, execution: status === '已核验' ? {state:'verified'} : null,
     seller: { id: 'synthetic-dot-seller', name: '合成测试' },
     key: { sku: '', item_id: '', shop_id: 'synthetic-shop', site: 'PH' },
   }))
@@ -24,9 +24,9 @@ test('only the three status filters have decorative tone dots before their uncha
   const filter = html.match(/<div class="records-log-states">([\s\S]*?)<\/div>/)?.[1]
   assert.ok(filter)
   const buttons = [...filter.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/g)]
-  assert.equal(buttons.length, 4)
+  assert.equal(buttons.length, 5)
   for (const [index, [state, label, count]] of [
-    ['全部', '全部', 4], ['已提价', '已提价', 1], ['待处理', '待处理', 2], ['本轮不调', '本轮不调', 1],
+    ['全部', '全部', 4], ['已提价', '已提价', 1], ['待核验', '待核验', 1], ['待处理', '待处理', 1], ['本轮不调', '本轮不调', 1],
   ].entries()) {
     const [, attributes, content] = buttons[index]
     assert.match(attributes, /type="button"/)
@@ -38,7 +38,7 @@ test('only the three status filters have decorative tone dots before their uncha
       assert.ok(content.startsWith(`<i class="${recordTone(state)} records-log-filter-dot" aria-hidden="true"></i>${label}`))
     }
   }
-  assert.equal((filter.match(/aria-hidden="true"/g) ?? []).length, 3)
+  assert.equal((filter.match(/aria-hidden="true"/g) ?? []).length, 4)
   assert.deepEqual(rows, original)
 })
 

@@ -342,3 +342,35 @@ def test_live_roster_separates_sellers_even_with_the_same_project_owner(client):
     rows = {row['id']: row for row in client.get('/api/records').json()['items']}
     assert rows['i0']['seller'] == {'id': 'erp-roster:桂露', 'name': '桂露'}
     assert rows['i3']['seller'] == {'id': 'erp-roster:莫雯舒', 'name': '莫雯舒'}
+
+@pytest.mark.parametrize('suffix', ['曹雪娇', 'stock:曹雪娇'])
+def test_roster_department_uses_saved_batch_scope_when_online_snapshot_has_no_department(client, suffix):
+    with client.app.state.factory.begin() as session:
+        item = session.get(Item, 'i3')
+        batch = session.get(Batch, item.batch_id)
+        batch.mode = 'live'
+        batch.run_key = f'erp-roster:job:{suffix}:{batch.business_date}'
+        batch.snapshot = {'source_versions': {'erp_roster_salesperson': '曹雪娇',
+                                              'erp_roster_department': 'TIKTOK五部'}}
+        item.decision = {'trace': {'online_rows': [{'key': key(3), 'profit_check': {}}]}}
+        session.add(Execution(id='roster-verified', item_id=item.id, variant_id=item.variant_id,
+            state='verified', request={}, response={}, evidence={'actual_price': '5.225'},
+            created_at='2026-11-17T01:00:00+00:00', updated_at='2026-11-17T02:00:00+00:00'))
+    data = client.get('/api/records', params={'department': 'department:Tiktok五部'}).json()
+    row = next(row for row in data['items'] if row['id'] == 'i3')
+    assert row['department'] == 'Tiktok五部'
+    assert row['seller']['name'] == '曹雪娇'
+    assert row['execution']['actual_price'] == '5.225'
+    assert row['status'] == '已核验'
+    unknown = client.get('/api/records', params={'department': 'unassigned'}).json()
+    assert 'i3' not in {row['id'] for row in unknown['items']}
+
+
+def test_unrelated_batch_cannot_claim_roster_department(client):
+    with client.app.state.factory.begin() as session:
+        batch = session.get(Batch, 'b3')
+        batch.mode = 'live'
+        batch.snapshot = {'source_versions': {'erp_roster_salesperson': '曹雪娇',
+                                              'erp_roster_department': 'Tiktok五部'}}
+    data = client.get('/api/records', params={'department': 'department:Tiktok一部'}).json()
+    assert 'i3' in {row['id'] for row in data['items']}
