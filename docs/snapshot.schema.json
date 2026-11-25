@@ -847,6 +847,15 @@
       "title": "Complete Sources",
       "type": "array"
     },
+    "candidate_scope": {
+      "default": "complete_sources",
+      "enum": [
+        "complete_sources",
+        "observed_erp_orders"
+      ],
+      "title": "Candidate Scope",
+      "type": "string"
+    },
     "source_versions": {
       "additionalProperties": {
         "type": "string"
