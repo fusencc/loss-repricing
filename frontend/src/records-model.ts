@@ -140,9 +140,9 @@ export function recordDateValue(items: RecordItem[]): string {
 }
 
 export function recordStatusLabel(item: RecordItem): RecordDisplayState {
-  // 已提价只投影已落库的核验成功状态；受理回执不能覆盖后续核验失败。
+  // 2026-11-25 用户确认：上传完成即计为已提价，展示口径不改写底层回读证据。
   const state = item.execution?.state
-  if (item.status === '已核验' && state === 'verified') return '已提价'
+  if (state === 'accepted' || state === 'verified' || item.execution?.submit_status === 'accepted') return '已提价'
   // 待核验并入待处理展示；具体处于受理、提交中还是结果未知，由 recordStateReason 说明。
   if (state === 'mismatch' || state === 'failed') return '待处理'
   if (state === 'accepted' || state === 'unknown' || state === 'submitting' || item.status === '待核验') return '待处理'
@@ -157,7 +157,7 @@ export function countRecordStatuses(items: RecordItem[]): Record<RecordDisplaySt
 
 // 类别只使用本条持久执行阶段及回执类型；原始原因完整保留，查询失败未持久化时不能猜测。
 export function recordStateReason(item: RecordItem): string {
-  if (recordStatusLabel(item) === '已提价') return '实际有效价已回读核验成功'
+  if (recordStatusLabel(item) === '已提价') return '提价上传完成'
   const reason = typeof item.reason === 'string' && item.reason.trim() ? item.reason : '原因未记录'
   if (item.status !== '待处理' && item.status !== '待核验') return reason
   const execution = item.execution

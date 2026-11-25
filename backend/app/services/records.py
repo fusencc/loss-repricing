@@ -284,7 +284,9 @@ def combine_pricing_process(items):
         groups.setdefault(identity, []).append(item)
     hidden = set()
     for group in groups.values():
-        successes = [i for i in group if i.get('execution') and i['execution']['state'] == 'verified']
+        successes = [i for i in group if i.get('execution') and (
+            i['execution']['state'] in {'accepted', 'verified'}
+            or i['execution'].get('submit_status') == 'accepted')]
         if len(successes) != 1:
             continue
         final = successes[0]

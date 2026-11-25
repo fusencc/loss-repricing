@@ -59,7 +59,8 @@ def roster_notice_content(session, payload, created_at):
     # 与已部署记录页共用流程合并：补算成功后，旧准备/失败尝试不再计作待处理。
     projections = [{'id': item.id, 'business_date': day, 'mode': 'live', 'key': item.key,
                     'decision': item.decision, 'updated_at': item.updated_at, 'reason': item.reason,
-                    'execution': {'state': execution.state} if execution else None}
+                    'execution': {'state': execution.state,
+                                  'submit_status': (execution.response or {}).get('status')} if execution else None}
                    for item, execution in chosen]
     retained = {row['id'] for row in combine_pricing_process(projections)}
     chosen = [(item, execution) for item, execution in chosen if item.id in retained]
