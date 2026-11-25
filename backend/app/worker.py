@@ -81,11 +81,11 @@ class Worker:
                 self._failures.pop("worker.notice_dispatch_failed", None)
         config = settings_value(self.factory)
         local = datetime.fromtimestamp(now, timezone.utc).astimezone(BEIJING)
-        # 2026-11-24用户确认：北京时间09:00起建立当日唯一任务，晚启动仍补建。
         service_config = getattr(self.service, "config", None)
         pilot_begins_today = (getattr(service_config, "erp_roster_schedule_enabled", False)
                               and getattr(service_config, "erp_roster_date", None) == local.date())
-        if (config["schedule_enabled"] or pilot_begins_today) and (local.hour, local.minute) >= (9, 0):
+        start_hour = 7 if pilot_begins_today else 9
+        if (config["schedule_enabled"] or pilot_begins_today) and local.hour >= start_hour:
             enqueue(self.factory, "run", {"date": local.date().isoformat()}, f"daily:{local.date().isoformat()}")
         if now - self.last_reconcile >= 60:
             track_logs = service_config and (service_config.ding_tk_morning_log_folder

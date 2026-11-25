@@ -35,8 +35,8 @@ class Settings(BaseSettings):
     erp_capture_platform: str = "Tiktok"
     erp_capture_platform_id: str = "9B583641B0CA11EDAAB1AC1F6B9B9987"
     erp_capture_bloc: str = "集团二部"
-    # 2026-11-25 按代码内七人名单自动采集和算价；随部署启用，不依赖本机环境配置。
-    erp_roster_date: date | None = date(2026, 11, 25)
+    # 名单日按代码内七人名单自动采集和算价。
+    erp_roster_date: date | None = date(2026, 11, 26)
     erp_roster_schedule_enabled: bool = True
     # 固定名单的单日真实授权，与名单业务日一致才允许执行。普通自动任务另走原有授权。
     erp_roster_submit_date: date | None = None
@@ -94,8 +94,7 @@ class Settings(BaseSettings):
 
 def get_settings() -> Settings:
     try:
-        # 临时关闭真实提价提交；恢复时移除此覆盖并按环境配置启用。
-        return Settings().model_copy(update={"live_submit_enabled": False})
+        return Settings()
     except ValidationError as exc:
         # 日志组件尚未初始化；Pydantic原始文案可能包含整份配置输入和凭据。
         names = sorted({str(part) for error in exc.errors(include_input=False, include_url=False)

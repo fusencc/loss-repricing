@@ -75,7 +75,7 @@ def test_confirmed_roster_is_shipped_in_code_without_local_files(settings):
         '桂露', '莫雯舒', '赵亮亮', '刘付文昌', '李佳丽', '杨颖', '曹雪娇',
     ]
     defaults = Settings(_env_file=None)
-    assert defaults.erp_roster_date == DAY
+    assert defaults.erp_roster_date == date(2026, 11, 26)
     assert defaults.erp_roster_schedule_enabled is True
 
 

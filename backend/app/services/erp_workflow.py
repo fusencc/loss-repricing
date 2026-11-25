@@ -162,6 +162,8 @@ def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, prog
                     result.update(_workflow_failure(error, capture))
                     result.update(scope)
                 departments.append(result)
+                summary['ready_prices'] += result['ready_prices']
+                write_verified(manifest, summary)
                 return result
 
             if pool is None:
@@ -177,7 +179,11 @@ def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, prog
                 try:
                     with _session(settings) as web_session:
                         for department, name in scopes:
-                            pending.put(collect(department, name, web_session))
+                            item = collect(department, name, web_session)
+                            pending.put(item)
+                            if ((item[2] and item[2].get('stopped_by_rate_limit'))
+                                    or (item[5] and item[5].get('stopped_by_rate_limit'))):
+                                break
                 finally:
                     pending.put(None)
 
@@ -191,7 +197,6 @@ def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, prog
     else:
         with ThreadPoolExecutor(max_workers=2) as pool:
             pool.submit(copy_context().run, consume, pool).result()
-    summary['ready_prices'] = sum(result['ready_prices'] for result in departments)
     if len(departments) == len(scopes) and all(department['status'] == 'completed' for department in departments):
         summary['status'] = 'completed'
     elif summary['ready_prices'] or any(department['status'] == 'completed' for department in departments):

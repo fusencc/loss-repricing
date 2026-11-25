@@ -286,11 +286,11 @@ class PricingService:
                 after = decision.trace.get("online_rows", [])
                 if (len(before) == 1 and len(after) == 1
                         and not same_price(price_baseline(before[0]), price_baseline(after[0]))):
-                    reason = "检测到外部价格、折扣、仓配或版本变化，已刷新基线，名单由单品预检核对"
-                    record_conflict(self.factory, original.key, reason, baseline=price_baseline(after[0]))
+                    reason = "检测到外部价格、折扣、仓配或版本变化"
+                    reason += "，已刷新基线" if roster is None else "，由名单单品预检核对"
                     decision.trace.setdefault('warnings', []).append(reason)
-                    # 基线变化不改变人工接管权限；名单继续使用独立单品预检。
                     if roster is None:
+                        record_conflict(self.factory, original.key, reason, baseline=price_baseline(after[0]))
                         self._hold(item_id, reason, decision=decision)
                         continue
             with transaction(self.factory) as session:

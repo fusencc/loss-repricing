@@ -174,12 +174,12 @@ def test_notice_dispatch_failure_does_not_skip_reconciliation_or_daily_job(tmp_p
         assert job.state == "done" and job.batch_id == "batch-result"
     engine.dispose()
 
-def test_pilot_day_at_nine_routes_only_to_roster_and_publishes_once(tmp_path, monkeypatch):
+def test_pilot_day_at_seven_routes_only_to_roster_and_publishes_once(tmp_path, monkeypatch):
     from datetime import date
     from openpyxl import load_workbook
 
     engine, factory, service = setup(tmp_path)
-    pilot_day = date(2026, 11, 25)
+    pilot_day = date(2026, 11, 26)
     service.config = Settings(_env_file=None, runtime_dir=tmp_path,
                               coordination_required=False, live_submit_enabled=True,
                               ding_tk_morning_log_folder='tk-folder', ding_cancellation_log_folder='cancel-folder')
@@ -204,7 +204,7 @@ def test_pilot_day_at_nine_routes_only_to_roster_and_publishes_once(tmp_path, mo
     monkeypatch.setattr('app.services.morning_log._dws', drive)
 
     worker = Worker(factory, service)
-    before = datetime(2026, 11, 25, 0, 59, 59, tzinfo=timezone.utc).timestamp()
+    before = datetime(2026, 11, 25, 22, 59, 59, tzinfo=timezone.utc).timestamp()
     worker.tick(before)
     assert calls == []
     worker.tick(before + 1)
@@ -214,11 +214,11 @@ def test_pilot_day_at_nine_routes_only_to_roster_and_publishes_once(tmp_path, mo
     assert service.calls == 0
     assert drive_calls == [('+list', 'tk-folder'), ('+upload', 'tk-folder'),
                            ('+list', 'cancel-folder'), ('+upload', 'cancel-folder')]
-    published = tmp_path / 'morning-logs' / pilot_day.isoformat() / '11.25早上运行日志.xlsx'
+    published = tmp_path / 'morning-logs' / pilot_day.isoformat() / '11.26早上运行日志.xlsx'
     assert published.is_file()
     with factory() as session:
         job = session.query(Job).one()
-        assert job.dedupe_key == 'daily:2026-11-25' and job.state == 'done'
+        assert job.dedupe_key == 'daily:2026-11-26' and job.state == 'done'
         assert job.error is None
     workbook = load_workbook(published, read_only=True)
     try:
@@ -238,7 +238,7 @@ def test_roster_with_ready_prices_hands_same_job_and_day_to_pricing(tmp_path, mo
     from datetime import date
 
     engine, factory, service = setup(tmp_path)
-    pilot_day = date(2026, 11, 25)
+    pilot_day = date(2026, 11, 26)
     service.config = Settings(_env_file=None, runtime_dir=tmp_path,
                               coordination_required=False, live_submit_enabled=True)
     calls = []
@@ -266,7 +266,7 @@ def test_roster_with_ready_prices_hands_same_job_and_day_to_pricing(tmp_path, mo
     monkeypatch.setattr('app.services.erp_roster_pricing.run_roster_pricing', submit)
     monkeypatch.setattr('app.services.roster_notices.enqueue_roster_notices', lambda *args: None)
     monkeypatch.setattr(Worker, '_morning_log', lambda *args, **kwargs: None)
-    Worker(factory, service).tick(datetime(2026, 11, 25, 1, 0, tzinfo=timezone.utc).timestamp())
+    Worker(factory, service).tick(datetime(2026, 11, 26, 1, 0, tzinfo=timezone.utc).timestamp())
 
     with factory() as session:
         job = session.query(Job).one()
@@ -280,7 +280,7 @@ def test_zero_stock_resume_reuses_original_daily_job(tmp_path, monkeypatch):
     from datetime import date
 
     engine, factory, service = setup(tmp_path)
-    day = date(2026, 11, 25)
+    day = date(2026, 11, 26)
     service.config = Settings(_env_file=None, runtime_dir=tmp_path, coordination_required=False,
                               live_submit_enabled=True, erp_roster_submit_date=day)
     calls = []
@@ -292,7 +292,7 @@ def test_zero_stock_resume_reuses_original_daily_job(tmp_path, monkeypatch):
 
     monkeypatch.setattr('app.services.erp_roster_pricing.resume_roster_stock_pricing', resume)
     job_id = enqueue(factory, 'run', {'date': str(day), 'resume_roster_workflow': 'a' * 32}, f'daily:{day}')
-    Worker(factory, service).tick(datetime(2026, 11, 25, 1, 5, tzinfo=timezone.utc).timestamp())
+    Worker(factory, service).tick(datetime(2026, 11, 26, 1, 5, tzinfo=timezone.utc).timestamp())
 
     with factory() as session:
         job = session.query(Job).one()
@@ -305,7 +305,7 @@ def test_zero_stock_resume_reuses_original_daily_job(tmp_path, monkeypatch):
 def test_roster_scope_without_ready_prices_is_logged_even_when_upload_is_disabled(tmp_path, monkeypatch):
     from datetime import date
     engine, factory, service = setup(tmp_path)
-    day = date(2026, 11, 25)
+    day = date(2026, 11, 26)
     service.config = Settings(_env_file=None, runtime_dir=tmp_path, coordination_required=False,
                               live_submit_enabled=False)
     scope = {'salesperson': '桂露', 'department': 'Tiktok二十二部', 'ready_prices': 0}
@@ -320,7 +320,7 @@ def test_roster_scope_without_ready_prices_is_logged_even_when_upload_is_disable
                         lambda *args: (_ for _ in ()).throw(AssertionError('不能提交价格')))
     monkeypatch.setattr('app.services.roster_notices.enqueue_roster_notices', lambda *args: None)
     monkeypatch.setattr(Worker, '_morning_log', lambda *args, **kwargs: None)
-    Worker(factory, service).tick(datetime(2026, 11, 25, 1, 0, tzinfo=timezone.utc).timestamp())
+    Worker(factory, service).tick(datetime(2026, 11, 26, 1, 0, tzinfo=timezone.utc).timestamp())
     assert len(logged) == 1
     assert logged[0][0] is factory and logged[0][3] == day and logged[0][4] == scope
     assert service.calls == 0
