@@ -39,7 +39,7 @@ def validate_authorization(authorization, key, upload_price):
     a = authorization
     if (a.get('approved') is not True or not a.get('id') or not a.get('actor')
             or a.get('business_date') != utcnow().astimezone(BEIJING).date().isoformat()
-            or VariantKey.model_validate(a['key']) != key or key.site not in ('PH','MY','TH')
+            or VariantKey.model_validate(a['key']) != key or key.site not in ('PH','MY','TH','VN')
             or a.get('currency') != SITE_CURRENCIES[key.site] or not a.get('shop_name')
             or money(a['upload_price']) != upload_price or upload_price <= 0
             or upload_price != upload_price.quantize(Decimal('.01'))):
@@ -219,7 +219,7 @@ class ManualLiveAdapter:
         contracts = {r['contract']['site']: SiteContract.model_validate(r['contract']) for r in prepared['contracts']}
         self.snapshot = Snapshot(as_of=utcnow(), business_date=business_date, fx_date=fx['date'], fx_rates=fx['source_rates'],
             fx_rate_unit='cny_per_currency', lines=[], online=[online], contracts=contracts, complete_sources=[],
-            source_versions={'manual_contract': 'explicit-manual-ph-my-th-20261119-v2', 'fixed_fees': fixed['config']['version'],
+            source_versions={'manual_contract': 'explicit-manual-ph-my-th-vn-20261125-v3', 'fixed_fees': fixed['config']['version'],
                              'authorization': a['id']})
         self.previous_ids = [str(r['id']) for r in self._logs()]
         write_verified(self.directory / 'latest-snapshot.json', self.snapshot.model_dump(mode='json'))

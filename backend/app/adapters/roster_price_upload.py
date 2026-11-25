@@ -18,11 +18,13 @@ from app.domain.types import OnlineState
 from app.services.store import BEIJING, utcnow
 
 
-# 真实数据库中已落档的税后列成功回读范围。站点算价档位本身不证明上传与回读适用。
+# 既有真实回读范围及 2026-11-25 用户明确授权续提的 PH 直发、TH 海外仓、VN 范围。
+# 新授权组合逐条读取真实现价、上传及回读；授权开放不代表已经核验生效。
 VERIFIED_FULFILLMENT = {
     'MY': frozenset({'direct', 'overseas'}),
-    'PH': frozenset({'overseas'}),
-    'TH': frozenset({'direct'}),
+    'PH': frozenset({'direct', 'overseas'}),
+    'TH': frozenset({'direct', 'overseas'}),
+    'VN': frozenset({'direct', 'overseas'}),
 }
 ROSTER_UPLOAD_TRACE = 'erp_roster_upload'
 
