@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
+import json
 from time import monotonic, sleep
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -77,25 +78,69 @@ def _parse_export(content, ids, bloc):
     return rows
 
 
-def _export_file(client, auth, ids, bloc):
+def _export_file(client, auth, ids, bloc, *, checkpoint=None):
+    """只创建一次导出；临时查询失败继续跟踪，任务证据与成功文件分开落盘。"""
+    task_id, previous = None, set()
+    state = {'state': 'not_submitted', 'task_id': None, 'previous_task_ids': [],
+             'product_ids': list(ids), 'bloc': bloc, 'read_failures': []}
+
+    def save(**values):
+        state.update(values, task_id=str(task_id) if task_id is not None else None,
+                     previous_task_ids=sorted(previous))
+        if checkpoint is not None:
+            checkpoint(state)
+
     def post(path, body):
         response = client.post(ORIGIN + path, json=body, headers=auth.collection_headers(),
                                timeout=30, follow_redirects=False)
-        if response.status_code == 429:
+        if response.status_code in COLLECTION_STOP_STATUSES:
             auth.observe_collection_response(response)
         response.raise_for_status()
         data = response.json()
         if not isinstance(data, dict) or data.get('resp_code') != 0:
-            raise ValueError('sales_export_business_failed')
+            error = ValueError('sales_export_business_failed')
+            code = data.get('resp_code') if isinstance(data, dict) else None
+            error.business_code = code if type(code) is int or (isinstance(code, str) and len(code) <= 64) else None
+            raise error
         return data.get('datas')
 
+    def read(call, stage):
+        # 查询和下载是幂等读取；HTTP 400/5xx、超时和业务失败不证明源端
+        # 导出任务失败。保留原任务，限时重读；认证/权限/限流立即停止。
+        deadline = monotonic() + 90
+        for attempt in range(19):
+            try:
+                return call()
+            except (httpx.HTTPError, ValueError, TypeError, KeyError) as error:
+                status = error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None
+                failure = {'stage': stage, 'reason': type(error).__name__,
+                           'http_status': status, 'business_code': getattr(error, 'business_code', None)}
+                state['read_failures'].append(failure)
+                # 只保留受控类型、状态及业务码，不复制响应正文、凭据或下载地址。
+                save(state='poll_retry' if stage != 'download' else 'download_retry', stage=stage)
+                if (status in COLLECTION_STOP_STATUSES or attempt == 18 or monotonic() >= deadline
+                        or (isinstance(error, ValueError) and str(error) == 'sales_export_file_too_large')):
+                    save(state='read_failed', stage=stage)
+                    raise
+                sleep(5)
+
     def tasks():
-        return post(TASKS, {'page': 1, 'limit': 10})['data']
+        # 11/25 真实任务页已验证支持100条；扩大观察窗口，减少并发导出挤出本任务。
+        return read(lambda: post(TASKS, {'page': 1, 'limit': 100})['data'], 'task_query')
 
     previous = {str(row['id']) for row in tasks()}
-    submitted = post(EXPORT, {'blocNames': [bloc], 'productIdStr': ' '.join(ids),
-                              'exportType': 2, 'exportField': list(FIELDS)})
+    save(state='submitting', stage='submit')
+    try:
+        submitted = post(EXPORT, {'blocNames': [bloc], 'productIdStr': ' '.join(ids),
+                                  'exportType': 2, 'exportField': list(FIELDS)})
+    except (SourceUnavailable, httpx.HTTPError, ValueError, TypeError, KeyError) as error:
+        # 创建请求的结果不明确时不自动重发；保留提交前任务集合供后续核对。
+        save(state='submission_unconfirmed', stage='submit',
+             reason=type(error).__name__, business_code=getattr(error, 'business_code', None),
+             http_status=error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None)
+        raise
     task_id = submitted.get('id') or submitted.get('taskId') if isinstance(submitted, dict) else None
+    save(state='accepted', stage='task_query')
     deadline = monotonic() + 90
     while monotonic() < deadline:
         candidates = [
@@ -109,27 +154,35 @@ def _export_file(client, auth, ids, bloc):
         if candidates:
             task = candidates[0]
             task_id = task['id']
+            save(state='bound', stage='task_query')
             if task.get('status') == 4:
                 raise ValueError('sales_export_task_failed')
             if task.get('status') == 3:
                 url = urlsplit(task['excelUrl'])
                 if (url.scheme, url.hostname, url.port) != ('http', '121.46.237.218', 19110) or url.username:
                     raise ValueError('sales_export_download_origin_unverified')
-                content = bytearray()
-                auth.wait_for_request()
-                with client.stream('GET', task['excelUrl'], timeout=30, follow_redirects=False) as response:
-                    response.raise_for_status()
-                    for chunk in response.iter_bytes():
-                        content.extend(chunk)
-                        if len(content) > MAX_DOWNLOAD_BYTES:
-                            raise ValueError('sales_export_file_too_large')
+                def download():
+                    content = bytearray()
+                    auth.wait_for_request()
+                    with client.stream('GET', task['excelUrl'], timeout=30, follow_redirects=False) as response:
+                        if response.status_code in COLLECTION_STOP_STATUSES:
+                            auth.observe_collection_response(response)
+                        response.raise_for_status()
+                        for chunk in response.iter_bytes():
+                            content.extend(chunk)
+                            if len(content) > MAX_DOWNLOAD_BYTES:
+                                raise ValueError('sales_export_file_too_large')
+                    return bytes(content)
+                content = read(download, 'download')
                 # 提交实测 datas=null。唯一新增任务还必须用文件内的完整产品集合核对，
                 # 避免并发时把他人的文件认成本批，缺失范围不进入本批算价。
-                rows = _parse_export(bytes(content), set(ids), bloc)
+                rows = _parse_export(content, set(ids), bloc)
                 if {row['产品ID'] for _, row in rows} != set(ids):
                     raise ValueError('sales_export_product_coverage_incomplete')
-                return bytes(content), task_id, rows
+                save(state='downloaded', stage='complete', rows=len(rows), bytes=len(content))
+                return content, task_id, rows
         sleep(5)
+    save(state='pending', stage='task_query')
     raise ValueError('sales_export_timeout')
 
 
@@ -148,6 +201,7 @@ def capture_sales_batch(settings, capture, candidates, shop_scopes, *, client=No
     directory.mkdir(mode=0o700, parents=True)
     started = datetime.now(timezone.utc).isoformat()
     parents, variants, files, rates = [], [], [], []
+    export_tasks = []
     issues = [
         {'code': 'missing_product_hint', 'order_id': row['orderid']}
         for group in capture['groups'] for row in group['rows']
@@ -157,13 +211,34 @@ def capture_sales_batch(settings, capture, candidates, shop_scopes, *, client=No
     client = client or httpx.Client(timeout=30, trust_env=False, follow_redirects=False)
     auth = auth or SalesAuth(settings, client)
     context = private_request.set(True)
+    def persist(*, completed=False):
+        result = {
+            'schema_version': 'sales-source-observations-v1', 'source_id': source_id,
+            'erp_capture_id': capture['capture_id'], 'synthetic': capture.get('synthetic', False),
+            'sample_only': capture.get('sample_only', False), 'source_mode': 'online_sku_batch_export',
+            'queried_at': started, 'completed_at': datetime.now(timezone.utc).isoformat() if completed else None,
+            'products': parents, 'variants': variants, 'files': files, 'issues': issues,
+            'export_tasks': export_tasks,
+            'currency_rates': rates, 'currency_rate_unit': 'cny_per_currency',
+            'acquisition_complete': completed and not issues,
+            'summary': {'requested_products': len(ids), 'products': len(parents), 'variants': len(variants)},
+            'artifact_file': str((directory / 'result.json').resolve()),
+        }
+        write_verified(result['artifact_file'], result)
+        return result
     try:
+        persist()
         for offset in range(0, len(ids), BATCH_SIZE):
             batch = ids[offset:offset+BATCH_SIZE]
             if progress:
                 progress(f'批量导出销售子SKU：第 {offset // BATCH_SIZE + 1} 批，{len(batch)} 个产品。')
+            task_file = directory / f'{offset // BATCH_SIZE + 1:03d}-task.json'
+            export_tasks.append(str(task_file))
+            def checkpoint(state):
+                write_verified(task_file, state)
             try:
-                content, task_id, rows = _export_file(client, auth, batch, settings.erp_capture_bloc)
+                content, task_id, rows = _export_file(client, auth, batch, settings.erp_capture_bloc,
+                                                      checkpoint=checkpoint)
             except (SourceUnavailable, httpx.HTTPError, ValueError, TypeError, KeyError) as error:
                 issue = {'code': 'sales_batch_unavailable', 'product_ids': batch,
                          'reason': str(error) if isinstance(error, ValueError) else type(error).__name__}
@@ -171,7 +246,12 @@ def capture_sales_batch(settings, capture, candidates, shop_scopes, *, client=No
                           else auth.stopped_http_status)
                 if status is not None:
                     issue['http_status'] = status
+                if task_file.exists():
+                    saved_task = json.loads(task_file.read_text())
+                    issue.update(stage=saved_task.get('stage'), task_id=saved_task.get('task_id'),
+                                 task_evidence=str(task_file))
                 issues.append(issue)
+                persist()
                 if isinstance(error, SourceUnavailable) or status in COLLECTION_STOP_STATUSES:
                     break
                 continue
@@ -200,6 +280,7 @@ def capture_sales_batch(settings, capture, candidates, shop_scopes, *, client=No
                     if (product, shop) not in matched:
                         issues.append({'code': 'sales_export_shop_product_missing', 'product_id': product,
                                        'shop': shop})
+            persist()
         if variants and auth.stopped_http_status is None:
             try:
                 response = client.get(ORIGIN + CURRENCY_RATES, headers=auth.collection_headers(),
@@ -217,17 +298,5 @@ def capture_sales_batch(settings, capture, candidates, shop_scopes, *, client=No
         private_request.reset(context)
         if owned:
             client.close()
-    result = {
-        'schema_version': 'sales-source-observations-v1', 'source_id': source_id,
-        'erp_capture_id': capture['capture_id'], 'synthetic': capture.get('synthetic', False),
-        'sample_only': capture.get('sample_only', False), 'source_mode': 'online_sku_batch_export',
-        'queried_at': started, 'completed_at': datetime.now(timezone.utc).isoformat(),
-        'products': parents, 'variants': variants, 'files': files, 'issues': issues,
-        'currency_rates': rates, 'currency_rate_unit': 'cny_per_currency',
-        'acquisition_complete': not issues,
-        'summary': {'requested_products': len(ids), 'products': len(parents), 'variants': len(variants)},
-        'artifact_file': str((directory / 'result.json').resolve()),
-    }
-    write_verified(result['artifact_file'], result)
-    return result
+    return persist(completed=True)
 

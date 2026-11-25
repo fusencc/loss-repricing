@@ -298,6 +298,8 @@ def _blocked_ids(post, group, *, salesperson=None, evidence_dir=None):
     page = 1
     while True:
         evidence = []
+        validation_reason = None
+        validation_row = None
         try:
             # 11/24 用户取消动态名单的数量一致性拦截：total 是本次请求的观察值，
             # 不是冻结快照。按当前页推进，短页或到达本页总数即结束，不回头补采。
@@ -312,19 +314,42 @@ def _blocked_ids(post, group, *, salesperson=None, evidence_dir=None):
             if len(records) > BLOCKED_PAGE_SIZE:
                 raise SourceUnavailable('ERP禁止发货分页返回超过请求页长')
             verified = {}
-            for row in records:
+            duplicate_rows = 0
+            for row_number, row in enumerate(records, start=1):
+                validation_row = row_number
                 order = row.get('orderid') if isinstance(row, dict) else None
-                if (not isinstance(order, str) or not order.strip() or order in seen or order in verified
-                        or str(row.get('platform')).casefold() != 'tiktok'
-                        or str(row.get('jzfh')) != '1' or str(row.get('status')) != str(group['status'])):
-                    raise SourceUnavailable('ERP禁止发货名单存在重复订单、无效订单号或范围不符')
+                checks = (
+                    ('invalid_order_id', not isinstance(order, str) or not order.strip(), '订单编号无效'),
+                    ('platform_mismatch', str(row.get('platform')).casefold() != 'tiktok'
+                     if isinstance(row, dict) else True, '平台范围不符'),
+                    ('blocked_flag_mismatch', str(row.get('jzfh')) != '1'
+                     if isinstance(row, dict) else True, '禁止发货标记不符'),
+                    ('status_mismatch', str(row.get('status')) != str(group['status'])
+                     if isinstance(row, dict) else True, '订单状态范围不符'),
+                )
+                for reason, invalid, label in checks:
+                    if invalid:
+                        validation_reason = reason
+                        raise SourceUnavailable('ERP禁止发货名单' + label)
                 if salesperson is not None and row.get('shopUsername') != salesperson:
+                    validation_reason = 'salesperson_mismatch'
                     raise SourceUnavailable('ERP禁止发货名单销售员字段缺失或与指定销售员不一致')
+                # 实时名单插入/移出会使页边界移动。先核对身份与范围，再对已观察的
+                # 有效订单去重；不能把重复观察当成名单失败，也不能跳过归属检查。
+                if order in seen or order in verified:
+                    duplicate_rows += 1
+                    continue
                 verified[order] = {key: row[key] for key in ('shopid', 'shopname')
                                    if isinstance(row.get(key), str) and row[key].strip()}
         except (SourceUnavailable, httpx.HTTPError, ValueError, TypeError) as error:
             group.setdefault('failed_pages', []).append(page)
             group['list_error'] = error_evidence(error)
+            if validation_reason:
+                group['list_error']['validation_reason'] = validation_reason
+                group['list_error']['row_number'] = validation_row
+                if isinstance(order, str):
+                    # 仅在受控业务证据中保存定位订单，不写入技术事件或异常文案。
+                    group['list_error']['order_id'] = order
             raise
         finally:
             if evidence:
@@ -337,6 +362,7 @@ def _blocked_ids(post, group, *, salesperson=None, evidence_dir=None):
             group.setdefault('blocked_shops', {}).update(verified)
         group['total'] = total
         group['pages'].append({'page': page, 'total': total, 'rows': len(verified),
+                               'raw_rows': len(records), 'duplicate_rows': duplicate_rows,
                                'verified': True, 'start': start, 'end': len(ids)})
         if len(records) < BLOCKED_PAGE_SIZE or page * BLOCKED_PAGE_SIZE >= total:
             # 下游 total 表示本轮实际候选数量；各页原始 total 保留在 pages，
