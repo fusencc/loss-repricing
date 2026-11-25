@@ -186,6 +186,31 @@ def price_stages(decision, trace, snapshot, item_key):
     }
 
 
+def selected_order_first_margin(decision):
+    """同一选中 ERP 订单可来自多个候选列表；一致证据只展示一次原毛利，不累加。"""
+    selected_id = display_text(decision.get('selected_row_id'))
+    rows = [row for row in (decision.get('trace') or {}).get('source_rows', [])
+            if selected_id and row.get('row_id') == selected_id]
+    if not rows:
+        return None
+    # 多来源重复必须仍是同一明确订单；金额、币种或订单粒度有冲突时不能挑一条显示。
+    order_ids = {display_text(row.get('order_id')) for row in rows}
+    if len(rows) > 1 and (len(order_ids) != 1 or None in order_ids):
+        return None
+    values = set()
+    for row in rows:
+        amount = _decimal(row.get('loss_amount'))
+        currency = display_text(row.get('currency'))
+        if (row.get('basis') != 'order' or row.get('fee_scope') != 'erp-corrected-first-margin-v1'
+                or amount is None or not amount.is_finite() or currency is None):
+            return None
+        values.add((amount, currency))
+    if len(values) != 1:
+        return None
+    # 保留首条来源的十进制文本和原币，不把订单总毛利替换为单件亏损、换汇值或在线利润。
+    return {'amount': rows[0]['loss_amount'], 'currency': rows[0]['currency']}
+
+
 def public_record(item, batch, execution, department, seller):
     # 已执行记录的算价依据属于提交时保存的不可变请求，不属于后来重评的当前候选。
     # 只有完整商品键一致才使用该执行档案；回读金额仍独立取 execution.evidence。
@@ -200,30 +225,11 @@ def public_record(item, batch, execution, department, seller):
     currency = display_text(trace.get('station_currency'))
     if currency is None and len(currencies) == 1 and None not in currencies:
         currency = next(iter(currencies))
-    # 只展示算价选中的 ERP 订单级修正一次毛利，保留原币、原金额和符号；不使用单件亏损或在线利润。
-    selected_id = decision.get('selected_row_id')
-    selected = [row for row in trace.get('source_rows', []) if selected_id and row.get('row_id') == selected_id]
-    first_margin = None
-    if len(selected) == 1:
-        row = selected[0]
-        if row.get('basis') == 'order' and row.get('fee_scope') == 'erp-corrected-first-margin-v1':
-            amount, original_currency = display_text(row.get('loss_amount')), display_text(row.get('currency'))
-            if amount is not None and original_currency is not None:
-                first_margin = {'amount': amount, 'currency': original_currency}
+    first_margin = selected_order_first_margin(decision)
     evidence = execution.evidence or {} if execution else {}
     archive = evidence.get('price_record') or {}
     # 用户要求记录页不展示四价存档（税前价、平台回读含税价、营销价观察等）；
     # 这些证据仍完整保存在 Execution.evidence.price_record，只从页面投影移除，不删原始证据。
-    # 只展示算价选中的 ERP 订单修正一次毛利：保留原币、订单总额及负号，不用换汇或单件亏损替代。
-    selected = display_text(decision.get('selected_row_id'))
-    margin_rows = [row for row in (trace.get('source_rows') or []) if selected and row.get('row_id') == selected]
-    margin = None
-    if len(margin_rows) == 1:
-        row = margin_rows[0]
-        if row.get('fee_scope') == 'erp-corrected-first-margin-v1' and row.get('basis') == 'order':
-            amount = display_text(row.get('loss_amount'))
-            if amount is not None:
-                margin = {'amount': amount, 'currency': display_text(row.get('currency'))}
     # 价格变动 = 目标实际价 - 调整前实际价，与 decision 两价同币种（站点币）；
     # 任一价缺失或无效则不显示，不猜测。用 Decimal 保持与保存金额同精度，正数带 + 号由前端展示。
     price_change = None
@@ -250,7 +256,7 @@ def public_record(item, batch, execution, department, seller):
             'sku_price_reference': trace.get('sku_price_reference'),
             'price_limit': trace.get('price_limit'),
         } if decision else None,
-        'corrected_first_margin': margin,
+        'corrected_first_margin': first_margin,
         'execution': {
             'state': execution.state, 'task_id': execution.task_id,
             'submit_status': display_text((execution.response or {}).get('status')),
