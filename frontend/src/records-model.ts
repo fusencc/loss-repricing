@@ -37,6 +37,7 @@ export interface RecordItem {
     confirmed_at: string | null; effective_at: string | null; effective_time_source: string | null; updated_at: string } | null
 }
 export interface RecordData {
+  scope_issues: { salesperson: string; department: string; business_date: string; capture_id: string; reason: string }[]
   departments: { id: string; name: string; total: number }[]; department: string | null
   total: number; shops: number; counts: Partial<Record<ItemStatus, number>>; items: RecordItem[]
 }

@@ -294,3 +294,29 @@ def test_zero_stock_resume_reuses_original_daily_job(tmp_path, monkeypatch):
         assert job.id == job_id and job.state == 'done'
     assert calls == [(job_id, 'a' * 32)]
     engine.dispose()
+
+
+
+def test_roster_scope_without_ready_prices_is_logged_even_when_upload_is_disabled(tmp_path, monkeypatch):
+    from datetime import date
+    engine, factory, service = setup(tmp_path)
+    day = date(2026, 11, 25)
+    service.config = Settings(_env_file=None, runtime_dir=tmp_path, coordination_required=False,
+                              live_submit_enabled=False)
+    scope = {'salesperson': '桂露', 'department': 'Tiktok二十二部', 'ready_prices': 0}
+    logged = []
+    def collect(config, *, roster_date, on_roster_scope):
+        on_roster_scope(scope)
+        return {'status': 'completed', 'ready_prices': 0, 'departments': [scope]}
+    monkeypatch.setattr('app.services.erp_workflow.run_workflow', collect)
+    monkeypatch.setattr('app.services.roster_filter_records.save_roster_filter_records',
+                        lambda *args: logged.append(args))
+    monkeypatch.setattr('app.services.erp_roster_pricing.run_roster_pricing',
+                        lambda *args: (_ for _ in ()).throw(AssertionError('不能提交价格')))
+    monkeypatch.setattr('app.services.roster_notices.enqueue_roster_notices', lambda *args: None)
+    monkeypatch.setattr(Worker, '_morning_log', lambda *args, **kwargs: None)
+    Worker(factory, service).tick(datetime(2026, 11, 25, 1, 0, tzinfo=timezone.utc).timestamp())
+    assert len(logged) == 1
+    assert logged[0][0] is factory and logged[0][3] == day and logged[0][4] == scope
+    assert service.calls == 0
+    engine.dispose()

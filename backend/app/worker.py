@@ -135,15 +135,20 @@ class Worker:
                 pricing_batches = []
 
                 def price_scope(scope):
-                    if scope['ready_prices']:
+                    if service_config.adapter_mode == 'live':
+                        from app.services.roster_filter_records import save_roster_filter_records
+                        try:
+                            save_roster_filter_records(self.factory, config.runtime_dir, job.id, roster_date, scope)
+                        except Exception as exc:
+                            # 日志归档失败留因，不重采、不影响其他独立商品的既有执行。
+                            scope['history_log_error_id'] = event('worker.roster_history_log_failed', exception=exc)
+                    if (scope['ready_prices'] and service_config.adapter_mode == 'live'
+                            and service_config.live_submit_enabled):
                         result = run_roster_pricing(self.service, job.id, roster_date, scope)
                         pricing_batches.append(result)
                         scope['pricing_batch'] = result
 
-                if service_config.adapter_mode == 'live' and service_config.live_submit_enabled:
-                    capture = run_workflow(config, roster_date=roster_date, on_roster_scope=price_scope)
-                else:
-                    capture = run_workflow(config, roster_date=roster_date)
+                capture = run_workflow(config, roster_date=roster_date, on_roster_scope=price_scope)
                 if pricing_batches:
                     capture['pricing_batches'] = pricing_batches
                     write_verified(Path(capture['artifact_dir']) / 'result.json', capture)

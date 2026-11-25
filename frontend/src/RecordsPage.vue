@@ -136,6 +136,7 @@ onUnmounted(() => {
       </div>
       <p v-if="error" class="records-error motion-reveal" role="alert"><strong>{{ data ? '更新未成功，以下保留最近读取的数据。' : '暂时无法读取记录。' }}</strong>{{ error }}。可切换部门或刷新页面，系统也会自动重试。</p>
 
+      <p v-for="issue in data?.scope_issues" :key="`${issue.business_date}:${issue.capture_id}:${issue.salesperson}`" class="records-error" role="status">{{ issue.business_date }} · {{ issue.salesperson }}：{{ issue.reason }}</p>
       <p v-if="downloadError" class="records-error" role="alert">{{ downloadError }}</p>
       <section id="records-list" class="records-glass" :aria-busy="loading">
         <div class="records-panel-heading">

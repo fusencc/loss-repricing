@@ -321,7 +321,20 @@ def department_records(session, department=None, *, mode=None):
     for entry in departments:
         if entry['id'] == selected:
             entry['total'] = len(items)
+    # 无法完成采集的人员没有可信商品键，单独显示范围异常，不伪造商品或零保护数量。
+    scope_query = select(Batch).where(Batch.run_key.like('erp-roster:%:history:%'))
+    if mode is not None:
+        scope_query = scope_query.where(Batch.mode == mode)
+    scope_issues = []
+    for saved in session.scalars(scope_query):
+        source = (saved.snapshot or {}).get('erp_roster_filter_log') or {}
+        if (source and source.get('capture_complete') is False
+                and 'department:' + source['department'] == selected):
+            scope_issues.append({'salesperson': source['salesperson'], 'department': source['department'],
+                'business_date': saved.business_date, 'capture_id': source['capture_id'],
+                'reason': '采集未完成，三天调价保护数量无法确认'})
     return {
+        'scope_issues': scope_issues,
         'departments': departments, 'department': selected, 'total': len(items),
         'counts': dict(Counter(item['status'] for item in items)),
         'shops': len({(item.key.get('platform'), item.key.get('shop_id')) for item, _, _, _ in chosen}),
