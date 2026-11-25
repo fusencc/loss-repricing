@@ -21,9 +21,3 @@
 - 扩展采集回归483项通过、3项失败；在未修改的HEAD独立源码上重跑这3项，同样失败。失败均在`tests/test_erp_department_workflow.py`：`test_workflow_continues_after_incomplete_or_failed_department`、`test_failed_department_keeps_the_saved_capture_id`、`test_round_reuses_real_erp_and_sales_authentication_and_clock`。当天默认七人名单与这三项旧部门测试夹具冲突，本次未改工作流或夹具。
 - 真实环境使用隔离运行目录，仅运行ERP候选/财务读取及原650个商品的销售导出，不创建定价批次或价格上传。结果以隔离目录的`validation.json`为准；本文件不代替真实调价验收。
 - 本次隔离真实取数：禁止发货可配货39单、2页，待处理89单、5页，两类财务导出及候选均完整；650个销售商品全部匹配，分别取得1670、1283条子SKU，共2953条。该数量是复查时的实时名单，不是早上名单的重建。
-
-## 重跑前的部分财务边界复核
-
-- 完全没有可信财务行的失败来源不能标记为已具备计算依据；仅部分成功且逐批核对通过的来源可使用已观察数据。
-- 实时采集的单笔财务缺行仅排除该订单，保留原因；不挂起同商品的其他正常订单。店铺、身份及财务范围冲突继续阻断其影响范围。
-- tests/test_erp_pricing_preview.py 62 项通过，包含完全失败来源、部分批次证据冲突及同商品订单缺行边界。

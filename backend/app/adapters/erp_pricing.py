@@ -161,7 +161,7 @@ class CaptureGroup(BaseModel):
         partial_capture = self.stage not in ("complete", "not_attempted") and (
             self.error is not None or bool(self.failed_pages)
         )
-        if partial_capture and self.rows and self._batches_cover_orders(ids, allow_partial=True):
+        if partial_capture and self._batches_cover_orders(ids, allow_partial=True):
             return False, True
         if not list_known or not self._batches_cover_orders(ids):
             return False, False
@@ -621,8 +621,8 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
         order_problem = _order_problem(source_rows, groups, shops)
         scope = live.shop_scopes.get(order_id) if live is not None else None
         # 实时采集已给出候选订单号；原生明细未就绪或缺子 SKU 映射时只排除该单，
-        # 不虚构商品键，也不把同店其他订单一起排除。财务缺行排除该单，店铺证据矛盾仍阻断范围。
-        order_can_be_skipped = (live is not None and order_problem in (None, 'order_status_conflict', 'missing_order_finance')
+        # 不虚构商品键，也不把同店其他订单一起排除。财务缺行或店铺证据矛盾不属此例。
+        order_can_be_skipped = (live is not None and order_problem in (None, 'order_status_conflict')
                                 and (scope is None or shops == {scope.erp_shop}))
 
         details_problem = None
@@ -669,7 +669,7 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
             if problem := order_problem or _line_problem(line, len(order.lines), sales_conflicts):
                 _add_issue(issues, order_id, sources, problem, line)
                 # 实时订单状态冲突时，该订单不能作为当前亏损样本；独立正常订单即使同 SKU 也不受影响。
-                if live is None or problem not in ('order_status_conflict', 'missing_order_finance'):
+                if live is None or problem != 'order_status_conflict':
                     held_targets.add(line.mapping.key.target_identity())
                 continue
             row_id = json.dumps([order_id, line.detail_id], ensure_ascii=False, separators=(",", ":"))
