@@ -45,7 +45,7 @@ test('dialog title shows evidence dates without total or hit counts, while filte
   const source = await readFile(new URL('../src/SellerRecordLogs.vue', import.meta.url), 'utf8')
   assert.match(page, /#header="\{ titleId, titleClass \}"[\s\S]*<h2 :id="titleId"[^>]*>\{\{ logTitle \}\}<\/h2>\s*<span class="records-log-date" :title="logDateTitle">\{\{ logDate \}\}<\/span>/)
   assert.doesNotMatch(page + source, /logHitCount|logTotal|records-log-count|hit-count|hitCount|defineEmits/)
-  assert.match(source, /seller\.items\.length : recordStatusCount\(seller\.counts, state\)/)
+  assert.match(source, /seller\.items\.length : seller\.counts\[state\]/)
   const seller = groupBySeller([item(), { ...item(), id: 'second', status: '待处理' }, { ...item(), id: 'third', status: '已核验' }])[0]
   const saved = structuredClone(seller)
   const html = await renderToString(createSSRApp(Component, { seller }))
@@ -65,7 +65,7 @@ test('compact log retains identity, status, three horizontal stage fields and up
   assert.equal(row.key.platform, 'Tiktok')
   assert.match(html, /class="attention records-status"><i><\/i>待处理/)
   assert.equal((html.match(/data-stage=/g) ?? []).length, 3)
-  assert.equal((html.match(/class="records-stage-field"/g) ?? []).length, 5)
+  assert.equal((html.match(/class="records-stage-field"/g) ?? []).length, 6)
   assert.doesNotMatch(html, /<table|<thead|<tbody|<tr|scope="col"/)
   assert.match(html, /<dt>原营销价<\/dt><dd><strong class="records-value-red">10 PHP<\/strong>/)
   assert.match(html, /<dt>需补亏损<\/dt><dd><strong class="">12\.35 PHP<\/strong>/)
@@ -75,7 +75,7 @@ test('compact log retains identity, status, three horizontal stage fields and up
   assert.match(html, /data-field="first-margin"><dt>修正一次毛利<\/dt><dd><strong class="records-value-red">-2\.35 CNY<\/strong>/)
   assert.equal((html.match(/<dt>修正一次毛利<\/dt>/g) ?? []).length, 1)
   assert.equal((html.match(/上传含税价/g) ?? []).length, 1)
-  assert.match(html, /class="records-stage-field" data-field="uploaded-price"><dt>上传含税价<\/dt><dd><strong>18\.24 PHP<\/strong><\/dd><\/div><\/dl>/)
+  assert.match(html, /class="records-stage-field" data-field="uploaded-price"><dt>上传含税价<\/dt><dd><strong>18\.24 PHP<\/strong><\/dd><\/div><div class="records-stage-field" data-field="updated-time">.*?<\/div><\/dl>/)
   assert.doesNotMatch(html, /折合人民币|1\.75 元|建议上传价|18\.23 PHP/)
   for (const text of ['10 PHP', '12.35 PHP', '14.57 PHP']) {
     assert.ok(html.includes(text), `missing saved display: ${text}`)
@@ -101,7 +101,7 @@ test('upload is a peer price field and all execution statuses occupy a separate 
     row.status = status
     const original = structuredClone(row)
     const html = await render(row)
-    assert.match(html, new RegExp(`<div class="records-stage-field" data-field="uploaded-price"><dt>上传含税价</dt><dd><strong>18\\.24 PHP</strong></dd></div></dl>(?:<!--.*?-->)*<div class="records-log-state" aria-label="执行状态"><span class="${tone} records-status"><i></i>${label}</span><p class="records-log-reason">${status === '已核验' ? '商品符合调价' : '原因未记录'}</p><p class="records-log-time">最近更新：<span>—</span></p></div>`))
+    assert.match(html, new RegExp(`<div class="records-stage-field" data-field="uploaded-price"><dt>上传含税价</dt><dd><strong>18\\.24 PHP</strong></dd></div><div class="records-stage-field" data-field="updated-time"><dt>最近更新</dt><dd class="records-log-time"><span>—</span></dd></div></dl>(?:<!--.*?-->)*<div class="records-log-state" aria-label="执行状态"><span class="${tone} records-status"><i></i>${label}</span><p class="records-log-reason">${status === '已核验' ? '商品符合调价' : '原因未记录'}</p></div>`))
     assert.equal((html.match(/class="records-log-state"/g) ?? []).length, 1)
     assert.doesNotMatch(html, /<dl[^>]*>(?:(?!<\/dl>).)*records-log-state/s)
     assert.doesNotMatch(html, /<header class="records-log-heading">(?:(?!<\/header>).)*records-log-state/s)
@@ -111,7 +111,7 @@ test('upload is a peer price field and all execution statuses occupy a separate 
   const css = await readFile(new URL('../src/records.css', import.meta.url), 'utf8')
   assert.match(css, /\.records-log\{display:grid;grid-template-columns:minmax\(min-content,1\.2fr\) minmax\(0,4fr\) minmax\(120px,\.85fr\);align-items:start;/)
   assert.match(css, /\.records-log-state\{grid-column:3;grid-row:1;align-self:start;justify-self:stretch;display:flex;flex-direction:column;align-items:center;gap:7px;min-width:0\}/)
-  assert.match(css, /\.records-log-stages\{display:grid;grid-template-columns:repeat\(5,minmax\(0,1fr\)\);align-items:start;/)
+  assert.match(css, /\.records-log-stages\{display:grid;grid-template-columns:repeat\(6,minmax\(0,1fr\)\);align-items:start;/)
   assert.match(css, /@media\(max-width:900px\)\{[\s\S]*?\.records-log-state\{grid-column:2;grid-row:1\}[\s\S]*?\.records-log-stages\{grid-column:1\/-1;grid-row:2\}/)
   assert.match(css, /@media\(max-width:680px\)\{\s*\.records-log\{padding:12px 0;gap:10px\}\s*\.records-log-stages\{grid-template-columns:repeat\(2,minmax\(0,1fr\)\)\}/)
   assert.doesNotMatch(css, /records-log-uploads|records-log-prices/)
@@ -123,7 +123,7 @@ test('long saved upload amounts remain a single peer field with a separate statu
   row.execution.uploaded_price = '12345678901234567890.236'
   const original = structuredClone(row)
   const html = await render(row)
-  assert.match(html, /data-field="uploaded-price"><dt>上传含税价<\/dt><dd><strong>12345678901234567890\.24 PHP<\/strong><\/dd><\/div><\/dl>/)
+  assert.match(html, /data-field="uploaded-price"><dt>上传含税价<\/dt><dd><strong>12345678901234567890\.24 PHP<\/strong><\/dd><\/div><div class="records-stage-field" data-field="updated-time">.*?<\/div><\/dl>/)
   assert.match(html, /<div class="records-log-state" aria-label="执行状态">/)
   assert.deepEqual(row, original)
   const { readFile } = await import('node:fs/promises')

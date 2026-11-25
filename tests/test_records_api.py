@@ -315,3 +315,30 @@ def test_preparations_and_failed_attempts_belong_to_one_successful_price_change(
     assert len(combine_pricing_process(deepcopy(rows) + [row('unknown', 'unknown', '09')])) == 2
     assert len(combine_pricing_process(deepcopy(rows) + [row('later', None, '11')])) == 2
     assert len(combine_pricing_process(deepcopy(rows) + [row('second-success', 'verified', '11')])) == 5
+
+
+def test_live_roster_reuses_persisted_salesperson_for_regular_and_stock_batches(client):
+    with client.app.state.factory.begin() as session:
+        for suffix, name, item_id in (("桂露", "桂露", "i0"), ("stock:桂露", "桂露", "i3")):
+            item = session.get(Item, item_id)
+            batch = session.get(Batch, item.batch_id)
+            batch.mode = 'live'
+            batch.run_key = f'erp-roster:roster-job:{suffix}:{batch.business_date}'
+            batch.snapshot = {'source_versions': {'erp_roster_salesperson': name}}
+    rows = client.get('/api/records').json()['items']
+    assert {row['id'] for row in rows} == {'i0', 'i3'}
+    assert {row['seller']['name'] for row in rows} == {'桂露'}
+    assert rows[0]['seller']['id'] == rows[1]['seller']['id'] is not None
+
+
+def test_live_roster_separates_sellers_even_with_the_same_project_owner(client):
+    with client.app.state.factory.begin() as session:
+        for name, item_id in (('桂露', 'i0'), ('莫雯舒', 'i3')):
+            item = session.get(Item, item_id)
+            batch = session.get(Batch, item.batch_id)
+            batch.mode = 'live'
+            batch.run_key = f'erp-roster:job:{name}:{batch.business_date}'
+            batch.snapshot = {'source_versions': {'erp_roster_salesperson': name}}
+    rows = {row['id']: row for row in client.get('/api/records').json()['items']}
+    assert rows['i0']['seller'] == {'id': 'erp-roster:桂露', 'name': '桂露'}
+    assert rows['i3']['seller'] == {'id': 'erp-roster:莫雯舒', 'name': '莫雯舒'}

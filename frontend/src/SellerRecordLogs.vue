@@ -6,7 +6,7 @@ import { timeLabel } from './api'
 import SkuPriceReferenceView from './SkuPriceReference.vue'
 import RecordIdCopy from './RecordIdCopy.vue'
 import { recordPrice, recordTone, recordStatusLabel, recordDisplayStates,
-  changeLabel, isPositiveChange, isNegativeAmount, filterRecordItems, stagePriceLabel, recordStageLabel, recordStateReason, recordStatusCount,
+  changeLabel, isPositiveChange, isNegativeAmount, filterRecordItems, stagePriceLabel, recordStageLabel, recordStateReason,
   type RecordStatusFilter,
   type SellerGroup } from './records-model'
 
@@ -36,7 +36,7 @@ const searchInput = ref<HTMLInputElement | null>(null)
         <button v-for="state in statuses" :key="state" type="button"
           :aria-pressed="statusFilter === state"
           :class="{ active: statusFilter === state }"
-          @click="statusFilter = state"><i v-if="state !== '全部'" class="records-log-filter-dot" :class="recordTone(state)" aria-hidden="true"></i>{{ state === '全部' ? '全部' : recordStatusLabel(state) }} <span class="records-log-filter-count">{{ state === '全部' ? seller.items.length : recordStatusCount(seller.counts, state) }}</span></button>
+          @click="statusFilter = state"><i v-if="state !== '全部'" class="records-log-filter-dot" :class="recordTone(state)" aria-hidden="true"></i>{{ state }} <span class="records-log-filter-count">{{ state === '全部' ? seller.items.length : seller.counts[state] }}</span></button>
       </div>
       <div class="records-log-search" role="search">
         <input ref="searchInput" v-model="keyword" type="search"
@@ -92,7 +92,7 @@ const searchInput = ref<HTMLInputElement | null>(null)
 
         <!-- 执行状态独立占最右列，不与上传价堆叠；请求金额不等同于受理或实际生效。 -->
         <div class="records-log-state" aria-label="执行状态">
-          <span class="records-status" :class="recordTone(item.status)"><i></i>{{ recordStatusLabel(item.status) }}</span>
+          <span class="records-status" :class="recordTone(recordStatusLabel(item))"><i></i>{{ recordStatusLabel(item) }}</span>
           <p class="records-log-reason">{{ recordStateReason(item) }}</p>
         </div>
         <SkuPriceReferenceView :reference="item.decision?.sku_price_reference" :price-limit="item.decision?.price_limit" />

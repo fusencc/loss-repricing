@@ -39,6 +39,9 @@ def create_records_app(database_path: Path, bindings_path: Path):
         # 仅应用用户明确确认的展示归属，不写 Ownership 或更改任何账号权限。
         bindings = json.loads(bindings_path.read_text()) if bindings_path.exists() else []
         for item in data['items']:
+            # 名单批次保存的 ERP 销售员优先，不能被历史商品展示绑定改写。
+            if (item['seller']['id'] or '').startswith('erp-roster:'):
+                continue
             for binding in bindings:
                 if item['key'] == binding['key']:
                     item['seller'] = binding['seller']

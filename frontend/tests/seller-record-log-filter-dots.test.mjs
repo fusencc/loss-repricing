@@ -26,7 +26,7 @@ test('only the three status filters have decorative tone dots before their uncha
   const buttons = [...filter.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/g)]
   assert.equal(buttons.length, 4)
   for (const [index, [state, label, count]] of [
-    ['全部', '全部', 4], ['已核验', '已提价', 1], ['待处理', '待处理', 2], ['本轮不调', '本轮不调', 1],
+    ['全部', '全部', 4], ['已提价', '已提价', 1], ['待处理', '待处理', 2], ['本轮不调', '本轮不调', 1],
   ].entries()) {
     const [, attributes, content] = buttons[index]
     assert.match(attributes, /type="button"/)

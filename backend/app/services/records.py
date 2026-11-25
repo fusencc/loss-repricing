@@ -48,7 +48,13 @@ def record_department(item):
     return 'Tiktok' + name[6:] if name and name[:6].lower() == 'tiktok' else name
 
 
-def record_seller(item, ownerships, names):
+def record_seller(item, batch, ownerships, names):
+    # 名单批次保存了本次经校验的 ERP 销售员。普通提价和库存补算按同一个名字归档。
+    source = (batch.snapshot or {}).get('source_versions') or {}
+    roster_seller = display_text(source.get('erp_roster_salesperson'))
+    if (batch.mode == 'live' and roster_seller and batch.run_key.startswith('erp-roster:')
+            and batch.run_key.endswith(f':{roster_seller}:{batch.business_date}')):
+        return {'id': f'erp-roster:{roster_seller}', 'name': roster_seller}
     # 与现有权限规则共用 scope 顺序：目标级优先，其次店铺/站点；这里只展示，不改变授权。
     owner = next((ownerships[s] for s in ownership_scopes(item.key) if s in ownerships), None)
     if owner is None:
@@ -290,7 +296,7 @@ def department_records(session, department=None, *, mode=None):
     chosen = [row for row in rows if ('department:' + row[3] if row[3] is not None else 'unassigned') == selected]
     ownerships = {row.scope_key: row for row in session.scalars(select(Ownership))}
     names = dict(session.execute(select(UserAccount.id, UserAccount.display_name)).all())
-    items = combine_pricing_process([public_record(item, batch, execution, dept, record_seller(item, ownerships, names))
+    items = combine_pricing_process([public_record(item, batch, execution, dept, record_seller(item, batch, ownerships, names))
                                     for item, batch, execution, dept in chosen])
     for entry in departments:
         if entry['id'] == selected:

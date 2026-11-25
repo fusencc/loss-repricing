@@ -39,8 +39,8 @@ test('same-name sellers stay separate and all repeated SKU records survive', () 
   assert.equal(groups.length,2)
   assert.deepEqual(groups[0].items.map(r=>r.id),['3','1'])
   assert.deepEqual(groups[1].items.map(r=>r.id),['2'])
-  assert.equal(groups[0].counts['已核验'],1)
-  assert.equal(groups[0].counts['待核验'],1)
+  assert.equal(groups[0].counts['已提价'],1)
+  assert.equal(groups[0].counts['待处理'],1)
   assert.equal(groups[0].latest.decision.target_actual,'15.123456789123456789')
 })
 test('unassigned items remain inspectable, and a literal id cannot collide with the unknown group', () => {
@@ -68,7 +68,7 @@ test('price change keeps saved decimals and front-end only adds sign for increas
   assert.equal(changeLabel(mk(null)), '未记录')
 })
 
-test('dialog log filter keeps full-keyword match across SKU, product and shop, and status filter uses raw status', async () => {
+test('dialog log filter keeps full-keyword match across SKU, product and shop, and status filter uses the display category', async () => {
   const { filterRecordItems } = await import('../src/records-model.ts')
   const base = { seller: {id:'a', name:'销售'}, decision: null, execution: null }
   const items = [
@@ -77,7 +77,7 @@ test('dialog log filter keeps full-keyword match across SKU, product and shop, a
     { ...base, id:'3', status:'待处理', shop_name:'TIKTOK-22070PH', key:{ sku:'ZZZ', product_id:'999', item_id:'', shop_id:'1861287085550764034' } },
   ]
   assert.deepEqual(filterRecordItems(items, '全部', '').map(r=>r.id), ['1','2','3'])
-  assert.deepEqual(filterRecordItems(items, '已核验', '').map(r=>r.id), ['1'])
+  assert.deepEqual(filterRecordItems(items, '已提价', '').map(r=>r.id), ['1'])
   // 待处理展示组包含两个后台状态，保留原记录及顺序。
   assert.deepEqual(filterRecordItems(items, '待处理', '').map(r=>r.id), ['2','3'])
   assert.deepEqual(filterRecordItems(items, '全部', 'hhx1983').map(r=>r.id), ['1'])
@@ -117,14 +117,14 @@ test('dialog stages use wrapping horizontal fields with saved price and original
   assert.doesNotMatch(source, /<table|在线利润率导致的变动|stageProfitChangeLabel|stage\.profit_change_cny|records-stage-formula|公式：/)
   assert.doesNotMatch(css, /records-stage-table|records-stage-formula/)
   assert.match(css, /\.records-log\{display:grid;grid-template-columns:/)
-  assert.match(css, /\.records-log-stages\{display:grid;grid-template-columns:repeat\(5,minmax\(0,1fr\)\)/)
+  assert.match(css, /\.records-log-stages\{display:grid;grid-template-columns:repeat\(6,minmax\(0,1fr\)\)/)
   assert.match(css, /\.records-log-stages\{grid-template-columns:repeat\(2,minmax\(0,1fr\)\)\}/)
   assert.doesNotMatch(css, /records-stage-change/)
 })
 
 test('records use the requested business labels and four fixed departments', async () => {
   const { recordStatusLabel, recordDepartments } = await import('../src/records-model.ts')
-  assert.deepEqual(['已核验','待核验','待处理','本轮不调'].map(recordStatusLabel), ['已提价','待处理','待处理','本轮不调'])
+  assert.deepEqual(['已核验','待核验','待处理','本轮不调'].map(status => recordStatusLabel({ status })), ['已提价','待处理','待处理','本轮不调'])
   assert.deepEqual(recordDepartments.map(d => d.name), ['Tiktok一部','Tiktok五部','Tiktok十二部','Tiktok二十二部'])
 })
 
@@ -136,27 +136,22 @@ test('overview keeps real statuses separate from the unconnected activity placeh
   assert.match(source, /class="records-mobile-label">修正一次毛利<\/span>/)
   assert.match(source, /group\.latest\.first_margin\?\.amount/)
   assert.match(source, /group\.latest\.first_margin\.currency/)
-  assert.match(source, /recordStatusCount\(data\.counts, state\)/)
-  assert.match(source, /recordStatusCount\(group\.counts, state\)/)
+  assert.match(source, /countRecordStatuses\(data\.value\?\.items/)
+  assert.match(source, /group\.counts\[state\]/)
   assert.match(source, /class="records-activity-placeholder"><i class="neutral"><\/i>活动中<\/span>/)
   assert.doesNotMatch(source, /未接入/)
   assert.doesNotMatch(source, /counts\['活动中'\]|searchExpanded|toggleSearch/)
   assert.match(source, /<input id="records-seller-search" ref="searchInput" v-model="sellerQuery"/)
 })
 
-test('pending display counts merge both backend statuses without mutating evidence', async () => {
-  const { recordStatusCount, recordDisplayStates, recordTone, filterRecordItems } = await import('../src/records-model.ts')
-  const counts = { '已核验': 2, '待核验': 3, '待处理': 4, '本轮不调': 1 }
-  const original = structuredClone(counts)
-  assert.deepEqual(recordDisplayStates, ['已核验', '待处理', '本轮不调'])
-  assert.deepEqual(recordDisplayStates.map(state => recordStatusCount(counts, state)), [2, 7, 1])
-  assert.equal(recordStatusCount({ '待核验': 3 }, '待处理'), 3)
-  assert.equal(recordStatusCount({ '待处理': 4 }, '待处理'), 4)
-  assert.equal(recordStatusCount({}, '待处理'), 0)
-  assert.equal(recordTone('待核验'), recordTone('待处理'))
-  assert.deepEqual(counts, original)
+test('pending records without acceptance share the attention category without mutating evidence', async () => {
+  const { countRecordStatuses, recordDisplayStates, recordTone, filterRecordItems } = await import('../src/records-model.ts')
+  assert.deepEqual(recordDisplayStates, ['已提价', '待处理', '本轮不调'])
+  assert.deepEqual(countRecordStatuses([]), { '已提价': 0, '待处理': 0, '本轮不调': 0 })
+  assert.equal(recordTone('待处理'), 'attention')
   const items = [row('1','a','待核验'), row('2','a','待处理'), row('3','a','已核验')]
   const saved = structuredClone(items)
+  assert.deepEqual(countRecordStatuses(items), { '已提价': 1, '待处理': 2, '本轮不调': 0 })
   assert.equal(filterRecordItems(items, '待处理', '').length, 2)
   assert.deepEqual(items, saved)
 })
@@ -168,4 +163,32 @@ test('all price displays round to at most two places without changing input or l
   assert.equal(recordPrice('2.584',item),'2.58 THB')
   assert.equal(changeLabel(item),'+3.12 THB')
   assert.equal(item.decision.price_change,'3.123456789123456789')
+})
+
+
+test('accepted upload immediately appears as priced in live records, counts and filters', async () => {
+  const { recordStatusLabel, countRecordStatuses, filterRecordItems } = await import('../src/records-model.ts')
+  const accepted = { ...row('1', 'a'), execution: { state: 'accepted' } }
+  const verified = { ...row('2', 'a', '已核验'), execution: { state: 'verified' } }
+  const unknown = { ...row('3', 'a'), execution: { state: 'unknown' } }
+  const mismatch = { ...row('4', 'a'), execution: { state: 'mismatch' } }
+  const declined = row('5', 'a', '本轮不调')
+  const items = [accepted, verified, unknown, mismatch, declined]
+  assert.equal(recordStatusLabel(accepted), '已提价')
+  assert.equal(recordStatusLabel(verified), '已提价')
+  assert.equal(recordStatusLabel(unknown), '待处理')
+  assert.deepEqual(countRecordStatuses(items), { '已提价': 2, '待处理': 2, '本轮不调': 1 })
+  assert.deepEqual(groupBySeller(items)[0].counts, countRecordStatuses(items))
+  assert.deepEqual(filterRecordItems(items, '已提价', '').map(r => r.id), ['1', '2'])
+  assert.deepEqual(filterRecordItems(items, '待处理', '').map(r => r.id), ['3', '4'])
+  assert.equal(accepted.status, '待核验')
+  assert.equal(accepted.execution.state, 'accepted')
+})
+
+test('accepted submission remains priced when readback mismatches', async () => {
+  const { recordStatusLabel, recordStateReason } = await import('../src/records-model.ts')
+  const item = { ...row('submitted', 'a'), reason: '回读价格不一致', execution: { state: 'mismatch', submit_status: 'accepted' } }
+  assert.equal(recordStatusLabel(item), '已提价')
+  assert.equal(recordStateReason(item), '商品符合调价')
+  assert.equal(recordStateReason({ ...item, execution: { state: 'accepted' } }), '商品符合调价')
 })

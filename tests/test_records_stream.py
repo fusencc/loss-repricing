@@ -163,3 +163,11 @@ def test_standalone_live_stream_matches_poll_projection_and_display_bindings(cli
         assert response.headers['x-accel-buffering'] == 'no'
         assert json.loads(response.text.removeprefix('data: ')) == polled.json()
         assert standalone.get('/api/records/stream', params={'department': '不存在'}).status_code == 404
+        with client.app.state.factory.begin() as session:
+            batch = session.get(Batch, 'b0')
+            batch.run_key = f'erp-roster:job:桂露:{batch.business_date}'
+            batch.snapshot = {'source_versions': {'erp_roster_salesperson': '桂露'}}
+        roster = standalone.get('/api/records', params=department).json()
+        assert roster['items'][0]['seller'] == {'id': 'erp-roster:桂露', 'name': '桂露'}
+        stream = standalone.get('/api/records/stream', params=department)
+        assert json.loads(stream.text.removeprefix('data: ')) == roster
