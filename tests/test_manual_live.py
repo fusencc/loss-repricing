@@ -182,7 +182,9 @@ def test_th_native_vat_price_uses_observed_upward_cent_rounding():
 
 
 @pytest.mark.parametrize('has_reference,expected',[(False,'unknown'),(True,'accepted')])
-def test_live_lookup_uses_saved_reference_priority_instead_of_profit_veto(tmp_path,monkeypatch,has_reference,expected):
+@pytest.mark.parametrize('official_unavailable', [False, True])
+@pytest.mark.parametrize('task_status', [1, 2, 3, 4, 5, 6, 7])
+def test_live_lookup_uses_saved_reference_priority_instead_of_profit_veto(tmp_path,monkeypatch,has_reference,expected,official_unavailable,task_status):
     import json
     import app.adapters.manual_live as module
     a,log,detail,current=evidence()
@@ -207,10 +209,17 @@ def test_live_lookup_uses_saved_reference_priority_instead_of_profit_veto(tmp_pa
     monkeypatch.setattr(module,'capture_platform_controls',lambda *args,**kwargs:raw)
     official={'key':a['key'],'shop_name':a['shop_name'],
               'latest_success_query':{'status':'ok','amount':'87.18'}}
-    monkeypatch.setattr('app.adapters.official_price_logs.capture_official_price_logs',lambda *args,**kwargs:official)
+    def official_query(*args, **kwargs):
+        if official_unavailable:
+            raise TimeoutError('补充统计超时')
+        return official
+    monkeypatch.setattr('app.adapters.official_price_logs.capture_official_price_logs', official_query)
+    log['status'] = task_status
+    if task_status != 2:
+        expected = 'rejected' if task_status in (3, 5, 6) else 'unknown'
     result=adapter.lookup('one',None,VariantKey.model_validate(a['key']))
     assert result.status==expected
-    if has_reference:
+    if has_reference and task_status == 2:
         saved=json.loads((tmp_path/'verified-one.json').read_text())
         assert saved['actual_profit']=='-16.513'
         assert saved['minimum_margin_required'] is False and saved['online_margin_passed'] is False

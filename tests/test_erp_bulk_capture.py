@@ -567,3 +567,102 @@ def test_blocked_dynamic_counts_end_without_incomplete_or_rescan(totals, counts)
     assert requested == list(range(1, len(counts) + 1))
     assert len(ids) == group['total'] == sum(counts)
     assert 'list_error' not in group and not group.get('failed_pages')
+
+
+@pytest.mark.parametrize('bad_row, reason', [
+    (None, 'invalid_order_id'),
+    ({'orderid': 'bad', 'platform': 'Shopee', 'status': 4, 'jzfh': '1'}, 'platform_mismatch'),
+    ({'orderid': 'bad', 'platform': 'Tiktok', 'status': 3, 'jzfh': '1'}, 'status_mismatch'),
+    ({'orderid': 'bad', 'platform': 'Tiktok', 'status': 4, 'jzfh': '0'}, 'blocked_flag_mismatch'),
+    ({'orderid': 'bad', 'platform': 'Tiktok', 'status': 4, 'jzfh': '1', 'shopUsername': '其他人员'},
+     'salesperson_mismatch'),
+])
+def test_blocked_bad_row_does_not_discard_valid_rows_on_the_same_page(bad_row, reason):
+    from app.adapters.erp_bulk_capture import _blocked_ids
+    good = lambda order: {'orderid': order, 'platform': 'Tiktok', 'status': 4,
+                          'jzfh': '1', 'shopUsername': '指定人员'}
+    group = {'status': 4, 'filters': {'shopUsernameid': 'seller-1'}, 'pages': []}
+    def post(path, body):
+        return {'total': 3, 'records': [good('before'), bad_row, good('after')]}
+    assert _blocked_ids(post, group, salesperson='指定人员') == ['before', 'after']
+    assert group['total'] == 2
+    assert group['excluded_rows'][0]['validation_reason'] == reason
+    assert group['excluded_rows'][0]['row_number'] == 2
+    assert group['pages'][0]['excluded_rows'] == 1
+    assert not group.get('failed_pages')
+
+
+def test_blocked_later_page_failure_keeps_and_exports_verified_prefix(tmp_path):
+    from app.adapters.base import SourceUnavailable
+    ids = [f'B{i:03d}' for i in range(20)]
+    submitted = []
+    def post(path, body, **kwargs):
+        if path == '/Api/order/list':
+            if body['page'] == 2:
+                raise SourceUnavailable('第二页读取失败')
+            return {'total': 40, 'records': [
+                {'orderid': order, 'platform': 'Tiktok', 'status': 3, 'jzfh': '1'} for order in ids]}
+        if path.endswith('/asyncOrderListDownload'):
+            submitted.append(body['orderIdList'])
+            return '下载任务【prefix】后台执行中'
+        if path.endswith('/download/list'):
+            return [{'id': 'prefix-id', 'fileName': 'prefix', 'source': 'orderList',
+                     'status': 'success', 'downloadUrl': '/finance.xlsx'}]
+        pytest.fail(path)
+    def download(url):
+        return xlsx(['订单编号', '订单状态', '平台', '集团', '毛利', '修正毛利', '修正一次毛利'],
+                    [[order, '待处理', 'Tiktok', '集团二部', -1, -1, -1] for order in ids])
+    settings = Settings(_env_file=None, runtime_dir=tmp_path)
+    result = capture_erp_bulk(settings, source='blocked_pending', web_session=(post, download))
+    group = result['groups'][0]
+    assert submitted == [ids]
+    assert group['candidate_order_ids'] == ids
+    assert len(group['rows']) == 20
+    assert group['failed_pages'] == [2] and not group['list_complete']
+    assert not result['capture_complete']
+    from app.adapters.erp_pricing import CaptureGroup
+    assert CaptureGroup.model_validate(group).finance_coverage('集团二部') == (False, True)
+
+
+def test_export_row_isolation_preserves_good_rows_and_counts(tmp_path):
+    headers = ['订单编号', '订单状态', '平台', '集团', '毛利', '修正毛利', '修正一次毛利']
+    def row(order, platform='Tiktok'):
+        return [order, '可配货', platform, '集团二部', -1, -2, -3]
+    loss = xlsx(headers, [row('A'), row('B'), row(123), row('X', 'Shopee')])
+    finance = xlsx(headers, [row('A'), row('B', 'Shopee'), row(456)])
+    def post(path, body, **kwargs):
+        if path.endswith('/dowDeficitOrder'):
+            return loss
+        if path.endswith('/asyncOrderListDownload'):
+            assert body['orderIdList'] == ['A', 'B']
+            return '下载任务【task】后台执行中'
+        return [{'id': '1', 'source': 'orderList', 'fileName': 'task',
+                 'status': 'success', 'downloadUrl': '/finance.xlsx'}]
+    settings = Settings(_env_file=None, runtime_dir=tmp_path)
+    result = capture_erp_bulk(settings, source='loss_allocatable', web_session=(post, lambda _: finance))
+    group = result['groups'][0]
+    assert [r['orderid'] for r in group['rows']] == ['A']
+    assert group['missing_order_ids'] == ['B']
+    assert group['export_excluded_row_counts'] == {'invalid_order_id': 2, 'platform_mismatch': 2}
+    assert group['batches'][0]['excluded_row_counts'] == {'invalid_order_id': 1, 'platform_mismatch': 1}
+    assert not result['capture_complete']
+
+
+def test_unrequested_finance_order_cannot_be_hidden_by_scope_filter(tmp_path):
+    headers = ['订单编号', '订单状态', '平台', '集团', '毛利', '修正毛利', '修正一次毛利']
+    def row(order, platform):
+        return [order, '可配货', platform, '集团二部', -1, -2, -3]
+    def post(path, body, **kwargs):
+        if path.endswith('/dowDeficitOrder'):
+            return xlsx(headers, [row('A', 'Tiktok')])
+        if path.endswith('/asyncOrderListDownload'):
+            return '下载任务【task】后台执行中'
+        return [{'id': '1', 'source': 'orderList', 'fileName': 'task',
+                 'status': 'success', 'downloadUrl': '/finance.xlsx'}]
+    finance = xlsx(headers, [row('A', 'Tiktok'), row('X', 'Shopee')])
+    result = capture_erp_bulk(Settings(_env_file=None, runtime_dir=tmp_path),
+                              source='loss_allocatable', web_session=(post, lambda _: finance))
+    group = result['groups'][0]
+    assert group['batches'][0]['scope_check']['unexpected'] == ['X']
+    assert '未请求' in group['error']
+    assert not group['rows'] and not result['capture_complete']

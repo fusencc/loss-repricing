@@ -314,6 +314,14 @@ def test_preparations_and_failed_attempts_belong_to_one_successful_price_change(
     # 未知提交不能隐藏；成功后的新一轮准备不能隐藏；两次成功不能视为一次。
     assert len(combine_pricing_process(deepcopy(rows) + [row('unknown', 'unknown', '09')])) == 2
     assert len(combine_pricing_process(deepcopy(rows) + [row('later', None, '11')])) == 2
+    # 失败/未知不能凭旧受理回执成为合并主记录，准备记录也必须继续可见。
+    for state in ('failed', 'mismatch', 'unknown', 'submitting'):
+        uncertain = row('uncertain', state, '10')
+        uncertain['execution']['submit_status'] = 'accepted'
+        assert len(combine_pricing_process([uncertain, row('prepare', None, '09')])) == 2
+    accepted = row('accepted', 'accepted', '10')
+    assert len(combine_pricing_process([accepted, row('prepare', None, '09')])) == 1
+    assert accepted['execution']['state'] == 'accepted'
     assert len(combine_pricing_process(deepcopy(rows) + [row('second-success', 'verified', '11')])) == 5
 
 

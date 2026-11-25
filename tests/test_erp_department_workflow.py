@@ -98,12 +98,13 @@ def test_department_finance_batches_follow_sources_without_seller_priority(tmp_p
 def test_workflow_continues_after_incomplete_or_failed_department(tmp_path, monkeypatch):
     attempted = []
     sessions = []
+    monkeypatch.setattr(erp_workflow, '_roster', lambda settings, required_day: None)
 
     def run_department(settings, *, department, progress, web_session, client, auth):
         sessions.append((web_session, client, auth))
         attempted.append(department)
         if department == 'Tiktok一部':
-            return {'status': 'blocked', 'ready_prices': 0, 'stopped_by_rate_limit': True}
+            return {'status': 'blocked', 'ready_prices': 0}
         if department == 'Tiktok五部':
             raise RuntimeError('synthetic departmental failure')
         return {'status': 'completed', 'ready_prices': 1}
@@ -122,6 +123,8 @@ def test_workflow_continues_after_incomplete_or_failed_department(tmp_path, monk
 
 
 def test_failed_department_keeps_the_saved_capture_id(tmp_path, monkeypatch):
+    monkeypatch.setattr(erp_workflow, '_roster', lambda settings, required_day: None)
+    monkeypatch.setattr(erp_workflow, 'refresh_daily_fees', lambda *args, **kwargs: {})
     monkeypatch.setattr(erp_workflow, 'ERP_DEPARTMENTS', ('Tiktok一部',))
     monkeypatch.setattr(erp_workflow, 'capture_erp_bulk', lambda *args, **kwargs: {})
     monkeypatch.setattr(erp_workflow, 'save_capture', lambda *args: {
@@ -179,6 +182,7 @@ def test_round_reuses_real_erp_and_sales_authentication_and_clock(tmp_path, monk
     from app.domain.types import VariantKey
     from app.adapters.erp_order_headers import capture_order_headers
 
+    monkeypatch.setattr(erp_workflow, '_roster', lambda settings, required_day: None)
     erp_clock, sales_clock = [0], [0]
     def erp_sleep(seconds):
         erp_clock[0] += seconds

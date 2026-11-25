@@ -52,19 +52,16 @@ test('title date value shows only the newest day once, without pretending which 
   assert.equal(recordDateValue([row({ updated_at: 'invalid' })]), '日期未记录')
 })
 
-test('title, latest date and Excel stay on one flex row with the date before the download', async () => {
+test('title and Excel stay on one flex row without the date component', async () => {
   const source = await readFile(new URL('../src/RecordsPage.vue', import.meta.url), 'utf8')
   const css = await readFile(new URL('../src/records.css', import.meta.url), 'utf8')
-  assert.match(source, /<div class="records-log-title">\s*<h2[^>]*>\{\{ logTitle \}\}<\/h2>\s*<span class="records-log-date" :title="logDateTitle">\{\{ logDate \}\}<\/span>\s*<button[^>]*records-log-download/)
-  assert.doesNotMatch(source, /logHitCount|logTotal|records-log-count|hit-count|records-log-title-text/)
-  assert.match(source, /recordDateValue\(activeSeller\.value\?\.items \?\? \[\]\)/)
+  assert.match(source, /<div class="records-log-title">\s*<h2[^>]*>\{\{ logTitle \}\}<\/h2>\s*<button[^>]*records-log-download/)
+  assert.doesNotMatch(source, /logHitCount|logTotal|records-log-count|hit-count|records-log-title-text|records-log-date|logDateTitle|\{\{ logDate \}\}/)
+  assert.doesNotMatch(source, /recordDateValue\(activeSeller\.value\?\.items \?\? \[\]\)/)
   assert.match(css, /\.records-log-title\{[^}]*display:flex;[^}]*flex-wrap:nowrap/)
   assert.match(css, /\.records-log-title h2\{[^}]*flex:1 1 auto/)
   const downloadRule = css.match(/\.records-log-title \.records-log-download\{([^}]*)\}/)[1]
   assert.doesNotMatch(downloadRule, /margin-left:auto|position:absolute|flex:1/)
-  const dateRule = css.match(/\.records-log-date\{([^}]*)\}/)[1]
-  assert.match(dateRule, /flex:none/)
-  assert.match(dateRule, /white-space:nowrap/)
-  assert.doesNotMatch(css, /\.records-log-title-text/)
+  assert.doesNotMatch(css, /\.records-log-date|\.records-log-title-text/)
   assert.match(css, /\.records-dialog \.el-dialog__header\{padding:25px 64px 12px 28px/)
 })

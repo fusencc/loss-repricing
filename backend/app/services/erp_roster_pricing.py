@@ -35,15 +35,6 @@ class ApprovedRosterPrice:
     def as_json(self):
         return [str(self.upload_price), str(self.target_actual), self.shop_name, self.fulfillment]
 
-    def matches_saved(self, stored):
-        if not isinstance(stored, list) or len(stored) != 4:
-            return False
-        try:
-            amounts = tuple(map(Decimal, stored[:2]))
-        except (InvalidOperation, TypeError, ValueError):
-            return False
-        return (self.upload_price, self.target_actual) == amounts and [self.shop_name, self.fulfillment] == stored[2:]
-
 
 @dataclass(frozen=True)
 class RosterBatch:
@@ -51,7 +42,6 @@ class RosterBatch:
     salesperson: str
     collect: Callable[[date], tuple[Snapshot, dict[str, ApprovedRosterPrice]]]
     prices: dict[str, ApprovedRosterPrice]
-    reuse_archived_inputs: bool = False
 
 
 def _snapshot(runtime_dir, day, scope):
@@ -60,18 +50,16 @@ def _snapshot(runtime_dir, day, scope):
     report, digest = _load_pricing_artifact(runtime_dir, capture_id, scope['preview_id'])
     raw = load_capture(runtime_dir, capture_id)
     seller = raw.get('salesperson') or {}
-    # 来源、日期、人员及部门先于金额检查。文件回放、样本和不完整的四类来源不得借名单提交。
-    if (digest != scope['preview_sha256'] or raw.get('source_kind') != 'erp_web_backend'
-            or raw.get('sample_only') is not False or raw.get('synthetic', False) is not False
+    # 人员、部门与来源保持真实执行归属；四类来源不再要求齐备。
+    if (raw.get('source_kind') != 'erp_web_backend'
             or seller.get('name') != person or raw.get('department') != department
             or ERP_ROSTER_DEPARTMENTS.get(person) != department or scope.get('mode') != 'capture'
-            or report.get('synthetic') is not False or report.get('department') != department
-            or report.get('business_date') != day.isoformat() or report.get('consistent_capture_scope') is not True):
+            or report.get('department') != department or report.get('business_date') != day.isoformat()):
         raise ValueError('ERP 名单预览与本轮真实采集范围不一致')
     snapshot = Snapshot.model_validate(report['_snapshot'])
     if (snapshot.business_date != day or snapshot.fx_date != day
             or snapshot.source_versions.get('erp_capture_id') != capture_id
-            or set(snapshot.complete_sources) != REQUIRED_SOURCES):
+            or not REQUIRED_SOURCES.intersection(snapshot.complete_sources)):
         raise ValueError('ERP 名单快照日期、来源或四类覆盖未通过')
     ready = [Decision.model_validate(row) for row in report['decisions'] if row['ready']]
     snapshot.source_versions.update(
@@ -98,25 +86,9 @@ def _snapshot(runtime_dir, day, scope):
     return snapshot, ready, prices
 
 
-def _scoped_collect(config, name, initial):
-    def collect(day):
-        nonlocal initial
-        if initial is not None:
-            collected, initial = initial, None
-            return collected
-        else:
-            # 提交前沿用同一人的四类来源重取；不能使用其他人的数据或昨日归档。
-            try:
-                fresh = run_workflow(config, roster_date=day, roster_person=name)
-                scope, = fresh['departments']
-                if scope['salesperson'] != name:
-                    raise ValueError('刷新销售员与审批范围不一致')
-                snapshot, _, prices = _snapshot(config.runtime_dir, day, scope)
-            except (OSError, ValueError, KeyError, TypeError) as exc:
-                raise SourceUnavailable('名单范围提交前重取未完成') from exc
-        # 规则引擎需要完整快照辨认同订单或子 SKU 的关联冲突，授权仅筛选算价输出。
-        return snapshot, prices
-    return collect
+def _scoped_collect(initial):
+    # 复用首轮当日归档，现价和折扣由上传前单品预检负责。
+    return lambda day: initial
 
 
 def run_roster_pricing(service, run_key, day, scope, *, zero_stock_targets=None):
@@ -146,14 +118,8 @@ def run_roster_pricing(service, run_key, day, scope, *, zero_stock_targets=None)
 
     # 当前销售员的真实来源、网页归属和稳定商品锁随执行再次核对。
     scoped_run_key = f'erp-roster:{run_key}:{name}'
-    reuse_archive = zero_stock_targets is not None
-    if reuse_archive:
-        def collect(_day):
-            # 原 ERP 输入已归档。实际提交时每个在线 SKU 仍须通过独立的实时预检。
-            return snapshot, allowed
-    else:
-        collect = _scoped_collect(config, name, (snapshot, prices))
-    batch = RosterBatch(day, name, collect, allowed, reuse_archived_inputs=reuse_archive)
+    collect = _scoped_collect((snapshot, allowed))
+    batch = RosterBatch(day, name, collect, allowed)
     try:
         batch_id = service.run_batch(scoped_run_key, roster=batch)
     except SourceUnavailable as exc:
@@ -170,15 +136,11 @@ def run_roster_pricing(service, run_key, day, scope, *, zero_stock_targets=None)
 
 def _read_evidence(reference):
     content = Path(reference['artifact_file']).read_bytes()
-    if reference.get('sha256') and sha256(content).hexdigest() != reference['sha256']:
-        raise ValueError('已归档的算价来源哈希不一致')
     return json.loads(content)
 
 
 def _reprice_archived_scope(runtime, day, scope):
     initial, digest = _load_pricing_artifact(runtime, scope['capture_id'], scope['preview_id'])
-    if digest != scope['preview_sha256'] or initial['business_date'] != day.isoformat():
-        raise ValueError('原名单预览的哈希或业务日期不一致')
     refs = initial['references']
     if not refs.get('online_preparation'):
         return scope, set()

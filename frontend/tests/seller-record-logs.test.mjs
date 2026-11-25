@@ -27,23 +27,24 @@ const item = () => ({
 })
 const render = async row => renderToString(createSSRApp(Component, { seller: groupBySeller([row])[0] }))
 
-test('the initial marketing price shows its saved trial profit including zero', async () => {
+test('the loss price omits trial profit hints including zero', async () => {
   const row = item()
   const loss = row.decision.stages.rows.find(stage => stage.key === 'loss')
   assert.doesNotMatch(await render(row), /按初步补亏后的营销价试算/)
   loss.trial_profit = '-1.0400'
   loss.trial_margin_percent = '-9.29'
-  assert.match(await render(row), /按初步补亏后的营销价试算，每件利润 -1\.04 PHP，利润率 -9\.29%/)
+  assert.doesNotMatch(await render(row), /按初步补亏后的营销价试算|每件利润|利润率/)
   loss.trial_profit = '0.0000'
   loss.trial_margin_percent = '0.00'
-  assert.match(await render(row), /每件利润 0 PHP，利润率 0%/)
+  assert.doesNotMatch(await render(row), /按初步补亏后的营销价试算|每件利润|利润率/)
 })
 
-test('dialog title shows evidence dates without total or hit counts, while filter buttons show full seller counts including zero', async () => {
+test('dialog title omits the date and counts, while filter buttons show full seller counts including zero', async () => {
   const { readFile } = await import('node:fs/promises')
   const page = await readFile(new URL('../src/RecordsPage.vue', import.meta.url), 'utf8')
   const source = await readFile(new URL('../src/SellerRecordLogs.vue', import.meta.url), 'utf8')
-  assert.match(page, /#header="\{ titleId, titleClass \}"[\s\S]*<h2 :id="titleId"[^>]*>\{\{ logTitle \}\}<\/h2>\s*<span class="records-log-date" :title="logDateTitle">\{\{ logDate \}\}<\/span>/)
+  assert.match(page, /#header="\{ titleId, titleClass \}"[\s\S]*<h2 :id="titleId"[^>]*>\{\{ logTitle \}\}<\/h2>\s*<button[^>]*records-log-download/)
+  assert.doesNotMatch(page, /records-log-date|logDateTitle|\{\{ logDate \}\}/)
   assert.doesNotMatch(page + source, /logHitCount|logTotal|records-log-count|hit-count|hitCount|defineEmits/)
   assert.match(source, /seller\.items\.length : seller\.counts\[state\]/)
   const seller = groupBySeller([item(), { ...item(), id: 'second', status: '待处理' }, { ...item(), id: 'third', status: '已核验', execution:{state:'verified'} }])[0]
@@ -102,7 +103,7 @@ test('upload is a peer price field and all execution statuses occupy a separate 
     if (status === '已核验') row.execution.state = 'verified'
     const original = structuredClone(row)
     const html = await render(row)
-    assert.match(html, new RegExp(`<div class="records-stage-field" data-field="uploaded-price"><dt>上传含税价</dt><dd><strong>18\\.24 PHP</strong></dd></div><div class="records-stage-field" data-field="updated-time"><dt>最近更新</dt><dd class="records-log-time"><span>—</span></dd></div></dl>(?:<!--.*?-->)*<div class="records-log-state" aria-label="执行状态"><span class="${tone} records-status"><i></i>${label}</span><p class="records-log-reason">${status === '已核验' ? '实际有效价已回读核验成功' : '原因未记录'}</p></div>`))
+    assert.match(html, new RegExp(`<div class="records-stage-field" data-field="uploaded-price"><dt>上传含税价</dt><dd><strong>18\\.24 PHP</strong></dd></div><div class="records-stage-field" data-field="updated-time"><dt>最近更新</dt><dd class="records-log-time"><span>—</span></dd></div></dl>(?:<!--.*?-->)*<div class="records-log-state" aria-label="执行状态"><span class="${tone} records-status"><i></i>${label}</span><p class="records-log-reason">${status === '已核验' ? '提价上传完成' : status === '不调价' ? '原因未记录' : '处理异常需要人工提价'}</p></div>`))
     assert.equal((html.match(/class="records-log-state"/g) ?? []).length, 1)
     assert.doesNotMatch(html, /<dl[^>]*>(?:(?!<\/dl>).)*records-log-state/s)
     assert.doesNotMatch(html, /<header class="records-log-heading">(?:(?!<\/header>).)*records-log-state/s)
@@ -147,6 +148,17 @@ test('only negative recorded margin and recorded original stage price are red', 
   assert.match(await render(row), /<dt>原营销价<\/dt><dd><strong class="">未记录/)
 })
 
+test('不调价且没有阶段证据时显示统一标签但不虚构阶段金额', async () => {
+  const row = item()
+  row.status = '不调价'
+  row.decision.stages = null
+  const html = await render(row)
+  for (const label of ['原营销价', '需补亏损', '利润校验变动', '上传含税价']) assert.ok(html.includes(label))
+  assert.doesNotMatch(html, /调整前实际价|价格变动|目标实际价/)
+  assert.match(html, /<dt>需补亏损<\/dt><dd><strong>未记录<\/strong>/)
+  assert.match(html, /<dt>利润校验变动<\/dt><dd><strong>未记录<\/strong>/)
+})
+
 test('records without stage evidence keep their existing saved two-price display', async () => {
   const row = item()
   row.decision.stages = null
@@ -185,12 +197,16 @@ test('item ID stays a single text-only copy target while SKU keeps its icon and 
   row.key.item_id = '1731919633741415702'
   const html = await render(row)
   const buttons = [...html.matchAll(/<button[^>]*class="records-id-copy-button"[\s\S]*?<\/button>/g)].map(match => match[0])
-  assert.equal(buttons.length, 2)
+  assert.equal(buttons.length, 3)
   assert.match(buttons[0], /复制SKU：SYNTHETIC-001[\s\S]*<svg/)
   assert.match(buttons[1], /复制商品ID：1731919633741415702/)
   assert.match(buttons[1], /title="点击复制商品ID"/)
   assert.match(buttons[1], /<span>商品ID：1731919633741415702<\/span>/)
   assert.doesNotMatch(buttons[1], /<svg|<br|复制<\/span>/)
+  assert.match(buttons[2], /复制产品ID：PARENT-999/)
+  assert.match(buttons[2], /<span>产品ID：PARENT-999<\/span>/)
+  assert.doesNotMatch(buttons[2], /<svg|<br/)
+  assert.ok(html.indexOf("<span>商品ID：") < html.indexOf("<span>产品ID："))
   const { readFile } = await import('node:fs/promises')
   const css = await readFile(new URL('../src/records.css', import.meta.url), 'utf8')
   const source = await readFile(new URL('../src/RecordIdCopy.vue', import.meta.url), 'utf8')
@@ -212,20 +228,22 @@ test('identity copy buttons expose distinct accessible names and missing IDs rem
   const source = await readFile(new URL('../src/RecordIdCopy.vue', import.meta.url), 'utf8')
   const css = await readFile(new URL('../src/records.css', import.meta.url), 'utf8')
   assert.match(source, /import \{ ElMessage \} from 'element-plus'/)
-  assert.match(source, /ElMessage\(await copyRecordId\(props\.value, props\.label, navigator\.clipboard\)\)/)
+  assert.match(source, /ElMessage\(await copyRecordId\(props\.value, props\.label, document\)\)/)
   assert.match(source, /finally\s*\{\s*copying\.value = false/)
   assert.doesNotMatch(source, /feedback|setTimeout|setInterval|aria-live/)
   assert.doesNotMatch(css, /records-id-copy-feedback/)
   const row = item()
   row.key.sku = ''
   row.key.item_id = ''
+  row.key.product_id = ''
   const missing = await render(row)
   assert.match(missing, /SKU 未记录/)
   assert.match(missing, /商品ID：未记录/)
+  assert.match(missing, /产品ID：未记录/)
   assert.doesNotMatch(missing, /records-id-copy-button/)
 })
 
-test('saved reasons appear below the badge for pending and skipped records without using earlier attempts', async () => {
+test('pending badges show manual pricing instruction while skipped records retain saved reasons', async () => {
   for (const status of ['待处理', '待核验', '不调价']) {
     const row = item()
     row.status = status
@@ -233,7 +251,11 @@ test('saved reasons appear below the badge for pending and skipped records witho
     row.process = [{ reason: '旧尝试原因，不应替代当前原因' }]
     const original = structuredClone(row)
     const html = await render(row)
-    assert.match(html, /<p class="records-log-reason">近72小时内有调价记录\n人工保护；来源待核实<\/p>/)
+    if (status === '不调价') assert.match(html, /<p class="records-log-reason">近72小时内有调价记录\n人工保护；来源待核实<\/p>/)
+    else {
+      assert.match(html, /<p class="records-log-reason">处理异常需要人工提价<\/p>/)
+      assert.doesNotMatch(html, /近72小时内有调价记录|人工保护；来源待核实/)
+    }
     assert.doesNotMatch(html, /旧尝试原因|实际有效价已回读核验成功/)
     assert.deepEqual(row, original)
   }
@@ -245,7 +267,8 @@ test('missing saved reasons are explicit and never inferred from other evidence'
       const row = item()
       Object.assign(row, { status, reason, seven_days_sales: 22 })
       const html = await render(row)
-      assert.match(html, /<p class="records-log-reason">原因未记录<\/p>/)
+      if (status === '不调价') assert.match(html, /<p class="records-log-reason">原因未记录<\/p>/)
+      else assert.match(html, /<p class="records-log-reason">处理异常需要人工提价<\/p>/)
       assert.doesNotMatch(html, /三天调价保护|7天销量|实际有效价已回读核验成功/)
     }
   }
@@ -257,7 +280,7 @@ test('verified records use the requested fixed explanation and historical reason
   row.execution.state = 'verified'
   row.reason = '保存的旧执行文案'
   const html = await render(row)
-  assert.match(html, /<p class="records-log-reason">实际有效价已回读核验成功<\/p>/)
+  assert.match(html, /<p class="records-log-reason">提价上传完成<\/p>/)
   assert.doesNotMatch(html, /保存的旧执行文案/)
   assert.equal(row.reason, '保存的旧执行文案')
 })
@@ -273,6 +296,35 @@ test('saved historical threshold reasons are displayed as text, escaped, and nev
   const css = await readFile(new URL('../src/records.css', import.meta.url), 'utf8')
   assert.match(css, /\.records-log-state \.records-log-reason\{[^}]*white-space:pre-wrap;overflow-wrap:anywhere/)
   assert.match(css, /grid-template-columns:minmax\(min-content,1fr\) minmax\(0,\.8fr\)/)
+})
+
+test('skipped records without stages show required labels without inventing loss or profit from two prices', async () => {
+  const row = item()
+  row.status = '不调价'
+  row.decision.stages = null
+  row.decision.price_change = '99999'
+  row.execution = null
+  const saved = structuredClone(row)
+  const html = await render(row)
+  for (const label of ['原营销价', '需补亏损', '利润校验变动', '上传含税价']) assert.ok(html.includes(`<dt>${label}</dt>`))
+  assert.match(html, /<dt>原营销价<\/dt><dd><strong[^>]*>10 PHP<\/strong>/)
+  assert.match(html, /<dt>需补亏损<\/dt><dd><strong>未记录<\/strong>/)
+  assert.match(html, /<dt>利润校验变动<\/dt><dd><strong>未记录<\/strong>/)
+  assert.match(html, /<dt>上传含税价<\/dt><dd><strong>未记录<\/strong>/)
+  assert.doesNotMatch(html, /调整前实际价|目标实际价|价格变动|99999|14\.57 PHP|18\.23 PHP/)
+  assert.deepEqual(row, saved)
+})
+
+test('upload acceptance uses priced badge without rewriting original verification evidence', async () => {
+  const row = item()
+  row.execution = { state: 'accepted', uploaded_price: '18.236', actual_price: null }
+  row.reason = '上传已受理，等待实际价格回读'
+  const saved = structuredClone(row)
+  const html = await render(row)
+  assert.match(html, /class="verified records-status"><i><\/i>已提价/)
+  assert.match(html, /<p class="records-log-reason">提价上传完成<\/p>/)
+  assert.doesNotMatch(html, /实际有效价已回读核验成功/)
+  assert.deepEqual(row, saved)
 })
 
 test('optional reference evidence and price-cap explanation remain accessible', async () => {

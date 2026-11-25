@@ -3,7 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { Download, Search } from '@element-plus/icons-vue'
 import { timeLabel } from './api'
 import { connectRecords } from './records-live'
-import { groupBySeller, recordTone, countRecordStatuses, recordDisplayStates, recordDepartments, recordDateLabel, recordDateValue, type RecordData, type SellerGroup } from './records-model'
+import { groupBySeller, recordTone, countRecordStatuses, recordDisplayStates, recordDepartments, type RecordData, type SellerGroup } from './records-model'
 import { formatDecimal } from './decimal-display'
 import { downloadSellerExcel } from './records-download'
 import SellerRecordLogs from './SellerRecordLogs.vue'
@@ -32,9 +32,6 @@ const visibleGroups = computed(() => {
   return query ? groups.value.filter(group => group.name.toLocaleLowerCase().includes(query)) : groups.value
 })
 const activeSeller = computed(() => groups.value.find(group => group.id === selectedSeller.value))
-// 标题只显示最近日期；完整日期性质与范围放在悬浮说明，避免页面出现“核验/更新”前缀。
-const logDate = computed(() => recordDateValue(activeSeller.value?.items ?? []))
-const logDateTitle = computed(() => recordDateLabel(activeSeller.value?.items ?? []))
 const departmentName = computed(() => departments.find(entry => entry.id === department.value)?.name ?? '部门提价记录')
 const sellerCount = computed(() => groups.value.filter(group => group.assigned).length)
 const states = recordDisplayStates
@@ -173,10 +170,8 @@ onUnmounted(() => {
 
     <el-dialog v-model="dialogOpen" class="records-dialog" modal-class="records-overlay" :title="logTitle" width="min(1120px, calc(100vw - 32px))" align-center append-to-body destroy-on-close @closed="restoreFocus">
       <template #header="{ titleId, titleClass }">
-        <!-- 只显示一个最近日期，日期性质与完整范围放在悬浮说明，不挤占标题行。 -->
         <div class="records-log-title">
           <h2 :id="titleId" :class="titleClass">{{ logTitle }}</h2>
-          <span class="records-log-date" :title="logDateTitle">{{ logDate }}</span>
           <button v-if="activeSeller" type="button" class="records-download records-log-download" title="下载Excel" aria-label="下载Excel" @click.stop="downloadSeller(activeSeller)"><Download aria-hidden="true" /></button>
         </div>
         <p v-if="downloadError" class="records-error" role="alert">{{ downloadError }}</p>

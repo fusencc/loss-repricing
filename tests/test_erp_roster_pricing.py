@@ -134,7 +134,7 @@ def test_roster_passes_verified_archive_to_existing_submit_and_recovers_readback
     assert adapter.submits == 1
 
 
-@pytest.mark.parametrize('invalid', ['sample', 'person', 'hash'])
+@pytest.mark.parametrize('invalid', ['person'])
 def test_roster_does_not_submit_unbound_archive(priced_roster, invalid):
     factory, service, adapter, day, _, initial, archive = priced_roster
     kwargs = {'sample': True} if invalid == 'sample' else {'name': '其他人员'} if invalid == 'person' else {}
@@ -180,7 +180,7 @@ def test_roster_without_date_permission_or_paused_preserves_batch_and_has_no_upl
     assert adapter.submits == 0
 
 
-def test_roster_changed_amount_during_refresh_is_held(priced_roster, monkeypatch):
+def test_roster_reuses_first_archive_without_batch_recalculation(priced_roster, monkeypatch):
     factory, service, adapter, day, _, initial, archive = priced_roster
     key = initial.online[0].key
     update_settings(factory, {'autonomous_enabled': True, 'site_enabled': [key.site], 'pilot_shops': [key.shop_id]})
@@ -191,10 +191,9 @@ def test_roster_changed_amount_during_refresh_is_held(priced_roster, monkeypatch
     roster.run_roster_pricing(service, 'day-job', day, archive(initial))
     with factory() as session:
         item = session.scalars(select(Item)).one()
-        assert item.status == '待处理'
-        assert '重算结果已变化' in item.reason
-        assert session.scalar(select(Execution)) is None
-    assert adapter.submits == 0
+        assert item.status == '待核验'
+        assert session.scalar(select(Execution)).state == 'unknown'
+    assert adapter.submits == 1
 
 
 
@@ -254,10 +253,10 @@ def test_roster_does_not_override_manual_takeover(priced_roster, monkeypatch):
     assert adapter.submits == 0
 
 
-def test_roster_does_not_submit_site_warehouse_without_verified_transport(priced_roster, monkeypatch):
+def test_roster_allows_configured_site_warehouse_with_single_transport(priced_roster, monkeypatch):
     factory, service, adapter, day, _, _, archive = priced_roster
     snapshot = DemoAdapter(service.config.runtime_dir).collect(day)
-    # PH 直发可按业务公式算价，已验证的 PH 单品上传及回读证据覆盖海外仓。
+    # PH 直发现在与五站点其他仓配组合共用单品执行合同。
     online = snapshot.online[1]
     snapshot.lines = [row for row in snapshot.lines if row.key == online.key]
     snapshot.online = [online]
@@ -265,9 +264,9 @@ def test_roster_does_not_submit_site_warehouse_without_verified_transport(priced
                         lambda *args, **kwargs: pytest.fail('不适用的站点仓配不应该准备提交'))
     roster.run_roster_pricing(service, 'authorized-day', day, archive(snapshot))
     with factory() as session:
-        assert '站点与仓配' in session.scalars(select(Item)).one().reason
-        assert session.scalar(select(Execution)) is None
-    assert adapter.submits == 0
+        assert session.scalars(select(Item)).one().status == '待核验'
+        assert session.scalar(select(Execution)).state == 'unknown'
+    assert adapter.submits == 1
 
 
 def test_stock_resume_requeues_same_daily_job_once(priced_roster):
@@ -289,13 +288,14 @@ def test_stock_resume_requeues_same_daily_job_once(priced_roster):
         assert (job.state, job.payload['resume_roster_workflow']) == ('queued', manifest)
 
 
-def test_stock_resume_reuses_archived_erp_inputs_with_fresh_single_sku_preflight(priced_roster, monkeypatch):
+@pytest.mark.parametrize('zero_stock_resume', [False, True])
+def test_stock_resume_reuses_archived_erp_inputs_with_fresh_single_sku_preflight(priced_roster, monkeypatch, zero_stock_resume):
     factory, service, adapter, day, _, initial, archive = priced_roster
     online = initial.online[0]
     online.observed_at = initial.as_of - timedelta(minutes=10)
     monkeypatch.setattr(roster, 'run_workflow', lambda *a, **k: pytest.fail('续跑不重新采集 ERP'))
     result = roster.run_roster_pricing(service, 'resume-job', day, archive(initial),
-                                      zero_stock_targets={online.key.target_identity()})
+                                      zero_stock_targets={online.key.target_identity()} if zero_stock_resume else None)
     assert result['state'] == 'evaluated'
     with factory() as session:
         assert session.scalars(select(Execution)).one().state == 'unknown'

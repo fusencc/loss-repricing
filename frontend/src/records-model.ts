@@ -142,10 +142,10 @@ export function recordDateValue(items: RecordItem[]): string {
 export function recordStatusLabel(item: RecordItem): RecordDisplayState {
   // 2026-11-25 用户确认：上传完成即计为已提价，展示口径不改写底层回读证据。
   const state = item.execution?.state
+  // 后续明确失败、回读不一致或未知优先于旧受理回执；只改变页面分类，不宣告实际生效。
+  if (state === 'mismatch' || state === 'failed' || state === 'unknown' || state === 'submitting') return '待处理'
   if (state === 'accepted' || state === 'verified' || item.execution?.submit_status === 'accepted') return '已提价'
-  // 待核验并入待处理展示；具体处于受理、提交中还是结果未知，由 recordStateReason 说明。
-  if (state === 'mismatch' || state === 'failed') return '待处理'
-  if (state === 'accepted' || state === 'unknown' || state === 'submitting' || item.status === '待核验') return '待处理'
+  if (item.status === '待核验') return '待处理'
   return item.status === '不调价' ? '不调价' : '待处理'
 }
 
@@ -155,26 +155,12 @@ export function countRecordStatuses(items: RecordItem[]): Record<RecordDisplaySt
   return counts
 }
 
-// 类别只使用本条持久执行阶段及回执类型；原始原因完整保留，查询失败未持久化时不能猜测。
+// 销售人员只需看到明确的下一步；待处理说明统一，不改写原始原因、执行状态或回执证据。
 export function recordStateReason(item: RecordItem): string {
-  if (recordStatusLabel(item) === '已提价') return '提价上传完成'
-  const reason = typeof item.reason === 'string' && item.reason.trim() ? item.reason : '原因未记录'
-  if (item.status !== '待处理' && item.status !== '待核验') return reason
-  const execution = item.execution
-  let category = ''
-  if (execution?.state === 'accepted') category = '上传已受理，待回读核验'
-  else if (execution?.state === 'unknown') category = '提交结果未知，仅核验、不自动重传'
-  else if (execution?.state === 'submitting') category = '提交中或结果未确认，仅核验、不自动重传'
-  else if (execution?.state === 'mismatch') category = '回读核验未通过'
-  else if (execution?.state === 'failed' && execution.row_status === 'rejected') category = '逐行处理失败'
-  else if (execution?.state === 'failed' && execution.submit_status === 'rejected') category = '提交被拒绝'
-  else if (execution?.state === 'failed' && execution.submit_status === 'not_submitted') category = '未提交'
-  else if (!execution && item.phase === 'proposed') category = '待提交'
-  // 历史代码在空回执消息时统一写入受理文案；其他状态不能以此证明受理，仍保留原文供核对。
-  if (execution && execution.state !== 'accepted' && reason === '上传已受理，等待实际价格回读') {
-    return `${category || '执行结果未明确'}；原记录说明（可能为默认文案）：${reason}`
-  }
-  return category && reason !== category ? `${category}；${reason}` : reason
+  const status = recordStatusLabel(item)
+  if (status === '待处理') return '处理异常需要人工提价'
+  if (status === '已提价') return '提价上传完成'
+  return typeof item.reason === 'string' && item.reason.trim() ? item.reason : '原因未记录'
 }
 
 // 价格变动展示：后端已给出 target_actual − current_actual 的十进制文本；这里只决定符号和空值文案。

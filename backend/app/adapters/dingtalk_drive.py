@@ -72,16 +72,26 @@ def find_drive_workbook(config, folder, parent, name):
 def publish_drive_workbook(config, filename, folder, parent):
     space = config.ding_drive_space_id
     receipt = filename.with_suffix('.receipt.json')
+    raw = filename.read_bytes()
+    digest = sha256(raw).hexdigest()
+    record = None
     if receipt.exists():
         record = json.loads(receipt.read_text(encoding='utf-8'))
         if record['folder_id'] != folder:
             raise ValueError('现有上传回执属于其他目录')
-        return record
-
-    raw = filename.read_bytes()
     intent = filename.with_suffix('.publish-intent.json')
     if intent.exists():
-        raise RuntimeError('上次钉盘提交结果待核验，禁止自动重传')
+        pending = json.loads(intent.read_text(encoding='utf-8'))
+        if record and pending['folder_id'] == folder and pending['sha256'] == record.get('sha256'):
+            # 回执已核验落盘但清理意图前退出，不将已确认的归档误判成未知提交。
+            intent.unlink()
+        else:
+            raise RuntimeError('上次钉盘提交结果待核验，禁止自动重传')
+    if record and record.get('sha256') == digest:
+        return record
+    existing = find_drive_workbook(config, folder, parent, filename.name)
+    if existing and (existing['type'] != 'FILE' or (record and existing['nodeId'] != record['node_id'])):
+        raise RuntimeError('同名日志不是本次归档文件')
     with drive_folder(config, folder, parent) as (ding, request, inspect):
         base = f'/v2.0/storage/spaces/files/{folder}'
         info = request('POST', base + '/uploadInfos/query', {
@@ -98,19 +108,22 @@ def publish_drive_workbook(config, filename, folder, parent):
         upload = ding.http.put(url, headers=signature['headers'], content=raw, timeout=120)
         if not upload.is_success:
             raise RuntimeError(f'钉盘文件上传返回 HTTP {upload.status_code}')
-        digest = sha256(raw).hexdigest()
         write_verified(intent, {'folder_id': folder, 'name': filename.name, 'sha256': digest, 'submitted_at': stamp()})
         committed = request('POST', base + '/commit', {
             'uploadKey': info['uploadKey'], 'name': filename.name, 'option': {
-                'size': len(raw), 'conflictStrategy': 'RETURN_ERROR_IF_EXISTS', 'convertToOnlineDoc': False,
+                # 两个已配置目录中各自固定的日期日志随核验结果原位更新；新建仍禁止重名。
+                'size': len(raw), 'conflictStrategy': 'OVERWRITE' if existing else 'RETURN_ERROR_IF_EXISTS',
+                'convertToOnlineDoc': False,
                 'appProperties': [{'name': 'archive_sha256', 'value': digest, 'visibility': 'PRIVATE'}],
             },
         })['dentry']
         row = inspect(committed['id'])
         if (row.get('uuid') != committed['uuid'] or row.get('name') != filename.name or row.get('size') != len(raw)
-                or str(row.get('spaceId')) != space or str(row.get('parentId')) != parent):
+                or str(row.get('spaceId')) != space or str(row.get('parentId')) != parent
+                or (existing and row.get('uuid') != existing['nodeId'])):
             raise RuntimeError('钉盘文件回执与本次发布不一致')
         record = {'node_id': row['uuid'], 'folder_id': folder, 'name': filename.name,
                   'sha256': digest, 'published_at': stamp()}
         write_verified(receipt, record)
+        intent.unlink()
         return record

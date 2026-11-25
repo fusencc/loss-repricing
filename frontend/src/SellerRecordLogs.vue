@@ -54,6 +54,7 @@ const searchInput = ref<HTMLInputElement | null>(null)
             <p>{{ item.shop_name || item.key.shop_id }} / {{ item.key.site }}</p>
             <!-- key.item_id 是规范身份中的具体商品 ID；不拿产品 ID 或主 SKU 补齐，缺失只影响展示。 -->
             <p><RecordIdCopy v-if="item.key.item_id" :value="item.key.item_id" label="商品ID" prefix="商品ID：" :show-icon="false" /><template v-else>商品ID：未记录</template></p>
+            <p><RecordIdCopy v-if="item.key.product_id" :value="item.key.product_id" label="产品ID" prefix="产品ID：" :show-icon="false" /><template v-else>产品ID：未记录</template></p>
           </div>
         </header>
 
@@ -68,12 +69,15 @@ const searchInput = ref<HTMLInputElement | null>(null)
             <div v-for="stage in item.decision.stages.rows" :key="stage.key" :data-stage="stage.key" class="records-stage-field">
               <dt>{{ recordStageLabel(stage) }}</dt>
               <dd><strong :class="{ 'records-value-red': stage.key === 'original' && stage.price != null }">{{ stagePriceLabel(stage, item.decision.stages.currency) }}</strong></dd>
-              <dd v-if="stage.key === 'loss' && stage.trial_profit != null && stage.trial_margin_percent != null">
-                <small>按初步补亏后的营销价试算，每件利润 {{ formatDecimal(stage.trial_profit) }} {{ item.decision.stages.currency ?? '币种未记录' }}，利润率 {{ formatDecimal(stage.trial_margin_percent) }}%</small>
-              </dd>
             </div>
           </template>
-          <!-- 没有三环节证据的历史记录保留原两价和变动，不补造中间环节。 -->
+          <!-- 不调价且没有阶段证据时只显示字段名称，不能把历史两价或差额冒充补亏与利润校验结果。 -->
+          <template v-else-if="item.status === '不调价'">
+            <div class="records-stage-field"><dt>原营销价</dt><dd><strong :class="{ 'records-value-red': item.decision?.current_actual != null }">{{ recordPrice(item.decision?.current_actual, item) }}</strong></dd></div>
+            <div class="records-stage-field"><dt>需补亏损</dt><dd><strong>未记录</strong></dd></div>
+            <div class="records-stage-field"><dt>利润校验变动</dt><dd><strong>未记录</strong></dd></div>
+          </template>
+          <!-- 其他没有三环节证据的记录保留原两价和变动，不补造中间环节。 -->
           <template v-else>
             <div class="records-stage-field"><dt>调整前实际价</dt><dd><strong>{{ recordPrice(item.decision?.current_actual, item) }}</strong></dd></div>
             <div class="records-stage-field records-log-target"><dt>价格变动</dt><dd :class="{ 'records-change-up': isPositiveChange(item) }">{{ changeLabel(item) }}</dd></div>

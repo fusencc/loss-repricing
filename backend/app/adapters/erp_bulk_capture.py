@@ -70,7 +70,7 @@ def _value(value):
     return value
 
 
-def _read_workbook(content, fields):
+def _read_workbook(content, fields, excluded_rows=None):
     """只读来源文件；POI导出dimension可能仅A1，实际数据需顺序扫描XML。
 
     订单号必须原始文本，数值订单号不可修复其可能丢失的精度。空值保留None。
@@ -95,37 +95,50 @@ def _read_workbook(content, fields):
         if len(positions) != len(business_columns):
             raise SourceUnavailable('ERP导出包含重复业务列，无法确认列值')
         records = []
-        for values in iterator:
+        for row_number, values in enumerate(iterator, start=2):
             if all(v is None for v in values):
                 continue
             row = {name: _value(values[i]) if i < len(values) else None for name, i in positions.items()}
             if not isinstance(row.get('订单编号'), str) or not row['订单编号'].strip():
-                raise SourceUnavailable('ERP导出订单编号不是完整文本')
+                # 数值订单号可能丢失精度，不能转换或补造，只排除该行。
+                if excluded_rows is not None:
+                    excluded_rows.append({'row_number': row_number, 'validation_reason': 'invalid_order_id',
+                                          'reason': 'ERP导出订单编号不是完整文本'})
+                continue
             records.append(row)
         return records, len(headers)
     finally:
         book.close()
 
 
-def _workbook(content, fields):
+def _workbook(content, fields, excluded_rows=None):
     try:
-        return _read_workbook(content, fields)
+        return _read_workbook(content, fields, excluded_rows)
     except (BadZipFile, ParseError, InvalidFileException, KeyError, EOFError) as error:
         raise SourceUnavailable('ERP下载文件损坏或XLSX结构无效') from None
 
 
-def _scope(records, bloc, *, expected_status=None, department=None, salesperson=None):
-    if any(not isinstance(r.get('平台'), str) or r['平台'].casefold() != 'tiktok'
-           or (expected_status is not None and r.get('订单状态') != expected_status) or r.get('集团') != bloc for r in records):
-        raise SourceUnavailable('ERP导出范围与TikTok/订单状态/集团筛选不一致')
-    # 禁止发货列表的部门列为空，按明确订单号下载后用财务表「部门」逐行复核。
-    if department is not None and any(
-        not isinstance(row.get('部门'), str) or row['部门'].casefold() != department.casefold()
-        for row in records
-    ):
-        raise SourceUnavailable('ERP导出包含部门缺失或与指定部门不一致的订单')
-    if salesperson is not None and any(row.get('销售员') != salesperson for row in records):
-        raise SourceUnavailable('ERP导出销售员字段缺失或与指定销售员不一致')
+def _scope(records, bloc, *, expected_status=None, department=None, salesperson=None, excluded_rows=None):
+    valid = []
+    for row in records:
+        checks = (
+            ('platform_mismatch', not isinstance(row.get('平台'), str) or row['平台'].casefold() != 'tiktok'),
+            ('status_mismatch', expected_status is not None and row.get('订单状态') != expected_status),
+            ('bloc_mismatch', row.get('集团') != bloc),
+            ('department_mismatch', department is not None and (not isinstance(row.get('部门'), str)
+                                      or row['部门'].casefold() != department.casefold())),
+            ('salesperson_mismatch', salesperson is not None and row.get('销售员') != salesperson),
+        )
+        reason = next((name for name, invalid in checks if invalid), None)
+        if reason:
+            if excluded_rows is not None:
+                excluded_rows.append({'order_id': row['订单编号'], 'validation_reason': reason,
+                                      'reason': 'ERP导出行范围与筛选不一致'})
+        else:
+            valid.append(row)
+    if records and not valid:
+        raise SourceUnavailable('ERP导出全部有效订单的范围与筛选不一致')
+    records[:] = valid
 
 
 @contextmanager
@@ -346,17 +359,12 @@ def _blocked_ids(post, group, *, salesperson=None, evidence_dir=None):
         except (SourceUnavailable, httpx.HTTPError, ValueError, TypeError) as error:
             group.setdefault('failed_pages', []).append(page)
             group['list_error'] = error_evidence(error)
-            if validation_reason:
-                group['list_error']['validation_reason'] = validation_reason
-                group['list_error']['row_number'] = validation_row
-                if isinstance(order, str):
-                    # 仅在受控业务证据中保存定位订单，不写入技术事件或异常文案。
-                    group['list_error']['order_id'] = order
             raise
         finally:
             if evidence:
                 # 本地证据与业务报告/技术日志分开；仅固定字段形状及计数，绝不保存原始响应。
                 write_verified(evidence_dir / f"{group['source']}-page-{page}-excerpt.json", evidence)
+        group.setdefault('excluded_rows', []).extend(invalid_rows)
         start = len(ids)
         ids.extend(verified)
         seen.update(verified)
@@ -365,6 +373,7 @@ def _blocked_ids(post, group, *, salesperson=None, evidence_dir=None):
         group['total'] = total
         group['pages'].append({'page': page, 'total': total, 'rows': len(verified),
                                'raw_rows': len(records), 'duplicate_rows': duplicate_rows,
+                               'excluded_rows': len(invalid_rows),
                                'verified': True, 'start': start, 'end': len(ids)})
         if len(records) < BLOCKED_PAGE_SIZE or page * BLOCKED_PAGE_SIZE >= total:
             # 下游 total 表示本轮实际候选数量；各页原始 total 保留在 pages，
@@ -466,7 +475,7 @@ def capture_erp_bulk(settings, *, source=None, client=None, web_session=None, ma
                        'total':None,'error':None,'failed_pages':[],'files':[],'pages':[],
                        'list_complete':False,'stage':'not_attempted','batches':[],
                        'status_discrepancies':[],'missing_order_ids':[]})
-    result = {'source_version':'erp-web-bulk-four-20261109','collection_policy_version':'observed-pages-20261124','source_kind':'erp_web_backend',
+    result = {'source_version':'erp-web-bulk-four-20261109','collection_policy_version':'observed-orders-20261125','source_kind':'erp_web_backend',
               'sample_only':max_orders is not None,'selection_complete':False,
               'acquisition_mode':'bulk_download','queried_at':now.isoformat(),'groups':groups,
               'details':[],'capture_complete':False,'pricing_ready':False,'stopped_by_rate_limit':False,
@@ -481,9 +490,10 @@ def capture_erp_bulk(settings, *, source=None, client=None, web_session=None, ma
         if group['kind'] == 'loss':
             raw = post(LOSS_EXPORT, group['filters'], binary=True)
             group['files'].append(_save_xlsx(folder, f'{name}-loss-orders.xlsx', raw))
-            losses, count = _workbook(raw, LOSS_FIELDS)
+            excluded = group.setdefault('loss_excluded_rows', [])
+            losses, count = _workbook(raw, LOSS_FIELDS, excluded)
             _scope(losses, settings.erp_capture_bloc, expected_status=STATUS_LABELS[group['status']],
-                   department=department, salesperson=salesperson)
+                   department=department, salesperson=salesperson, excluded_rows=excluded)
             group.update(loss_rows=losses, total=len(losses), loss_column_count=count)
             ids = list(dict.fromkeys(r['订单编号'] for r in losses))
         else:
@@ -532,14 +542,19 @@ def capture_erp_bulk(settings, *, source=None, client=None, web_session=None, ma
                     # 这是原件字节接收完成的观察时间，区别于 ERP 任务状态时间。
                     batch['downloaded_at'] = datetime.now(timezone.utc).isoformat()
                     group['files'].append(_save_xlsx(folder, f"{name}-order-finance-{batch['number']:03d}.xlsx", raw))
-                    orders, count = _workbook(raw, BUSINESS_FIELDS)
-                    _scope(orders, settings.erp_capture_bloc, department=department, salesperson=salesperson)
+                    excluded = batch.setdefault('excluded_rows', [])
+                    orders, count = _workbook(raw, BUSINESS_FIELDS, excluded)
+                    # 未请求订单属于批次身份冲突，即使该行同时范围不符也不能被筛选掩盖。
+                    raw_scope = finance_batch_scope(batch['order_ids'], [row['订单编号'] for row in orders])
+                    if raw_scope['unexpected']:
+                        batch['scope_check'] = raw_scope
+                        raise SourceUnavailable('ERP批量订单导出包含未请求的订单号')
+                    _scope(orders, settings.erp_capture_bloc, department=department, salesperson=salesperson,
+                           excluded_rows=excluded)
                     scope = finance_batch_scope(batch['order_ids'], [row['订单编号'] for row in orders])
                     batch['scope_check'] = scope
                     missing = scope['missing']
                     duplicates = scope['duplicate_rows']
-                    if scope['unexpected']:
-                        raise SourceUnavailable('ERP批量订单导出包含未请求的订单号')
                     group['missing_order_ids'].extend(missing)
                     # 亏损池状态可能滞后于订单主表（本轮已见已完成/作废）；
                     # 保留两个时点的证据而非丢数据，也不把历史池记录当可直接调价。
@@ -666,6 +681,10 @@ def capture_erp_bulk(settings, *, source=None, client=None, web_session=None, ma
     rows = [row for group in groups for row in group['rows']]
     for group in groups:
         group['fetched_rows'] = len(group['rows'])
+        for batch in group['batches']:
+            batch['excluded_row_counts'] = dict(Counter(row['validation_reason'] for row in batch.get('excluded_rows', [])))
+        excluded = group.get('loss_excluded_rows', []) + [row for batch in group['batches'] for row in batch.get('excluded_rows', [])]
+        group['export_excluded_row_counts'] = dict(Counter(row['validation_reason'] for row in excluded))
     result['summary'] = {
         'selected_orders':sum(group['selected_orders'] for group in groups),
         'orders_not_selected':sum(len(group['candidate_order_ids'])-group['selected_orders'] for group in groups),

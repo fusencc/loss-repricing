@@ -38,7 +38,7 @@ def test_history_backfill_deduplicates_full_keys_and_is_idempotent_without_execu
         assert items[0].key == key
         assert items[0].decision['ready'] is False
         assert items[0].decision['trace']['recent_price_filter']['count'] == 2
-        assert '近72小时' in items[0].reason
+        assert items[0].reason == '近三天存在2条调价日志'
         assert session.scalar(select(func.count()).select_from(Batch)) == 1
         saved_batch = session.get(Batch, first)
         assert set(saved_batch.snapshot) == {'source_versions', 'erp_roster_filter_log'}
@@ -77,6 +77,42 @@ def test_filter_records_require_original_archive_and_reject_changed_evidence(pri
     with factory() as session:
         assert session.scalar(select(func.count()).select_from(Batch)) == 0
 
+
+
+@pytest.mark.parametrize('change, expected', [
+    ({}, '2026-11-25T01:02:03+00:00'),
+    ({'department': '其他部门'}, None),
+    ({'salesperson': {'name': '其他销售员'}}, None),
+    ({'capture_id': 'other'}, None),
+    ({'synthetic': True}, None),
+    ({'sample_only': True}, None),
+    ({'queried_at': None}, None),
+    ({'queried_at': '2026-11-25T01:02:03'}, None),
+    ({'queried_at': 'invalid'}, None),
+    ({'missing_file': True}, None),
+])
+def test_protected_record_time_uses_only_bound_real_capture(priced_roster, change, expected):
+    from app.services.roster_filter_records import save_roster_filter_records
+    factory, service, adapter, day, _, initial, archive = priced_roster
+    scope = scope_archive(service, archive(initial), [
+        {'key': initial.online[0].key.model_dump(mode='json'), 'count': 1, 'status': 'history_protected'}])
+    batch_id = save_roster_filter_records(factory, service.config.runtime_dir, 'time-job', day, scope)
+    path = service.config.runtime_dir / 'source-captures' / (scope['capture_id'] + '.json')
+    capture = json.loads(path.read_text())
+    capture['queried_at'] = '2026-11-25T01:02:03+00:00'
+    capture.update(change)
+    if change.get('missing_file'):
+        path.unlink()
+    else:
+        path.write_text(json.dumps(capture))
+    with factory() as session:
+        before = session.get(Batch, batch_id).snapshot
+        view = department_records(session, 'department:' + scope['department'], mode='live',
+                                  runtime_dir=service.config.runtime_dir)
+        assert view['items'][0]['display_time'] == expected
+        assert view['items'][0]['execution'] is None
+        assert session.get(Batch, batch_id).snapshot == before
+    assert adapter.submits == 0
 
 
 def test_same_sku_in_different_warehouses_keeps_both_filter_records(priced_roster):

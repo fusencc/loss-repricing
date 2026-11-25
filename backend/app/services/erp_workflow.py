@@ -137,7 +137,10 @@ def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, prog
                 on_roster_scope(departments[-1])
             if progress:
                 progress(f"{department} 处理结果：{result['status']}。")
-    if all(department['status'] == 'completed' for department in departments):
+            if result.get('stopped_by_rate_limit'):
+                # 账号级 500003 影响整次任务，不继续请求其他部门或销售员。
+                break
+    if len(departments) == len(scopes) and all(department['status'] == 'completed' for department in departments):
         summary['status'] = 'completed'
     elif summary['ready_prices'] or any(department['status'] == 'completed' for department in departments):
         summary['status'] = 'needs_attention'
@@ -244,18 +247,17 @@ def _evaluate_capture(settings, capture_id, *, replay, evidence=None, exports=No
                 sales_ref['sha256'] = sha256(content).hexdigest()
                 sales_status = 'saved' if sales['acquisition_complete'] else 'partial'
             order_preparation = prepare_order_losses(capture, native, sales, order_headers=headers)
-            # 订单缺项逐单保留；四类公共名单完整后，只对保留下来的目标查询官方历史。
+            # 仅预取已定位的亏损目标；来源覆盖与缺项保留在最终预览中，
+            # 预取成功本身不构成算价或提交授权。
             prepared = prepare_pricing(capture, order_preparation=order_preparation).report
-            if len(prepared['evaluation_complete_sources']) == 4:
-                refs = prepared['references']
-                for row_id in refs['retained_row_ids']:
-                    row = refs['lines'][row_id]
-                    if Decimal(row['loss_input']['amount']) >= 0:
-                        continue
-                    target = {'erp_shop':row['erp_shop'],'shop_id':row['target']['shop_id'],
-                        'erp_sku':order_preparation['proofs'][row['order_id']]['erp_sku'],'main_sku':row['main_sku']}
-                    pricing_targets.append({'erp_shop':row['erp_shop'],'erp_sku':target['erp_sku'],
-                        'main_sku':row['main_sku'],'key':row['target']})
+            refs = prepared['references']
+            for row_id in refs['retained_row_ids']:
+                row = refs['lines'][row_id]
+                if Decimal(row['loss_input']['amount']) >= 0:
+                    continue
+                pricing_targets.append({'erp_shop':row['erp_shop'],
+                    'erp_sku':order_preparation['proofs'][row['order_id']]['erp_sku'],
+                    'main_sku':row['main_sku'],'key':row['target']})
             official_history, pricing_targets, history_filter = filter_candidate_history(
                 settings, pricing_targets, client=client, auth=auth)
             platform_targets = [{'erp_shop':t['erp_shop'],'product_id':t['key']['product_id'],

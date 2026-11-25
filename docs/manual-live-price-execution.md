@@ -37,7 +37,7 @@ POST `/Api/api-tiktok-sales/operationLog/priceUpload`，multipart字段`file`。
 
 查询`operationLog/findByPage`，按店铺/产品/当日分页；必须发现提交前集合之外的唯一
 同商品、同SKU、同含税价调价格任务。前端字段type=2为调价格；status=1执行中、2成功、
-3失败、4待审核、5审核未通过、6暂停、7待执行。非成功状态保留待核验及目标锁。
+3失败、4待审核、5审核未通过、6暂停、7待执行。状态3/5/6返回 rejected，服务层保存失败证据后释放目标锁；1/4/7及未确认的状态继续核验且不重传。
 通过`getRequestAndResponseById`核对平台code=0、SKU、币种、请求税前金额与日志税前价。
 
 再从当前平台编辑接口及销售变体读取零售价、营销价和折扣。上传目标必须精确等于指定价。

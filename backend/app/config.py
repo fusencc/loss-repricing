@@ -94,7 +94,8 @@ class Settings(BaseSettings):
 
 def get_settings() -> Settings:
     try:
-        return Settings()
+        # 临时关闭真实提价提交；恢复时移除此覆盖并按环境配置启用。
+        return Settings().model_copy(update={"live_submit_enabled": False})
     except ValidationError as exc:
         # 日志组件尚未初始化；Pydantic原始文案可能包含整份配置输入和凭据。
         names = sorted({str(part) for error in exc.errors(include_input=False, include_url=False)

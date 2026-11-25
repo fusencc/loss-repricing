@@ -94,6 +94,7 @@ class CaptureGroup(BaseModel):
     missing_order_ids: list[Identifier] = Field(default_factory=list)
     status_discrepancies: list[dict] = Field(default_factory=list)
     failed_pages: list = Field(default_factory=list)
+    excluded_rows: list[dict] = Field(default_factory=list)
 
     def scope_bloc(self, department=None, salesperson=None):
         kind, expected_status = SOURCES[self.source]
@@ -161,7 +162,7 @@ class CaptureGroup(BaseModel):
         partial_capture = self.stage not in ("complete", "not_attempted") and (
             self.error is not None or bool(self.failed_pages)
         )
-        if partial_capture and self._batches_cover_orders(ids, allow_partial=True):
+        if partial_capture and self.rows and self._batches_cover_orders(ids, allow_partial=True):
             return False, True
         if not list_known or not self._batches_cover_orders(ids):
             return False, False
@@ -600,30 +601,41 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
         source_versions['fx'] = current_fx.version
         evidence_refs.update(fx=current_fx.ref, current_fx=current_fx.model_dump(mode='json'))
 
+    finance_coverage = {
+        source: group.finance_coverage(scope_by_source[source], capture.department, capture.salesperson)
+        for source, group in groups.items()
+    }
+    complete_sources = [
+        source for source in SOURCES
+        if any(finance_coverage.get(source, (False, False)))
+        and scope_matches and valid_observation_window and not capture.sample_only
+    ]
     issues, normalized, references = [], [], {}
-    incomplete_sources, held_targets = set(), set()
+    held_targets = set()
+    shop_ids_by_name = defaultdict(set)
     if live is not None:
-        shop_ids_by_name = defaultdict(set)
         for scope in live.shop_scopes.values():
             shop_ids_by_name[scope.erp_shop].add(scope.shop_id)
-        for order in orders.values():
-            for line in order.lines:
-                if line.mapping is not None:
-                    shop_ids_by_name[line.mapping.erp_shop].add(line.mapping.key.shop_id)
-        # 名称与稳定ID冲突意味着别名归属也不可靠，不能只挂其中一个ID。
-        if any(len(ids)>1 for ids in shop_ids_by_name.values()):
-            incomplete_sources.update(groups)
+    for order in orders.values():
+        for line in order.lines:
+            if line.mapping is not None:
+                shop_ids_by_name[line.mapping.erp_shop].add(line.mapping.key.shop_id)
+    ambiguous_shop_ids = {shop_id for ids in shop_ids_by_name.values() if len(ids) > 1 for shop_id in ids}
     for order_id, source_rows in memberships.items():
+        # 财务范围核对失败的来源不能贡献候选，也不牵连其他已核对来源。
+        source_rows = {source: rows for source, rows in source_rows.items() if source in complete_sources}
+        if not source_rows:
+            continue
         order = orders.get(order_id)
         sources = list(source_rows)
         shops = {row.fields.shop for rows in source_rows.values() for row in rows
                  if row.fields.shop and row.fields.shop.strip()}
         order_problem = _order_problem(source_rows, groups, shops)
         scope = live.shop_scopes.get(order_id) if live is not None else None
-        # 实时采集已给出候选订单号；原生明细未就绪或缺子 SKU 映射时只排除该单，
-        # 不虚构商品键，也不把同店其他订单一起排除。财务缺行或店铺证据矛盾不属此例。
-        order_can_be_skipped = (live is not None and order_problem in (None, 'order_status_conflict')
-                                and (scope is None or shops == {scope.erp_shop}))
+        # 实时财务缺行只排除该订单，不以缺失金额补算，也不挂起同目标可靠订单。
+        if live is not None and order_problem == 'missing_order_finance':
+            _add_issue(issues, order_id, sources, order_problem)
+            continue
 
         details_problem = None
         if order is None:
@@ -637,14 +649,13 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
             if order_problem:
                 _add_issue(issues, order_id, sources, order_problem)
             _add_issue(issues, order_id, sources, details_problem)
-            if not order_can_be_skipped:
-                incomplete_sources.update(sources)
+            if order is not None:
+                held_targets.update(line.mapping.key.target_identity() for line in order.lines if line.mapping)
             continue
 
         if order_problem in {"missing_order_shop", "order_shop_conflict"}:
-            # 店铺缺失或互相矛盾时无法验证补充映射，不能只挂起其中一个商品。
             _add_issue(issues, order_id, sources, order_problem)
-            incomplete_sources.update(sources)
+            held_targets.update(line.mapping.key.target_identity() for line in order.lines if line.mapping)
             continue
 
         for line in order.lines:
@@ -658,12 +669,12 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
                     _add_issue(issues, order_id, sources, order_problem, line)
                 code = "missing_online_mapping" if line.mapping is None else "mapping_shop_mismatch"
                 _add_issue(issues, order_id, sources, code, line)
-                if line.mapping is not None or not order_can_be_skipped:
-                    incomplete_sources.update(sources)
+                if line.mapping is not None:
+                    held_targets.add(line.mapping.key.target_identity())
                 continue
-            if scope is not None and line.mapping.key.shop_id != scope.shop_id:
+            if (line.mapping.key.shop_id in ambiguous_shop_ids
+                    or (scope is not None and line.mapping.key.shop_id != scope.shop_id)):
                 _add_issue(issues, order_id, sources, "mapping_shop_mismatch", line)
-                incomplete_sources.update(sources)
                 held_targets.add(line.mapping.key.target_identity())
                 continue
             if problem := order_problem or _line_problem(line, len(order.lines), sales_conflicts):
@@ -693,12 +704,11 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
         lines.extend(_source_line(capture, order_id, source, row_id, line) for source in sources)
 
     if live_online is not None:
-        retained_keys={line.key.identity() for line in lines}
-        if any(entry.state.key.identity() not in retained_keys for entry in live_online.online):
-            raise ValueError('实时在线准备包含已挂起或不在规范候选范围的在线身份')
         issues.extend(live_online.issues)
 
-    online_entries = live_online.online if live_online is not None else (evidence.online if evidence else [])
+    retained_keys = {line.key.identity() for line in lines}
+    online_entries = ([entry for entry in live_online.online if entry.state.key.identity() in retained_keys]
+                      if live_online is not None else (evidence.online if evidence else []))
     online_states = []
     for entry in online_entries:
         state = entry.state
@@ -712,15 +722,8 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
             continue
         online_states.append(state)
 
-    finance_coverage = {
-        source: group.finance_coverage(scope_by_source[source], capture.department, capture.salesperson)
-        for source, group in groups.items()
-    }
-    complete_sources = [
-        source for source in SOURCES
-        if any(finance_coverage.get(source, (False, False))) and source not in incomplete_sources
-        and scope_matches and valid_observation_window and not capture.sample_only
-    ]
+    observed_scope = live is not None and bool(complete_sources)
+    candidate_scope = 'observed_erp_orders' if observed_scope else 'complete_sources'
     coverage = [
         {
             "source": source, "candidate_orders": len(groups[source].candidate_order_ids) if source in groups else None,
@@ -748,7 +751,7 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
                              for source, (kind, status) in SOURCES.items()
                              if source not in groups or not groups[source].list_complete]
         if unavailable_lists:
-            global_issues.append(f"候选名单未取全：{'、'.join(unavailable_lists)}；不能按零订单算价")
+            global_issues.append(f"候选名单未取全：{'、'.join(unavailable_lists)}；不能将缺失来源视为零订单；已验证订单可独立算价")
         else:
             global_issues.append("四类候选覆盖或明细归属仍有未定位缺口")
     if fx is None:
@@ -767,6 +770,12 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
         "consistent_capture_scope": scope_matches,
         "source_coverage": coverage,
         "evaluation_complete_sources": complete_sources,
+        "candidate_scope": candidate_scope,
+        "collection_warnings": [
+            {"source": source, "reason": group.error or ('名单未取全' if not group.list_complete else '部分名单行已排除'),
+             "failed_pages": group.failed_pages, "excluded_rows": group.excluded_rows}
+            for source, group in groups.items() if group.error or not group.list_complete or group.excluded_rows
+        ],
         "summary": {
             "source_rows": sum(len(group.rows) for group in groups.values()),
             "unique_orders": len(memberships),
@@ -790,7 +799,8 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
         as_of=max([latest_observation, live.observed_at, *(entry.state.observed_at for entry in live_online.online)]) if live_online else (max(latest_observation, live.observed_at) if live else latest_observation), business_date=business_date,
         fx_date=fx.date, fx_rates=fx.source_rates if current_fx is not None else fx.rates,
         fx_rate_unit='cny_per_currency' if current_fx is not None else 'currency_per_cny',
-        complete_sources=complete_sources, lines=lines, online=online_states,
+        # 仅实时来源逐批核对后可使用已观察订单范围；文件回放维持完整来源门禁。
+        complete_sources=complete_sources, candidate_scope=candidate_scope, lines=lines, online=online_states,
         contracts=contracts, source_versions=source_versions,
     )
     return Preparation(report, snapshot, evaluated_at)

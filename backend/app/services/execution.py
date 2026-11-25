@@ -21,7 +21,7 @@ from app.adapters.base import SourceUnavailable, SubmitResult
 from app.adapters.roster_price_upload import ROSTER_UPLOAD_TRACE, VERIFIED_FULFILLMENT, RosterPriceTransport
 from app.adapters.official_price_logs import capture_recent_price_changes, recent_price_log_for
 from app.adapters.normalization import money
-from app.services.store import utcnow, stamp, parse_stamp, BEIJING, settings_value, settings_for_submit, pause_site, enqueue, is_erp_reconciliation, write_decisions
+from app.services.store import utcnow, stamp, parse_stamp, BEIJING, settings_value, settings_for_submit, _lock_runtime_settings, enqueue, is_erp_reconciliation, write_decisions
 from app.services.coordination import automation_gate, authorization_snapshot, lock_authorization
 from app.services.price_control import observe_prices, price_baseline, same_price, record_conflict, lock_control, verified_baseline
 
@@ -214,7 +214,7 @@ class PricingService:
                     original_prices = batch.snapshot["erp_roster_approved_prices"]
                     approved_prices = {
                         key: price for key, price in approved_prices.items()
-                        if price.matches_saved(original_prices.get(key))
+                        if price.as_json() == original_prices.get(key)
                     }
                 batch.status, batch.error = "running", None
             batch_id = batch.id
@@ -228,9 +228,12 @@ class PricingService:
             self._summarize(batch_id)
             return batch_id
 
-        # 对整批做一次紧邻提交的刷新；不会为每个SKU重跑四份ERP全量导出。
-        # 若执行耗时超过5分钟，再刷新，保证关键在线信息足够新。
+        # 名单直接复用当日已归档的算价输入；现价由每条上传前实时预检核对。
+        # 通用入口仍按既有合同批内刷新，不能把名单策略扩展到其他取数合同。
         fresh_at, fresh_decisions, fresh_approved = None, {}, {}
+        if roster is not None:
+            fresh_decisions = {d.key.identity(): d for d in decisions}
+            fresh_approved = approved_prices
         with self.factory() as session:
             item_ids = session.scalars(select(Item.id).where(Item.batch_id == batch_id, Item.phase == "proposed")).all()
         selected_item_id = item_id
@@ -252,12 +255,9 @@ class PricingService:
             if not allowed:
                 self._hold(item_id, reason)
                 continue
-            if fresh_at is None or (utcnow() - fresh_at).total_seconds() >= 300:
+            if roster is None and (fresh_at is None or (utcnow() - fresh_at).total_seconds() >= 300):
                 try:
-                    if roster is not None:
-                        latest, fresh_approved = roster.collect(business_date)
-                    else:
-                        latest = self.adapter.collect(business_date)
+                    latest = self.adapter.collect(business_date)
                     refreshed = self._enrich(latest)
                 except SourceUnavailable:
                     if utcnow().astimezone(BEIJING).date() != business_date:
@@ -269,7 +269,7 @@ class PricingService:
                     self._rollover(run_key, batch_id, selected_item_id, fixed_day=fixed_day)
                     break
                 evaluation_time = utcnow()
-                # 空快照也必须证明四类来源齐备。否则缺行不能解释成候选消失。
+                # 空快照也须至少有一类有效来源，失败来源不能伪装成零订单。
                 if problem := snapshot_problem(refreshed, evaluation_time, business_date):
                     reason = f"提交前刷新失败：{problem[1]}，等待后台重新取数"
                     self._summarize(batch_id, refresh_error=reason)
@@ -286,10 +286,13 @@ class PricingService:
                 after = decision.trace.get("online_rows", [])
                 if (len(before) == 1 and len(after) == 1
                         and not same_price(price_baseline(before[0]), price_baseline(after[0]))):
-                    reason = "提交前检测到外部价格、折扣、仓配或版本变化，原方案已失效，等待负责人核对"
-                    record_conflict(self.factory, original.key, reason)
-                    self._hold(item_id, reason)
-                    continue
+                    reason = "检测到外部价格、折扣、仓配或版本变化，已刷新基线，名单由单品预检核对"
+                    record_conflict(self.factory, original.key, reason, baseline=price_baseline(after[0]))
+                    decision.trace.setdefault('warnings', []).append(reason)
+                    # 基线变化不改变人工接管权限；名单继续使用独立单品预检。
+                    if roster is None:
+                        self._hold(item_id, reason, decision=decision)
+                        continue
             with transaction(self.factory) as session:
                 item = session.get(Item, item_id)
                 item.decision = decision.model_dump(mode="json")
@@ -302,15 +305,10 @@ class PricingService:
                     or fresh_approved.get(decision.key.identity()) != price):
                 self._hold(item_id, "提交前重算结果已变化，原批次价格或商品归属待重新核对")
                 continue
-            if self.adapter.mode == "live" and not (roster is not None and roster.reuse_archived_inputs):
-                online = next((o for o in refreshed.online if o.key.identity() == decision.key.identity()), None)
-                if online is None or (utcnow() - online.observed_at).total_seconds() > 300:
-                    self._hold(item_id, "当前在线价格快照超过5分钟，等待新的有效价数据")
-                    continue
             if self._submit(item_id, decision, business_date, roster=roster) is False:
                 self._rollover(run_key, batch_id, selected_item_id, fixed_day=fixed_day)
                 break
-            # 已完成当前单条后立即核验，发生价格超差能及时阻止本站点后续上传。
+            # 单条完成即核验；超差保留本条锁和证据，其他独立目标继续。
             self.reconcile(item_id=item_id, summarize_batch=False)
         else:
             # 最后一个候选可能在计算/挂起阶段跨日，没有下一轮循环替它触发重新取数。
@@ -464,7 +462,7 @@ class PricingService:
             if (
                     batch.mode != "live" or batch.business_date != roster.day.isoformat()
                     or batch.snapshot.get("source_versions", {}).get("erp_roster_salesperson") != roster.salesperson
-                    or not price.matches_saved(batch.snapshot.get("erp_roster_approved_prices", {}).get(decision.key.identity()))
+                    or price.as_json() != batch.snapshot.get("erp_roster_approved_prices", {}).get(decision.key.identity())
                     or (price.upload_price, price.target_actual) != (decision.upload_price, decision.target_actual)):
                 self._hold(item_id, "确认的名单、店铺或金额与本轮执行不一致")
                 return
@@ -498,14 +496,14 @@ class PricingService:
             now = utcnow()
             crossed_day = business_date is not None and now.astimezone(BEIJING).date() != business_date
             if allowed and not crossed_day and self.adapter.mode == "live":
-                # 归档续跑的实时价格证据由单品预检独立提供，归档本身不冒充现态。
-                if roster is not None and roster.reuse_archived_inputs:
+                # 名单只采用本条实时预检时间，整批归档时间不再充当提交时效。
+                if roster is not None:
                     observation = decision.trace[ROSTER_UPLOAD_TRACE]
                 else:
                     observation = decision.trace["online_rows"][0]
                 observed_at = parse_stamp(observation.get("observed_at"))
-                if observed_at is None or not timedelta(0) <= now - observed_at <= timedelta(minutes=5):
-                    allowed, reason = False, "当前在线价格快照无效或超过5分钟，等待新的有效价数据"
+                if observed_at is None or not timedelta(0) <= now - observed_at <= timedelta(minutes=15):
+                    allowed, reason = False, "当前在线价格快照无效或超过15分钟，等待新的有效价数据"
             if crossed_day or not allowed:
                 if crossed_day:
                     reason = "已跨北京时间业务日，等待重新取数计算"
@@ -600,6 +598,9 @@ class PricingService:
                       item_id=execution.item_id, source=self.adapter.mode, synthetic=getattr(self.adapter, 'synthetic', False))
                 continue  # 稍后继续核验，保持原锁，不把查询失败当作未提交。
             with transaction(self.factory) as session:
+                # SQLite 须在读取前取得写锁，避免并发回查从读事务升级时报忙。
+                if session.get_bind().dialect.name == "sqlite":
+                    _lock_runtime_settings(session)
                 control = lock_control(session, decision.key) if self.config.coordination_required else None
                 # 迁移前同一目标可能已有多个未知执行；锁行串行化全部历史执行的释放。
                 guard = session.scalar(select(VariantGuard).where(
@@ -607,6 +608,9 @@ class PricingService:
                 current = session.get(Execution, execution.id, with_for_update=True)
                 if current.state not in {"submitting", "accepted", "unknown", "mismatch"}:
                     continue
+                # 单条证据落库与商品锁释放串行，超差不触发站点暂停。
+                if session.get_bind().dialect.name != "sqlite":
+                    _lock_runtime_settings(session)
                 last_observed_at = parse_stamp(current.evidence.get("observed_at"))
                 if (result.status == "accepted" and last_observed_at is not None
                         and result.observed_at is not None and result.observed_at.utcoffset() is not None
@@ -656,13 +660,11 @@ class PricingService:
                             verified_baseline(control, decision, result.actual_price)
                     else:
                         current.state, item.phase, item.status = "mismatch", "mismatch", "待核验"
-                        item.reason = ("回读营销价超过同SKU参考上限，已暂停本站点新提交" if not price_limit_passed else
-                            "实际售价与目标超出误差范围，已暂停本站点新提交" if not minimum_margin_required or margin_passed else
-                            "回读在线利润率未达到1%，已暂停本站点新提交")
+                        item.reason = ("回读营销价超过同SKU参考上限，等待核验" if not price_limit_passed else
+                            "实际售价与目标超出误差范围，等待核验" if not minimum_margin_required or margin_passed else
+                            "回读在线利润率未达到1%，等待核验")
                 else:
                     # 未获得新业务证据，不刷新商品与执行的更新时间，也不重复生成批次摘要。
-                    if current.state == "mismatch":
-                        pause_site(session, decision.key.site)
                     continue
                 current.updated_at = item.updated_at = stamp()
                 if decision.trace.get("correction_id"):
@@ -677,9 +679,6 @@ class PricingService:
                     Execution.variant_id == current.variant_id,
                     Execution.state.in_(["submitting", "accepted", "unknown", "mismatch"])
                 ).order_by(Execution.created_at, Execution.id).limit(1))
-                if current.state == "mismatch":
-                    # 超差证据、商品待核验和站点暂停一起提交，避免崩溃留下已超差但仍可新发的站点。
-                    pause_site(session, decision.key.site)
                 if summarize_batch:
                     # 后台回查与批次、通知同事务。批次内逐条回查由运行入口收尾。
                     self._write_batch_summary(session, item.batch_id)

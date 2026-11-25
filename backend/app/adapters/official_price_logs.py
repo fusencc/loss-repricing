@@ -109,7 +109,8 @@ observed_at是本次完成回读的时间，不是平台源更新时间或执行
 """
     if (log.get('shopName')!=shop_name or log.get('productId')!=key.product_id
             or log.get('sellerSkuId')!=key.item_id or log.get('type')!=2
-            or official.get('key')!=key.model_dump(mode='json') or official.get('shop_name')!=shop_name
+            or (official is not None and (official.get('key')!=key.model_dump(mode='json')
+                or official.get('shop_name')!=shop_name))
             or any(current.get(n)!=getattr(key,n) for n in ('shop_id','product_id','item_id'))
             or current.get('currency')!=SITE_CURRENCIES[key.site]
             or money(log['priceIncludeVat'])!=uploaded_price):
@@ -130,7 +131,7 @@ observed_at是本次完成回读的时间，不是平台源更新时间或执行
             'currency_source':'current_platform_and_company_identity', 'source':source, 'source_field':field,
             'observed_at':observed_at.isoformat(), 'time_basis':'local_read_observation'}
     prices['uploaded_tax_inclusive']['submitted_at'] = submitted_at
-    latest = official['latest_success_query']
+    latest = (official or {}).get('latest_success_query', {})
     comparison = 'unavailable'
     if latest.get('status')=='ok':
         comparison = ('matches_log_tax_exclusive' if money(latest['amount'])==money(log['priceNew'])

@@ -5,6 +5,7 @@
 外部没有条件更新合同，本地检查不能替代上游原子写入；live另有独占写入门槛。
 """
 from decimal import Decimal
+import logging
 from sqlalchemy import select, update
 from app.db import transaction
 from app.models import VariantGuard
@@ -58,22 +59,22 @@ def observe_prices(factory, snapshot):
             if not control.baseline or control.handback_pending:
                 control.baseline, control.handback_pending = current, False
             elif control.mode == "auto" and not same_price(control.baseline, current):
-                control.mode, control.reason = "review", "检测到外部价格、折扣、仓配或版本变化，等待负责人核对"
+                # 2026-11-25：外部微变只留告警并刷新基线，不自动永久转人工接管。
+                control.baseline = current
+                control.reason = "检测到外部价格、折扣、仓配或版本变化，已刷新基线"
                 control.changed_by, control.updated_at = "system", stamp()
-                control.version += 1
+                logging.getLogger(__name__).warning('检测到外部价格变化，已刷新基线：%s', ident)
             from app.services.coordination import lock_authorization,authorization_snapshot
             locked=lock_authorization(session,online.key)
             authorizations[ident]=authorization_snapshot(session,online.key,locked)
     return authorizations
 
 
-def record_conflict(factory, key, reason):
+def record_conflict(factory, key, reason, *, baseline):
     with transaction(factory) as session:
         row = lock_control(session, key)
-        if row.mode == "auto":
-            row.mode = "review"
+        row.baseline = baseline
         row.reason, row.changed_by, row.updated_at = reason, "system", stamp()
-        row.version += 1
 
 def verified_baseline(control, decision, actual_price):
     """本程序已核验后更新期望价；不改变接管状态，不伪造外部价格版本。"""

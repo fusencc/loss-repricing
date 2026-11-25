@@ -10,7 +10,7 @@ const copying = ref(false)
 async function copy() {
   copying.value = true
   try {
-    ElMessage(await copyRecordId(props.value, props.label, navigator.clipboard))
+    ElMessage(await copyRecordId(props.value, props.label, document))
   } finally {
     copying.value = false
   }

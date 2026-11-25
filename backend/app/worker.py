@@ -88,8 +88,34 @@ class Worker:
         if (config["schedule_enabled"] or pilot_begins_today) and (local.hour, local.minute) >= (9, 0):
             enqueue(self.factory, "run", {"date": local.date().isoformat()}, f"daily:{local.date().isoformat()}")
         if now - self.last_reconcile >= 60:
+            track_logs = service_config and (service_config.ding_tk_morning_log_folder
+                                            or service_config.ding_cancellation_log_folder)
+            dates = set()
+            if track_logs:
+                from app.models import Batch, Item, Execution
+                with self.factory() as session:
+                    dates.update(row[0] for row in session.query(Batch.business_date).select_from(Execution)
+                        .join(Item, Item.id == Execution.item_id).join(Batch, Batch.id == Item.batch_id)
+                        .filter(Batch.mode == 'live', Execution.state.in_(
+                            ['submitting', 'accepted', 'unknown', 'mismatch'])).all())
+                    if session.query(Batch.id).filter_by(mode='live', business_date=local.date().isoformat()).first():
+                        dates.add(local.date().isoformat())
+                dates.update(marker.parent.name for marker in
+                             (service_config.runtime_dir / 'morning-logs').glob('*/refresh-pending.json'))
+                # 核验前持久标记原业务日；即使本轮转失败或写入断网、进程重启也会补刷。
+                from app.services.erp_capture_store import write_verified
+                for business_date in dates:
+                    marker = service_config.runtime_dir / 'morning-logs' / business_date / 'refresh-pending.json'
+                    try:
+                        write_verified(marker, {'business_date': business_date})
+                    except OSError as exc:
+                        self._failure('worker.morning_log_failed', exc)
             self.service.reconcile()
             self.last_reconcile = now
+            # 后台核验后同时补原业务日归档，跨日成功不能误写到今天的文件。
+            if track_logs:
+                for business_date in sorted(dates):
+                    self._morning_log(service_config, date.fromisoformat(business_date))
         job = claim_job(self.factory, self.owner, now)
         if job is None:
             return
@@ -122,6 +148,7 @@ class Worker:
                     raise ValueError('零库存续跑只适用已授权的同日名单')
                 resume_id = job.payload['resume_roster_workflow']
                 results = resume_roster_stock_pricing(self.service, job.id, roster_date, resume_id)
+                error = self._morning_log(service_config, roster_date)
                 with transaction(self.factory) as session:
                     session.add(Audit(id=str(uuid4()), action='roster.zero_stock_resumed', actor='worker',
                                       detail={'job_id': job.id, 'workflow_id': resume_id, 'sellers': results},
@@ -159,7 +186,7 @@ class Worker:
                     # 消息入队失败不影响结果存档，也不能因此重新采集。
                     error_id = event('worker.roster_notice_enqueue_failed', exception=exc)
                     error = f"固定名单钉钉通知入队失败，排查编号：{error_id}"
-                log_error = self._morning_log(config, roster_date, capture=capture)
+                log_error = self._morning_log(config, roster_date)
                 error = "；".join(filter(None, (error, log_error))) or None
             elif job.kind == "erp_roster_notice":
                 from app.services.roster_notices import send_roster_notice
@@ -170,7 +197,7 @@ class Worker:
                 batch_id = (self.service.run_batch(job.id, item_id=job.payload["item_id"])
                             if job.payload.get("item_id") else self.service.run_batch(job.id))
                 if daily and getattr(service_config, "adapter_mode", None) == "live":
-                    error = self._morning_log(service_config, date.fromisoformat(scheduled_day), batch_id=batch_id)
+                    error = self._morning_log(service_config, date.fromisoformat(scheduled_day))
             elif job.kind == "erp_reconciliation":
                 from app.services.erp_pricing import save_preview_reconciliation
                 batch_id = save_preview_reconciliation(
@@ -210,22 +237,34 @@ class Worker:
             finally:
                 self.current_job = None
 
-    def _morning_log(self, config, day, **source):
-        from app.services.morning_log import publish_morning_log, save_morning_log, sync_cancellation_log
+    def _morning_log(self, config, day):
+        from app.services.morning_log import publish_morning_log, save_morning_log, save_success_log
+        from app.services.erp_capture_store import write_verified
+        marker = config.runtime_dir / 'morning-logs' / day.isoformat() / 'refresh-pending.json'
         try:
-            filename = save_morning_log(config, day, factory=self.factory, **source)
-            publish_morning_log(config, filename)
-        except Exception as exc:
-            # 采集/执行已完成，日志失败不能触发再次取数或提交。
-            error_id = event('worker.morning_log_failed', exception=exc)
-            error = f"上午日志未写入钉盘，请按排查编号检查：{error_id}"
-        else:
-            error = None
-        try:
-            sync_cancellation_log(config, day)
-        except Exception as exc:
-            event('worker.cancellation_log_failed', exception=exc)
-        return error
+            write_verified(marker, {'business_date': day.isoformat()})
+        except OSError as exc:
+            self._failure('worker.morning_log_failed', exc)
+        errors = []
+        for success, save, folder in (
+                (False, save_morning_log, config.ding_tk_morning_log_folder),
+                (True, save_success_log, config.ding_cancellation_log_folder)):
+            if not folder:
+                continue
+            try:
+                filename = save(config, day, factory=self.factory)
+                publish_morning_log(config, filename, success=success)
+            except Exception as exc:
+                # 两处独立归档；日志失败不能重采订单或重传价格，也不能跳过另一处。
+                error_id = event('worker.cancellation_log_failed' if success else 'worker.morning_log_failed', exception=exc)
+                errors.append(f"{'成功订单清单' if success else '完整提价日志'}未写入钉盘，排查编号：{error_id}")
+        if not errors:
+            try:
+                marker.unlink(missing_ok=True)
+            except OSError as exc:
+                error_id = event('worker.morning_log_failed', exception=exc)
+                errors.append(f'日志已写入，刷新标记未清理，排查编号：{error_id}')
+        return '；'.join(errors) or None
 
     def run_forever(self, poll_seconds=5):
         stop = Event()

@@ -159,7 +159,7 @@ def test_unknown_after_external_acceptance_recovers_without_resubmit(context):
     assert source.calls == original_calls
 
 
-def test_price_mismatch_pauses_site_and_keeps_guard(context):
+def test_three_price_mismatches_keep_guards_without_pausing_site(context):
     factory, cfg, adapter = context
     class BadPrice(DemoAdapter):
         def lookup(self, execution_id, task_id, key):
@@ -170,12 +170,12 @@ def test_price_mismatch_pauses_site_and_keeps_guard(context):
 
     enable(factory)
     PricingService(factory, BadPrice(cfg.runtime_dir), cfg).run_batch("bad-price")
-    assert settings_value(factory)["paused_sites"] == ["MY"]
+    assert settings_value(factory)["paused_sites"] == []
     with factory() as session:
         items = session.scalars(select(Item)).all()
         assert any(item.key["site"] != "MY" and item.status == "已核验" for item in items)
         mismatched = [item for item in items if item.phase == "mismatch"]
-        assert mismatched
+        assert len(mismatched) == 3
         for item in mismatched:
             assert item.key["site"] == "MY" and item.status == "待核验"
             execution = session.scalar(select(Execution).where(Execution.item_id == item.id))

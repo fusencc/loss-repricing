@@ -49,7 +49,7 @@ CATALOG = {
     'execution.lookup_failed': ('WARNING', '核验查询失败，保持原锁并稍后查询'),
     'execution.verified': ('INFO', '实际价核验通过，模拟属性另行标注'),
     'execution.rejected': ('WARNING', '已确认本次执行被拒绝'),
-    'execution.mismatch': ('WARNING', '实际价超差，暂停本站点新提交'),
+    'execution.mismatch': ('WARNING', '实际价格核验未通过，保留商品锁并等待核验'),
     'erp.started': ('INFO', 'ERP只读采集开始'),
     'erp.stage': ('INFO', 'ERP只读操作阶段进展'),
     'erp.completed': ('INFO', 'ERP读取结束，完整性另行判断'),

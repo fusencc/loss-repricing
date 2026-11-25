@@ -260,6 +260,9 @@ class Snapshot(BaseModel):
     online: list[OnlineState]
     contracts: dict[str, SiteContract]
     complete_sources: list[str]
+    # ERP 实时采集按用户授权只处理实际采到的有效订单；完整性证据仍单独保留。
+    # 通用 HTTP 与规范文件快照仍使用其已确认的完整来源合同。
+    candidate_scope: Literal['complete_sources', 'observed_erp_orders'] = 'complete_sources'
     source_versions: dict[str, str] = Field(default_factory=dict)
     source_issues: list[SourceIssue] = Field(default_factory=list)
 

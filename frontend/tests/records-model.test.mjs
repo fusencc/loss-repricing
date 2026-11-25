@@ -168,7 +168,7 @@ test('all price displays round to at most two places without changing input or l
 })
 
 
-test('only verified execution appears as priced; accepted and unknown fold into pending', async () => {
+test('successful upload is priced while unknown and mismatched results remain pending', async () => {
   const { recordStatusLabel, countRecordStatuses, filterRecordItems } = await import('../src/records-model.ts')
   const accepted = { ...row('1', 'a'), execution: { state: 'accepted' } }
   const verified = { ...row('2', 'a', '已核验'), execution: { state: 'verified' } }
@@ -176,21 +176,35 @@ test('only verified execution appears as priced; accepted and unknown fold into 
   const mismatch = { ...row('4', 'a'), execution: { state: 'mismatch' } }
   const declined = row('5', 'a', '不调价')
   const items = [accepted, verified, unknown, mismatch, declined]
-  assert.equal(recordStatusLabel(accepted), '待处理')
+  assert.equal(recordStatusLabel(accepted), '已提价')
   assert.equal(recordStatusLabel(verified), '已提价')
   assert.equal(recordStatusLabel(unknown), '待处理')
-  assert.deepEqual(countRecordStatuses(items), { '已提价': 1, '待处理': 3, '不调价': 1 })
+  assert.deepEqual(countRecordStatuses(items), { '已提价': 2, '待处理': 2, '不调价': 1 })
   assert.deepEqual(groupBySeller(items)[0].counts, countRecordStatuses(items))
-  assert.deepEqual(filterRecordItems(items, '已提价', '').map(r => r.id), ['2'])
-  assert.deepEqual(filterRecordItems(items, '待处理', '').map(r => r.id), ['1', '3', '4'])
+  assert.deepEqual(filterRecordItems(items, '已提价', '').map(r => r.id), ['1', '2'])
+  assert.deepEqual(filterRecordItems(items, '待处理', '').map(r => r.id), ['3', '4'])
   assert.equal(accepted.status, '待核验')
   assert.equal(accepted.execution.state, 'accepted')
+})
+
+test('older accepted receipts never mask a later failed, unknown or in-flight execution', async () => {
+  const { recordStatusLabel, recordStateReason, countRecordStatuses } = await import('../src/records-model.ts')
+  const items = ['failed', 'unknown', 'submitting', 'mismatch'].map((state, i) => ({
+    ...row(String(i), 'a'), reason: '具体结果', execution: { state, submit_status: 'accepted' },
+  }))
+  const saved = structuredClone(items)
+  for (const item of items) {
+    assert.equal(recordStatusLabel(item), '待处理')
+    assert.notEqual(recordStateReason(item), '提价上传完成')
+  }
+  assert.deepEqual(countRecordStatuses(items), { '已提价': 0, '待处理': 4, '不调价': 0 })
+  assert.deepEqual(items, saved)
 })
 
 test('a previous accepted receipt cannot hide a readback mismatch', async () => {
   const { recordStatusLabel, recordStateReason } = await import('../src/records-model.ts')
   const item = { ...row('submitted', 'a'), reason: '回读价格不一致', execution: { state: 'mismatch', submit_status: 'accepted' } }
   assert.equal(recordStatusLabel(item), '待处理')
-  assert.equal(recordStateReason(item), '回读核验未通过；回读价格不一致')
-  assert.equal(recordStateReason({ ...item, execution: { state: 'accepted' } }), '上传已受理，待回读核验；回读价格不一致')
+  assert.equal(recordStateReason(item), '处理异常需要人工提价')
+  assert.equal(recordStateReason({ ...item, execution: { state: 'accepted' } }), '提价上传完成')
 })

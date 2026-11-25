@@ -80,7 +80,8 @@ def save_roster_filter_records(factory, runtime_dir, job_id, day, scope):
                 summary={'不调价': len(protected)}))
             session.flush()
             for identity, (key, count) in protected.items():
-                reason = f'近72小时存在调价日志，不调价（官方记录 {count} 条）'
+                reason = f'近三天存在{count}条调价日志'
+                #三天=72小时
                 decision = Decision(key=key, status='不调价', ready=False,
                     reason_code='recent_price_change', reason=reason, source_row_ids=[],
                     trace={'source_versions': versions,

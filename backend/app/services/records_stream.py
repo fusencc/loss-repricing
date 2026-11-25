@@ -11,10 +11,10 @@ from app.services.records import department_records
 POLL_SECONDS = 1
 
 
-def records_payload(factory, department):
+def records_payload(factory, department, *, runtime_dir=None):
     # 每次独立短会话，避免长连接持有事务/旧快照。复用日志投影，状态和金额不另算。
     with factory() as session:
-        return encode_records(department_records(session, department))
+        return encode_records(department_records(session, department, runtime_dir=runtime_dir))
 
 
 def encode_records(data):

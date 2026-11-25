@@ -278,14 +278,118 @@ def test_old_or_same_price_observation_cannot_clear_mismatch(safety_context, off
         assert session.get(VariantGuard, original.variant_id).execution_id == original.id
 
 
-def test_mismatch_and_site_pause_become_visible_in_the_same_commit(safety_context):
+def test_repeated_mismatch_and_recovery_count_only_current_distinct_targets(safety_context):
+    factory, cfg, adapter, clock = safety_context
+    service = PricingService(factory, adapter, cfg)
+    service.run_batch("distinct-mismatches")
+    originals = executions(factory)
+    for index in range(3):
+        clock[0] += timedelta(minutes=1)
+        adapter.results[originals[0].id] = LookupResult("accepted", Decimal("12"), clock[0])
+        service.reconcile(item_id=originals[0].item_id)
+        assert settings_value(factory)["paused_sites"] == []
+    adapter.results[originals[1].id] = LookupResult("accepted", Decimal("12"), clock[0])
+    service.reconcile(item_id=originals[1].item_id)
+    clock[0] += timedelta(minutes=1)
+    adapter.results[originals[0].id] = LookupResult("accepted", Decimal("11"), clock[0])
+    service.reconcile(item_id=originals[0].item_id)
+    adapter.results[originals[2].id] = LookupResult("accepted", Decimal("12"), clock[0])
+    service.reconcile(item_id=originals[2].item_id)
+    assert settings_value(factory)["paused_sites"] == []
+    with factory() as session:
+        assert session.get(VariantGuard, originals[0].variant_id).execution_id is None
+        for original in originals[1:]:
+            assert session.get(VariantGuard, original.variant_id).execution_id == original.id
+
+
+@pytest.mark.parametrize("scope", ["site", "batch"])
+def test_mismatches_from_other_scope_do_not_count(safety_context, scope):
+    factory, cfg, adapter, clock = safety_context
+    service = PricingService(factory, adapter, cfg)
+    batch_id = service.run_batch("mismatch-scope")
+    originals = executions(factory)
+    clock[0] += timedelta(minutes=1)
+    for original in originals[:2]:
+        adapter.results[original.id] = LookupResult("accepted", Decimal("12"), clock[0])
+        service.reconcile(item_id=original.item_id)
+    with factory.begin() as session:
+        item = session.get(Item, originals[0].item_id)
+        if scope == "site":
+            item.key = {**item.key, "site": "PH"}
+        else:
+            batch = session.get(Batch, batch_id)
+            other = Batch(id=str(uuid4()), run_key="other-scope", business_date=batch.business_date,
+                          mode=batch.mode, status=batch.status, created_at=batch.created_at,
+                          snapshot=batch.snapshot, summary={})
+            session.add(other)
+            session.flush()
+            item.batch_id = other.id
+    adapter.results[originals[2].id] = LookupResult("accepted", Decimal("12"), clock[0])
+    service.reconcile(item_id=originals[2].item_id)
+    assert settings_value(factory)["paused_sites"] == []
+
+
+def test_concurrent_mismatches_preserve_evidence_without_pausing(safety_context):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    factory, cfg, adapter, clock = safety_context
+    service = PricingService(factory, adapter, cfg)
+    service.run_batch("concurrent-mismatches")
+    originals = executions(factory)
+    clock[0] += timedelta(minutes=1)
+    barrier = Barrier(3)
+    for original in originals:
+        adapter.results[original.id] = LookupResult("accepted", Decimal("12"), clock[0])
+    lookup = adapter.lookup
+    def concurrent_lookup(*args):
+        result = lookup(*args)
+        barrier.wait(timeout=10)
+        return result
+    adapter.lookup = concurrent_lookup
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        list(pool.map(lambda original: service.reconcile(item_id=original.item_id), originals))
+    assert settings_value(factory)["paused_sites"] == []
+    with factory() as session:
+        for original in originals:
+            assert session.get(Execution, original.id).state == "mismatch"
+            assert session.get(VariantGuard, original.variant_id).execution_id == original.id
+
+
+def test_site_pause_function_is_not_used_for_mismatch(safety_context, monkeypatch):
+    factory, cfg, adapter, clock = safety_context
+    service = PricingService(factory, adapter, cfg)
+    service.run_batch("pause-rollback")
+    originals = executions(factory)
+    clock[0] += timedelta(minutes=1)
+    for original in originals:
+        adapter.results[original.id] = LookupResult("accepted", Decimal("12"), clock[0])
+    for original in originals[:2]:
+        service.reconcile(item_id=original.item_id)
+    def fail_pause(*args):
+        raise RuntimeError("synthetic pause failure")
+    # 旧站点暂停函数即使不可用，也不能影响单条超差证据落库。
+    monkeypatch.setattr("app.services.store.pause_site", fail_pause)
+    service.reconcile(item_id=originals[2].item_id)
+    assert settings_value(factory)["paused_sites"] == []
+    with factory() as session:
+        assert session.get(Execution, originals[2].id).state == "mismatch"
+        assert session.get(VariantGuard, originals[2].variant_id).execution_id == originals[2].id
+
+
+def test_mismatch_commit_preserves_existing_manual_site_pause(safety_context):
     factory, cfg, adapter, clock = safety_context
     service = PricingService(factory, adapter, cfg)
     update_settings(factory, {"paused_sites": ["PH"]})
     service.run_batch("atomic-site-pause")
-    original = executions(factory)[0]
+    originals = executions(factory)
     clock[0] += timedelta(minutes=1)
-    adapter.results[original.id] = LookupResult("accepted", Decimal("12"), clock[0])
+    for original in originals:
+        adapter.results[original.id] = LookupResult("accepted", Decimal("12"), clock[0])
+    for original in originals[:2]:
+        service.reconcile(item_id=original.item_id)
+    assert settings_value(factory)["paused_sites"] == ["PH"]
+    original = originals[2]
 
     committed_pauses = []
 
@@ -302,7 +406,7 @@ def test_mismatch_and_site_pause_become_visible_in_the_same_commit(safety_contex
         event.remove(factory.class_, "after_commit", observe_commit)
 
     assert committed_pauses
-    assert all(sites == ["MY", "PH"] for sites in committed_pauses)
+    assert all(sites == ["PH"] for sites in committed_pauses)
 
 
 @pytest.mark.parametrize(("changes", "reason"), [
@@ -374,7 +478,7 @@ def test_live_price_can_expire_while_waiting_for_final_authorization(safety_cont
     def delayed_settings(session):
         nonlocal first
         if first:
-            clock[0] += timedelta(seconds=301)
+            clock[0] += timedelta(seconds=901)
             first = False
         return read_settings(session)
 
@@ -386,7 +490,7 @@ def test_live_price_can_expire_while_waiting_for_final_authorization(safety_cont
         item = session.scalar(select(Item).where(Item.key["item_id"].as_string() == "I0"))
         execution = session.scalar(select(Execution).where(Execution.item_id == item.id))
         assert execution.response["status"] == "not_submitted"
-        assert "超过5分钟" in item.reason
+        assert "超过15分钟" in item.reason
         assert session.get(VariantGuard, execution.variant_id).execution_id is None
         item_id = item.id
         saved_reason = item.reason

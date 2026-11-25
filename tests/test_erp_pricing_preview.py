@@ -24,7 +24,7 @@ def test_saved_capture_without_supplement_identifies_orders_missing_details(sour
     assert report["summary"]["source_rows"] == 5
     assert report["summary"]["unique_orders"] == 3
     assert report["decisions"] == []
-    assert report["evaluation_complete_sources"] == []
+    assert len(report["evaluation_complete_sources"]) == 4
     assert [
         issue["sources"] for issue in report["issues"]
         if issue["order_id"] == "000001" and issue["code"] == "missing_order_details"
@@ -71,13 +71,12 @@ def test_a_missing_loss_holds_the_same_target_across_orders(source_files):
     assert any(issue["target"]["item_id"] == "0001001" for issue in report["issues"])
 
 
-def test_unmapped_line_makes_minimum_loss_unprovable_for_the_scope(source_files):
+def test_unmapped_line_is_excluded_without_invalidating_other_targets(source_files):
     capture, evidence = source_files
     evidence["orders"][2]["lines"][0]["mapping"] = None
     report = preview_pricing(capture, evidence)
-    assert "loss_pending" not in report["evaluation_complete_sources"]
-    assert report["decisions"]
-    assert all(decision["reason_code"] == "incomplete_sources" for decision in report["decisions"])
+    assert "loss_pending" in report["evaluation_complete_sources"]
+    assert {row["key"]["item_id"] for row in report["decisions"] if row["ready"]} == {"0001001", "0001002"}
     assert any(issue["code"] == "missing_online_mapping" for issue in report["issues"])
 
 
@@ -92,7 +91,7 @@ def test_status_change_holds_only_known_targets_of_the_order(source_files):
 
 
 @pytest.mark.parametrize("change", ["missing_source", "finance_duplicate", "sample", "mixed_group"])
-def test_incomplete_or_mixed_capture_cannot_produce_ready_prices(source_files, change):
+def test_unavailable_sources_are_isolated_but_mixed_scope_and_sample_remain_invalid(source_files, change):
     capture, evidence = source_files
     if change == "missing_source":
         capture["groups"].pop()
@@ -104,7 +103,7 @@ def test_incomplete_or_mixed_capture_cannot_produce_ready_prices(source_files, c
         capture["groups"][3]["filters"]["blocs"] = "另一集团"
     report = preview_pricing(capture, evidence)
     assert len(report["evaluation_complete_sources"]) < 4
-    assert not any(item["ready"] for item in report["decisions"])
+    assert any(item["ready"] for item in report["decisions"]) is (change in {"missing_source", "finance_duplicate"})
 
 
 @pytest.mark.parametrize("defect", ["failed", "overlap", "unrequested", "last_poll_failed", "swapped_requests", "wrong_count", "repeated_number"])
@@ -137,7 +136,9 @@ def test_group_summary_cannot_hide_incomplete_finance_batches(source_files, defe
     report = preview_pricing(capture, evidence)
     source = next(row for row in report["source_coverage"] if row["source"] == pending["source"])
     assert not source["finance_complete"] and not source["preparation_complete"]
-    assert report["summary"]["ready_prices"] == 0
+    assert {row['key']['item_id'] for row in report['decisions'] if row['ready']} == {'0001001', '0001002'}
+    assert all(row['source'] != pending['source'] for decision in report['decisions']
+               for row in decision['trace']['source_rows'])
     assert any(message.startswith(pending["source"] + " 标记完成") for message in report["global_issues"])
 
 
@@ -214,12 +215,10 @@ def test_different_shop_on_the_same_order_is_reported_before_pricing(source_file
     capture, evidence = source_files
     capture["groups"][0]["rows"][0]["fields"]["店铺"] = "另一店铺"
     report = preview_pricing(capture, evidence)
-    assert {decision["key"]["item_id"] for decision in report["decisions"]} == {"0001001", "0001002"}
+    assert {decision["key"]["item_id"] for decision in report["decisions"] if decision["ready"]} == {"0001002"}
     assert any(issue["code"] == "order_shop_conflict" and issue["order_id"] == "000001"
                for issue in report["issues"])
-    assert "loss_allocatable" not in report["evaluation_complete_sources"]
-    assert "blocked_allocatable" not in report["evaluation_complete_sources"]
-    assert all(decision["reason_code"] == "incomplete_sources" for decision in report["decisions"])
+    assert len(report["evaluation_complete_sources"]) == 4
 
 
 def test_finance_without_shop_cannot_confirm_an_online_mapping(source_files):
@@ -231,7 +230,8 @@ def test_finance_without_shop_cannot_confirm_an_online_mapping(source_files):
     report = preview_pricing(capture, evidence)
     assert any(issue["code"] == "missing_order_shop" and issue["order_id"] == "000001"
                for issue in report["issues"])
-    assert not any(decision["ready"] for decision in report["decisions"])
+    assert {row["key"]["item_id"] for row in report["decisions"] if row["ready"]} == {"0001002"}
+    assert len(report["evaluation_complete_sources"]) == 4
 
 
 def test_unconfirmed_extra_capture_filter_prevents_coverage(source_files):
@@ -278,12 +278,10 @@ def test_duplicate_finance_rows_hold_identified_target_without_masking_source_co
     report = preview_pricing(capture, evidence)
     coverage = next(row for row in report["source_coverage"] if row["source"] == "loss_pending")
     assert not coverage["finance_complete"]
-    assert coverage["preparation_complete"] is target_known
+    assert coverage["preparation_complete"]
     assert any(issue["order_id"] == "000003" and issue["code"] == "duplicate_finance_rows"
                for issue in report["issues"])
-    assert [row["key"]["item_id"] for row in report["decisions"] if row["ready"]] == (
-        ["0001001", "0001002"] if target_known else []
-    )
+    assert [row["key"]["item_id"] for row in report["decisions"] if row["ready"]] == ["0001001", "0001002"]
 
 
 @pytest.mark.parametrize("stage, list_complete", [
@@ -301,7 +299,9 @@ def test_unfinished_source_is_not_a_completed_export_with_known_missing_orders(
     report = preview_pricing(capture, evidence)
     coverage = next(row for row in report["source_coverage"] if row["source"] == "loss_pending")
     assert not coverage["preparation_complete"]
-    assert not any(decision["ready"] for decision in report["decisions"])
+    assert {row["key"]["item_id"] for row in report["decisions"] if row["ready"]} == {"0001001", "0001002"}
+    assert all(row["source"] != "loss_pending" for decision in report["decisions"]
+               for row in decision["trace"]["source_rows"])
 
 
 def test_capture_finance_status_issues_survive_absent_detail_evidence(source_files):
@@ -309,9 +309,8 @@ def test_capture_finance_status_issues_survive_absent_detail_evidence(source_fil
     capture["groups"][1]["rows"].pop()
     capture["groups"][0]["rows"][0]["current_status_matches_source"] = False
     report = preview_pricing(capture)
-    assert {issue["code"] for issue in report["issues"] if issue["order_id"] == "000003"} == {
-        "missing_order_finance", "missing_order_details",
-    }
+    assert 'loss_pending' not in report['evaluation_complete_sources']
+    assert any('未能对齐' in issue for issue in report['global_issues'])
     assert {issue["code"] for issue in report["issues"] if issue["order_id"] == "000001"} == {
         "order_status_conflict", "missing_order_details",
     }
@@ -363,7 +362,8 @@ def test_known_erp_shop_is_required_to_bind_the_online_mapping(source_files):
     capture, evidence = source_files
     evidence["orders"][0]["lines"][0]["mapping"]["erp_shop"] = "其他ERP店铺"
     report = preview_pricing(capture, evidence)
-    assert not any(decision["ready"] for decision in report["decisions"])
+    assert {row["key"]["item_id"] for row in report["decisions"] if row["ready"]} == {"0001002"}
+    assert len(report["evaluation_complete_sources"]) == 4
     assert any(issue["order_id"] == "000001" and issue["code"] == "mapping_shop_mismatch"
                for issue in report["issues"])
 
@@ -469,8 +469,8 @@ def test_live_conflicting_shop_scope_never_localizes_a_missing_order(source_file
     capture,evidence=source_files;prep=live_scoped_preparation(capture,evidence)
     prep['shop_scopes']['000003']['erp_shop']='UNRELATED-NAME'
     report=prepare_pricing(capture,order_preparation=prep).report
-    assert 'loss_pending' not in report['evaluation_complete_sources']
-
+    assert len(report['evaluation_complete_sources']) == 4
+    assert report['summary']['normalized_detail_lines'] == 2
 
 
 def test_positive_evidence_of_conflicting_shop_ids_still_blocks_preparation(source_files):
@@ -478,7 +478,8 @@ def test_positive_evidence_of_conflicting_shop_ids_still_blocks_preparation(sour
     capture,evidence=source_files;prep=live_scoped_preparation(capture,evidence)
     prep['orders'][0]['lines'][0]['mapping']['key']['shop_id']='SALES-DIFFERENT-ID'
     report=prepare_pricing(capture,order_preparation=prep).report
-    assert report['evaluation_complete_sources'] == []
+    assert len(report['evaluation_complete_sources']) == 4
+    assert [report['references']['lines'][rid]['order_id'] for rid in report['references']['retained_row_ids']] == ['000002']
 
 
 
@@ -487,7 +488,8 @@ def test_conflicting_shop_ids_cannot_escape_via_an_alias_name(source_files):
     capture,evidence=source_files;prep=live_scoped_preparation(capture,evidence)
     prep['orders'][0]['lines'][0]['mapping']['key']['shop_id']='OTHER-SHOP'
     report=prepare_pricing(capture,order_preparation=prep).report
-    assert report['evaluation_complete_sources']==[]
+    assert len(report['evaluation_complete_sources']) == 4
+    assert report['references']['retained_row_ids'] == []
 
 
 def test_live_online_bundle_uses_same_engine_and_cannot_cross_capture(source_files):
@@ -513,6 +515,38 @@ def test_live_online_bundle_uses_same_engine_and_cannot_cross_capture(source_fil
     bundle['erp_capture_id']='OTHER'
     with pytest.raises(ValueError):
         prepare_pricing(capture,current_fx=fx,order_preparation=prep,online_preparation=bundle)
+
+
+def test_live_three_available_sources_price_without_enabling_replay_execution(source_files):
+    from app.adapters.erp_pricing import prepare_pricing
+    from app.domain.engine import evaluate
+
+    capture, evidence = source_files
+    prep = live_scoped_preparation(capture, evidence)
+    failed = capture['groups'][3]
+    failed.update(stage='list_failed', error='来源请求失败', list_complete=False,
+                  total=None, candidate_order_ids=[], rows=[], batches=[],
+                  failed_pages=[{'page': 1, 'error': '请求失败'}])
+    capture['capture_complete'] = False
+    online = deepcopy(evidence['online'][:1])
+    online[0]['state']['fee_scope'] = 'erp-corrected-first-margin-v1'
+    bundle = {'schema_version': 'erp-live-online-preparation-v2', 'version': 'erp-live-online-v2',
+              'erp_capture_id': capture['capture_id'], 'synthetic': True, 'sample_only': False,
+              'pricing_ready': False, 'observed_at': evidence['evaluated_at'],
+              'evaluated_at': evidence['evaluated_at'], 'online': online,
+              'contracts': evidence['contracts'], 'issues': [], 'references': {}}
+    fx = {'date': '2026-11-09', 'display_units_per_cny': {'CNY': '1', 'MYR': '0.5'},
+          'source_rates': {'CNY': '1', 'MYR': '2'}, 'version': 'erp-current-config-usage-day-v1',
+          'ref': 'FX', 'queried_at': '2026-11-09T15:01:00+08:00', 'source_effective_date': None,
+          'date_policy': 'current_config_on_usage_day', 'synthetic': True}
+    prepared = prepare_pricing(capture, current_fx=fx, order_preparation=prep, online_preparation=bundle)
+    assert prepared.report['candidate_scope'] == prepared.snapshot.candidate_scope == 'observed_erp_orders'
+    assert len(prepared.report['evaluation_complete_sources']) == 3
+    assert not prepared.report['execution_allowed']
+    assert any(row.ready for row in evaluate(prepared.snapshot, prepared.evaluated_at))
+    replay = preview_pricing(capture, evidence)
+    assert replay['candidate_scope'] == 'complete_sources'
+    assert not replay['execution_allowed'] and not any(row['ready'] for row in replay['decisions'])
 
 
 def test_status_changed_unknown_product_is_skipped_without_holding_its_shop(source_files):
@@ -637,7 +671,7 @@ def test_completely_failed_source_is_never_reported_as_complete_empty_source(sou
     assert coverage['finance_rows'] == 0
     assert not coverage['finance_complete'] and not coverage['preparation_complete']
     assert group['source'] not in report['evaluation_complete_sources']
-    assert not any(row['ready'] for row in report['decisions'])
+    assert {row['key']['item_id'] for row in report['decisions'] if row['ready']} == {'0001001', '0001002'}
 
 
 @pytest.mark.parametrize('defect', ['swapped_requests', 'wrong_count', 'wrong_order_identity', 'wrong_bloc'])
@@ -661,7 +695,9 @@ def test_partial_capture_still_rejects_successful_batch_scope_conflicts(source_f
     coverage = next(row for row in report['source_coverage'] if row['source'] == 'loss_pending')
     assert not coverage['finance_complete'] and not coverage['preparation_complete']
     assert 'loss_pending' not in report['evaluation_complete_sources']
-    assert not any(row['ready'] for row in report['decisions'])
+    assert {row['key']['item_id'] for row in report['decisions'] if row['ready']} == {'0001001', '0001002'}
+    assert all(row['source'] != 'loss_pending' for decision in report['decisions']
+               for row in decision['trace']['source_rows'])
 
 
 @pytest.mark.parametrize('has_order_details', [True, False])

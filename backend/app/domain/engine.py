@@ -99,8 +99,8 @@ def evaluate(snapshot: Snapshot, now: datetime) -> list[Decision]:
 
 
 def evaluate_erp_readonly_preview(snapshot: Snapshot, now: datetime) -> list[Decision]:
-    """实时 ERP 预览的订单已逐批核对；只免除四名单齐备条件，不改变汇率和日期检查。"""
-    return _evaluate(snapshot, now, _snapshot_date_fx_problem(snapshot, now))
+    """ERP 预览复用来源可用性、汇率及日期检查。"""
+    return _evaluate(snapshot, now, snapshot_problem(snapshot, now))
 
 
 def _evaluate(snapshot: Snapshot, now: datetime, batch_problem) -> list[Decision]:
@@ -179,10 +179,9 @@ def _evaluate(snapshot: Snapshot, now: datetime, batch_problem) -> list[Decision
 
 
 def snapshot_problem(snapshot: Snapshot, now: datetime, required_business_date: date | None = None) -> tuple[str, str] | None:
-    # 待处理来源也必须完整，避免因漏源选了偏大的单件亏损。
-    sources = snapshot.complete_sources
-    if len(sources) != len(REQUIRED_SOURCES) or set(sources) != REQUIRED_SOURCES:
-        return "incomplete_sources", "ERP 四份候选来源尚未完整齐备"
+    # 至少一类有效来源即可计算已去重订单，缺失来源不视为零订单。
+    if not REQUIRED_SOURCES.intersection(snapshot.complete_sources):
+        return "incomplete_sources", "ERP 尚无已知有效候选来源"
     return _snapshot_date_fx_problem(snapshot, now, required_business_date)
 
 
@@ -224,6 +223,7 @@ def _decide(
         "fx_rates": {currency: str(rate) for currency, rate in snapshot.fx_rates.items()},
         "fx_rate_unit": snapshot.fx_rate_unit,
         "complete_sources": list(snapshot.complete_sources),
+        "candidate_scope": snapshot.candidate_scope,
         "source_versions": dict(snapshot.source_versions),
         "source_rows": [row.model_dump(mode="json") for row in rows],
         "online_rows": [state.model_dump(mode="json") for state in states],

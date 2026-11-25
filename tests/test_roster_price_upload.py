@@ -11,13 +11,14 @@ from app.adapters.http import UPLOAD_PATH
 from app.adapters.roster_price_upload import ROSTER_UPLOAD_TRACE, RosterPriceTransport
 from app.adapters.sales_auth import LOGIN_PATH
 from app.config import Settings
-from app.domain.engine import evaluate
+from app.domain.engine import evaluate, SITE_CURRENCIES
 from app.services.store import BEIJING
 from fake_adapter import DemoAdapter
 
 
 @pytest.mark.parametrize('discount,timeout,missing_off', [(0, False, False), (50, True, False), (50, False, True)])
-def test_single_roster_upload_and_readback_use_proven_endpoints(tmp_path, monkeypatch, discount, timeout, missing_off):
+@pytest.mark.parametrize('price_tail', ['0', '0.01'])
+def test_single_roster_upload_and_readback_use_proven_endpoints(tmp_path, monkeypatch, discount, timeout, missing_off, price_tail):
     day = datetime.now(timezone.utc).astimezone(BEIJING).date()
     snapshot = DemoAdapter(tmp_path).collect(day)
     online = snapshot.online[0]
@@ -34,14 +35,14 @@ def test_single_roster_upload_and_readback_use_proven_endpoints(tmp_path, monkey
            'sellerSkuId': key.item_id, 'priceIncludeVat': price, 'priceNew': price}
 
     def source(*args, **kwargs):
-        retail = decision.upload_price if sent[UPLOAD_PATH] else online.retail_price
+        retail = decision.upload_price if sent[UPLOAD_PATH] else online.retail_price + Decimal(price_tail)
         actual = retail * factor
         return {
             'acquisition_complete': True, 'source_id': 'verified-platform-now',
             'records': [{
                 'observed_at': datetime.now(timezone.utc).isoformat(), 'company_activity_locked': bool(discount),
                 'company_parent': {'shopName': shop, 'shopId': key.shop_id, 'productId': key.product_id,
-                                   'localMainSku': online.main_sku, 'taxVatRate': '0', 'productStatus': 4},
+                                   'localMainSku': online.main_sku, 'taxVatRate': '0', 'productStatus': 0},
                 'current_variants': [{
                     'shopName': shop, 'shopId': key.shop_id, 'productId': key.product_id,
                     'sellerSkuId': key.item_id, 'sellerSku': key.sku, 'currency': online.currency,
@@ -121,3 +122,11 @@ def test_single_roster_upload_and_readback_use_proven_endpoints(tmp_path, monkey
         assert all(sheet.cell(2, col).value is None for col in (4, 6, 7, 8, 9))
     finally:
         workbook.close()
+
+
+@pytest.mark.parametrize('site', ['MY', 'PH', 'SG', 'TH', 'VN'])
+@pytest.mark.parametrize('fulfillment', ['direct', 'overseas'])
+def test_all_configured_site_fulfillments_are_enabled(site, fulfillment):
+    from app.adapters.roster_price_upload import VERIFIED_FULFILLMENT
+    assert SITE_CURRENCIES[site]
+    assert fulfillment in VERIFIED_FULFILLMENT[site]

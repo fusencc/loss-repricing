@@ -218,7 +218,7 @@ async def records_stream(request: Request, department: str | None = Query(None, 
     """与免登录日志相同的只读范围；数据库提交后约一秒内推送，不执行改价。"""
     from app.services.records_stream import records_payload, stream_response
     factory = request.app.state.factory
-    return await stream_response(request, lambda: records_payload(factory, department))
+    return await stream_response(request, lambda: records_payload(factory, department, runtime_dir=request.app.state.config.runtime_dir))
 
 
 @router.get("/records")
@@ -227,7 +227,7 @@ def records(request: Request, department: str | None = Query(None, max_length=20
     from app.services.records import department_records
     with request.app.state.factory() as session:
         try:
-            return department_records(session, department)
+            return department_records(session, department, runtime_dir=request.app.state.config.runtime_dir)
         except ValueError as exc:
             raise HTTPException(404, str(exc)) from None
 

@@ -222,11 +222,19 @@ def test_confirmed_increase_age_boundary(age, status, ready):
     assert (result.status, result.ready) == (status, ready)
 
 
-@pytest.mark.parametrize("sources", [SOURCES[:-1], [*SOURCES, "unknown"], [*SOURCES, SOURCES[0]]])
-def test_exactly_four_sources_are_required(sources):
+@pytest.mark.parametrize("sources", [[source] for source in SOURCES] + [SOURCES[:-1], [*SOURCES, "unknown"], [*SOURCES, SOURCES[0]]])
+def test_at_least_one_known_source_is_sufficient(sources):
     result = single(snapshot_fields={"complete_sources": sources})
-    assert result.status == "待处理"
+    assert result.ready
+    assert result.trace["complete_sources"] == sources
+
+
+@pytest.mark.parametrize("sources", [[], ["unknown"]])
+@pytest.mark.parametrize("scope", ["complete_sources", "observed_erp_orders"])
+def test_zero_known_sources_remain_blocked(sources, scope):
+    result = single(snapshot_fields={"complete_sources": sources, "candidate_scope": scope})
     assert not result.ready
+    assert result.reason_code == "incomplete_sources"
 
 
 @pytest.mark.parametrize(

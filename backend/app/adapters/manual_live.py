@@ -8,6 +8,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from decimal import Decimal
 import json
+import logging
 import re
 from pathlib import Path
 from uuid import uuid4
@@ -39,7 +40,7 @@ def validate_authorization(authorization, key, upload_price):
     a = authorization
     if (a.get('approved') is not True or not a.get('id') or not a.get('actor')
             or a.get('business_date') != utcnow().astimezone(BEIJING).date().isoformat()
-            or VariantKey.model_validate(a['key']) != key or key.site not in ('PH','MY','TH','VN')
+            or VariantKey.model_validate(a['key']) != key or key.site not in SITE_CURRENCIES
             or a.get('currency') != SITE_CURRENCIES[key.site] or not a.get('shop_name')
             or money(a['upload_price']) != upload_price or upload_price <= 0
             or upload_price != upload_price.quantize(Decimal('.01'))):
@@ -139,11 +140,10 @@ class ManualLiveAdapter:
                 'createTimeStart': a['business_date'] + ' 00:00:00', 'createTimeEnd': a['business_date'] + ' 23:59:59'})
             if value.get('resp_code') != 0: raise ValueError('操作日志读取失败')
             data = value['datas']; count = data['count']
-            if type(count) is not int or count < 0 or (total is not None and count != total):
-                raise ValueError('操作日志总数变化，需重新读取')
+            if type(count) is not int or count < 0:
+                raise ValueError('操作日志总数无效')
             total = count; rows.extend(data['data'])
-            if len(rows) == total: return rows
-            if not data['data'] or len(rows) > total: break
+            if not data['data'] or len(rows) >= total: return rows
         raise ValueError('操作日志分页未完整')
 
     def _promotion(self, variant):
@@ -168,9 +168,10 @@ class ManualLiveAdapter:
                 or money(variant['discount']) != discount):
             raise ValueError('活动归属、固定价或折扣与当前变体不一致')
         # 产品级百分比活动只返回父商品及折扣；SKU级另核对具体商品与价格。
+        display_unit = Decimal('1') if k.site == 'VN' else Decimal('0.01')
         if p['productType'] == 2 and (row['sellerSkuId'] != k.item_id
-                or money(row['priceIncludeVat']) != money(variant['priceIncludeVat'])
-                or money(row['marketPrice']) != money(variant['marketPrice'])):
+                or abs(money(row['priceIncludeVat']) - money(variant['priceIncludeVat'])) > display_unit
+                or abs(money(row['marketPrice']) - money(variant['marketPrice'])) > display_unit):
             raise ValueError('活动子商品或价格与当前变体不一致')
         if not 0 <= discount < 100 or not marketing_price_matches_discount(
                 money(variant['priceIncludeVat']), money(variant['marketPrice']), discount, a['currency']):
@@ -291,6 +292,8 @@ class ManualLiveAdapter:
                 raise ValueError('本次目标价任务尚未唯一出现')
             log = matches[0]
             write_verified(self.directory / 'latest-task.json', log)
+            if log['status'] in (3, 5, 6):
+                return LookupResult('rejected', message='调价任务明确失败，状态：'+str(log['status']))
             if log['status'] != 2:
                 return LookupResult('unknown', message='调价任务状态：'+str(log['status'])+'；继续核验，不重传')
             detail = self._request('GET', '/Api/api-tiktok-sales/operationLog/getRequestAndResponseById', params={'id': log['id']})
@@ -326,8 +329,12 @@ class ManualLiveAdapter:
             # 按原提交北京时间日期查count；latest只有金额，保留其无任务ID/时间的限制。
             from app.adapters.official_price_logs import capture_official_price_logs, build_price_record
             submitted_at = intent['created_at']
-            official = capture_official_price_logs(self.settings, k, a['shop_name'],
-                datetime.fromisoformat(submitted_at).astimezone(BEIJING).date(), self.directory, client=self.client)
+            try:
+                official = capture_official_price_logs(self.settings, k, a['shop_name'],
+                    datetime.fromisoformat(submitted_at).astimezone(BEIJING).date(), self.directory, client=self.client)
+            except Exception as exc:
+                logging.getLogger(__name__).warning('回读辅助官方统计不可用：%s', type(exc).__name__)
+                official = None  # 辅助统计不可用不否定已绑定的成功任务与平台实价。
             price_record = build_price_record(execution_id, k, a['shop_name'], money(a['upload_price']),
                 log, current, observed, official, submitted_at=submitted_at)
             write_verified(self.directory / ('price-record-'+execution_id+'-'+uuid4().hex+'.json'), price_record)
@@ -343,4 +350,5 @@ class ManualLiveAdapter:
                 '平台任务'+str(log['id'])+'成功；上传含税'+a['upload_price']+'，回读含税'+str(current['retail'])+
                 '，营销价'+str(actual)+'；税前及物流换算已核对，在线利润已记录', price_record=price_record)
         except Exception as exc:
-            return LookupResult('unknown', message='当前生效证据尚未齐备（'+type(exc).__name__+'），仅核验')
+            summary = re.sub(r'https?://\S+', '[URL]', str(exc))[:240]
+            return LookupResult('unknown', message='当前生效证据尚未齐备（'+type(exc).__name__+'：'+summary+'），仅核验')

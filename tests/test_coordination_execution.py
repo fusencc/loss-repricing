@@ -57,7 +57,8 @@ def test_changed_external_price_invalidates_old_plan_without_recalculating_incre
     PricingService(factory,adapter,cfg).run_batch("changed")
     assert adapter.calls == 0
     with factory() as s:
-        assert s.get(TargetControl,key.target_identity()).mode == "review"
+        assert s.get(TargetControl,key.target_identity()).mode == "auto"
+        assert s.get(TargetControl,key.target_identity()).baseline['retail_price'] == '24'
         assert "外部" in s.scalar(select(Item)).reason
 
 def test_takeover_after_claim_cancels_provably_unsent_intent(world):

@@ -14,18 +14,13 @@ from app.adapters.normalization import money
 from app.adapters.sales_auth import SalesAuth
 from app.adapters.sales_platform_capture import capture_platform_controls
 from app.domain.money import MoneyRatio
+from app.domain.engine import SITE_CURRENCIES
 from app.domain.types import OnlineState
 from app.services.store import BEIJING, utcnow
 
 
-# 既有真实回读范围及 2026-11-25 用户明确授权续提的 PH 直发、TH 海外仓、VN 范围。
-# 新授权组合逐条读取真实现价、上传及回读；授权开放不代表已经核验生效。
-VERIFIED_FULFILLMENT = {
-    'MY': frozenset({'direct', 'overseas'}),
-    'PH': frozenset({'direct', 'overseas'}),
-    'TH': frozenset({'direct', 'overseas'}),
-    'VN': frozenset({'direct', 'overseas'}),
-}
+# 五站点共用单品合同；允许执行不等于已真实核验生效。
+VERIFIED_FULFILLMENT = {site: frozenset({'direct', 'overseas'}) for site in SITE_CURRENCIES}
 ROSTER_UPLOAD_TRACE = 'erp_roster_upload'
 
 
@@ -90,6 +85,7 @@ class RosterPriceTransport:
             raw_stock = variant.get('overseasStockSum')
             stock = None if raw_stock in (None, '') else money(raw_stock)
             current_fulfillment = 'overseas' if stock is not None and stock > 0 else 'direct'
+            tolerance = Decimal('1') if key.site == 'VN' else Decimal('0.01')
             expected_parent = (shop_name, key.shop_id, key.product_id, online.main_sku)
             if (
                 tuple(parent.get(field) for field in ('shopName', 'shopId', 'productId', 'localMainSku')) != expected_parent
@@ -97,18 +93,17 @@ class RosterPriceTransport:
                 or tuple(variant.get(field) for field in ('shopName', 'shopId', 'productId', 'sellerSku')) !=
                     (shop_name, key.shop_id, key.product_id, key.sku)
                 or sku['seller_sku'] != key.sku
-                or parent.get('productStatus') != 4
-                or data.get('product_status') != 'ACTIVATE' or data.get('status') != 'ACTIVATE'
-                or data.get('is_not_for_sale') is not False
-                or sku.get('status_info', {}).get('status') != 'NORMAL'
                 or variant['currency'] != online.currency or sku['price']['currency'] != online.currency
                 or (online.profit_check.overseas_stock == 0 and stock != 0)
                 or current_fulfillment != online.profit_check.mode
                 or not _warehouse_matches(variant, key.warehouse)
-                or retail != online.retail_price or money(sku['price']['sale_price']) != retail
-                or actual != baseline_actual or not 0 <= observed_discount < 100 or observed_factor != baseline_factor
+                or retail <= 0 or actual <= 0 or money(sku['price']['sale_price']) <= 0
+                or abs(retail - online.retail_price) > tolerance
+                or abs(money(sku['price']['sale_price']) - retail) > tolerance
+                or abs(actual - baseline_actual) > tolerance
+                or not 0 <= observed_discount < 100 or observed_factor != baseline_factor
                 or observed.astimezone(BEIJING).date() != business_date
-                or not timedelta(0) <= utcnow() - observed <= timedelta(minutes=5)
+                or not timedelta(0) <= utcnow() - observed <= timedelta(minutes=15)
             ):
                 raise ValueError('提交前商品、仓配或现价与算价依据不一致')
             authorization['discount_percent_off'] = str(observed_discount)

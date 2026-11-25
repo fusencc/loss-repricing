@@ -1,5 +1,11 @@
 """销售记录页的只读投影；不调用采集、调价或通知，不返回原始证据。"""
 from collections import Counter
+import logging
+from functools import lru_cache
+from app.config import get_settings
+from app.services.erp_capture_store import load_capture
+
+logger = logging.getLogger(__name__)
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -286,7 +292,8 @@ def combine_pricing_process(items):
     for group in groups.values():
         successes = [i for i in group if i.get('execution') and (
             i['execution']['state'] in {'accepted', 'verified'}
-            or i['execution'].get('submit_status') == 'accepted')]
+            or (i['execution']['state'] not in {'failed', 'mismatch', 'unknown', 'submitting'}
+                and i['execution'].get('submit_status') == 'accepted'))]
         if len(successes) != 1:
             continue
         final = successes[0]
@@ -302,7 +309,7 @@ def combine_pricing_process(items):
     return [i for i in items if i['id'] not in hidden]
 
 
-def department_records(session, department=None, *, mode=None):
+def department_records(session, department=None, *, mode=None, runtime_dir=None):
     """全部已保存批次，不按 SKU 去重，不截断；未知部门有独立选项。"""
     query = (select(Item, Batch, Execution).join(Batch, Item.batch_id == Batch.id)
         .outerjoin(Execution, Execution.item_id == Item.id)
@@ -324,8 +331,38 @@ def department_records(session, department=None, *, mode=None):
     chosen = [row for row in rows if ('department:' + row[3] if row[3] is not None else 'unassigned') == selected]
     ownerships = {row.scope_key: row for row in session.scalars(select(Ownership))}
     names = dict(session.execute(select(UserAccount.id, UserAccount.display_name)).all())
-    items = combine_pricing_process([public_record(item, batch, execution, dept, record_seller(item, batch, ownerships, names))
-                                    for item, batch, execution, dept in chosen])
+    @lru_cache(maxsize=None)
+    def capture_time(batch_id):
+        batch = next(batch for _, batch, _, _ in chosen if batch.id == batch_id)
+        source = (batch.snapshot or {}).get('erp_roster_filter_log') or {}
+        versions = roster_record_source(batch)
+        capture_id = source.get('capture_id')
+        if not capture_id or capture_id != versions.get('erp_capture_id'):
+            return None
+        try:
+            capture = load_capture(runtime_dir if runtime_dir is not None else get_settings().runtime_dir, capture_id)
+            if (capture.get('capture_id') != capture_id or capture.get('source_kind') != 'erp_web_backend'
+                    or capture.get('synthetic', False) is not False or capture.get('sample_only') is not False
+                    or capture.get('department') != source.get('department')
+                    or (capture.get('salesperson') or {}).get('name') != source.get('salesperson')
+                    or source.get('salesperson') != versions.get('erp_roster_salesperson')
+                    or source.get('department') != versions.get('erp_roster_department')):
+                return None
+            value = display_text(capture.get('queried_at'))
+            if value and datetime.fromisoformat(value.replace('Z', '+00:00')).tzinfo:
+                return value
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            logger.warning('采集时间读取失败，时间显示为空：%s', type(exc).__name__)
+        return None
+
+    projected = []
+    for item, batch, execution, dept in chosen:
+        record = public_record(item, batch, execution, dept, record_seller(item, batch, ownerships, names))
+        # 名单保护记录仅关联其本人同部门采集归档的 queried_at；不使用入库时间冒充采集时间。
+        if record['display_time'] is None and item.status == '不调价':
+            record['display_time'] = capture_time(batch.id)
+        projected.append(record)
+    items = combine_pricing_process(projected)
     for entry in departments:
         if entry['id'] == selected:
             entry['total'] = len(items)

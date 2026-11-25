@@ -197,9 +197,9 @@ def test_pilot_day_at_nine_routes_only_to_roster_and_publishes_once(tmp_path, mo
         drive_calls.append((args[1], folder))
         if args[1] == '+list':
             return {'files': [], 'hasMore': False}
-        assert folder == 'tk-folder'
+        assert folder in ('tk-folder', 'cancel-folder')
         assert (directory / args[args.index('--file') + 1]).is_file()
-        return {'nodeId': 'tk-file'}
+        return {'nodeId': 'success-file' if folder == 'cancel-folder' else 'tk-file'}
 
     monkeypatch.setattr('app.services.morning_log._dws', drive)
 
@@ -212,18 +212,23 @@ def test_pilot_day_at_nine_routes_only_to_roster_and_publishes_once(tmp_path, mo
     worker.tick(before + 86401)
     assert calls == [pilot_day]
     assert service.calls == 0
-    assert drive_calls == [('+list', 'tk-folder'), ('+upload', 'tk-folder'), ('+list', 'cancel-folder')]
-    import json
-    lookup = tmp_path / 'cancellation-logs' / pilot_day.isoformat() / 'lookup.json'
-    assert json.loads(lookup.read_text(encoding='utf-8'))['status'] == 'pending'
+    assert drive_calls == [('+list', 'tk-folder'), ('+upload', 'tk-folder'),
+                           ('+list', 'cancel-folder'), ('+upload', 'cancel-folder')]
     published = tmp_path / 'morning-logs' / pilot_day.isoformat() / '11.25早上运行日志.xlsx'
     assert published.is_file()
     with factory() as session:
         job = session.query(Job).one()
         assert job.dedupe_key == 'daily:2026-11-25' and job.state == 'done'
+        assert job.error is None
     workbook = load_workbook(published, read_only=True)
     try:
-        assert list(workbook['汇总'].values)[1] == ('2026-11-25', '名单只读算价', 'completed', 0)
+        assert workbook.sheetnames == ['明细']
+        assert len(list(workbook['明细'].values)[0]) == 14
+        success = load_workbook(tmp_path / 'success-logs' / pilot_day.isoformat() / published.name, read_only=True)
+        try:
+            assert list(success['汇总'].values)[1][1:] == (0, 0, 0, 0)
+        finally:
+            success.close()
     finally:
         workbook.close()
         engine.dispose()
