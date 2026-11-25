@@ -6,9 +6,8 @@ from app.services import erp_workflow as workflow
 
 
 def test_incomplete_sources_prefetches_known_targets_but_preserves_block(tmp_path, monkeypatch):
-    capture = {'department': 'D', 'capture_complete': False, 'groups': [
-        {'candidate_order_ids': ['order']}], 'stopped_by_rate_limit': False}
-    monkeypatch.setattr(workflow, 'load_capture', lambda *a: capture)
+    capture = {'capture_id': 'capture', 'department': 'D', 'capture_complete': False,
+               'groups': [{'candidate_order_ids': ['order']}], 'stopped_by_rate_limit': False}
 
     def artifact(name, **extra):
         data = {'source_id': name, 'erp_capture_id': 'capture', 'synthetic': True,
@@ -23,8 +22,6 @@ def test_incomplete_sources_prefetches_known_targets_but_preserves_block(tmp_pat
     platform = artifact('platform')
     fees = artifact('fees')
     history = artifact('local')
-    monkeypatch.setattr(workflow, 'capture_order_headers', lambda *a, **k: headers)
-    monkeypatch.setattr(workflow, 'capture_erp_details', lambda *a, **k: native)
     monkeypatch.setattr(workflow, 'capture_sales_batch', lambda *a, **k: sales)
     monkeypatch.setattr(workflow, 'capture_platform_controls', lambda *a, **k: platform)
     monkeypatch.setattr(workflow, 'capture_current_fees', lambda *a, **k: fees)
@@ -45,14 +42,14 @@ def test_incomplete_sources_prefetches_known_targets_but_preserves_block(tmp_pat
     monkeypatch.setattr(workflow, 'filter_candidate_history', filter_history)
     monkeypatch.setattr(workflow, 'capture_sku_price_references', lambda *a, **k: {})
     monkeypatch.setattr(workflow, 'prepare_online_states', lambda *a, **k: {'online': [], 'issues': []})
-    monkeypatch.setattr(workflow, 'query_current_erp_fx', lambda *a: (_ for _ in ()).throw(workflow.SourceUnavailable('missing')))
     monkeypatch.setattr(workflow, 'save_pricing_preview', lambda *a, **k: {'preview_id': 'preview'})
     final = {'preview_id': 'preview', 'synthetic': True, 'decisions': [],
              'global_issues': ['候选名单未取全'], 'issues': [], 'summary': {}}
     monkeypatch.setattr(workflow, 'load_pricing_preview', lambda *a: (final, 'digest'))
     monkeypatch.setattr(workflow, 'summarize_seller_candidates', lambda *a: {})
 
-    result = workflow._evaluate_capture(SimpleNamespace(runtime_dir=tmp_path), 'capture', replay=False)
+    result = workflow._evaluate_capture(SimpleNamespace(runtime_dir=tmp_path), capture, replay=False,
+                                        headers=headers, native=native, daily_fees={})
     assert seen == [{'erp_shop': 'shop', 'erp_sku': 'sku', 'main_sku': 'main', 'key': key}]
     assert result['status'] == 'blocked' and result['ready_prices'] == 0
     assert result['global_issues'] == ['候选名单未取全']

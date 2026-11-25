@@ -1,15 +1,17 @@
 """ERP 候选至待提价文件的只读编排；复用统一规则，不调用模型或价格上传。"""
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from datetime import date, datetime
 from app.services.store import BEIJING
 from pathlib import Path
+from queue import Queue
 from uuid import uuid4
 import json
 from hashlib import sha256
 import httpx
 
 from app.adapters.base import SourceUnavailable
-from app.adapters.normalization import source_time
 from app.adapters.erp_bulk_capture import ERP_DEPARTMENTS, _session, capture_erp_bulk
 from app.adapters.sales_auth import SalesAuth
 from app.adapters.erp_web import ErpAccountRateLimited
@@ -80,14 +82,15 @@ def _roster(settings, required_day):
 
 def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, progress=None,
                  roster_date: date | None = None, roster_person=None, on_roster_scope=None):
-    """按部门串行完成只读采集和算价，显式指定采集编号时回放单批。"""
+    """名单按 ERP 采集与销售算价两条车道处理；指定采集编号时回放单批。"""
     if roster_person is not None and (roster_date is None or roster_person not in ERP_ROSTER_DEPARTMENTS):
         raise ValueError('名单刷新须绑定单日名单中的销售员')
     if capture_id is not None:
         if roster_date is not None:
             raise ValueError('名单采集不能与离线回放同时指定')
         rebuild_clean_capture(settings.runtime_dir, capture_id)
-        return _evaluate_capture(settings, capture_id, replay=True, evidence=evidence, exports=exports, progress=progress)
+        capture = load_capture(settings.runtime_dir, capture_id)
+        return _evaluate_capture(settings, capture, replay=True, evidence=evidence, exports=exports, progress=progress)
     if evidence is not None or exports is not None:
         raise ValueError('补充文件只可用于明确指定采集编号的离线对账')
 
@@ -116,30 +119,79 @@ def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, prog
         summary['roster_date'] = datetime.now(BEIJING).date().isoformat()
     manifest = directory / 'result.json'
     write_verified(manifest, summary)
-    with (httpx.Client(timeout=60, trust_env=False, follow_redirects=False) as client,
-          _session(settings) as web_session):
-        auth = SalesAuth(settings, client)
-        for department, name in scopes:
+
+    def collect(department, name, web_session):
+        capture = None
+        try:
             if progress:
                 progress(f'开始处理 {department}。')
+            collected = capture_erp_bulk(settings, department=department, salesperson=name,
+                                         progress=progress, web_session=web_session)
+            capture = save_capture(settings.runtime_dir, collected)
+            if capture['cleaning_status'] != 'saved':
+                raise OSError('原件已存档，清洗失败；请按采集编号重建清洗')
+            headers, native = _capture_erp_sources(settings, capture, progress, web_session)
+            return department, name, capture, headers, native, None
+        except Exception as error:
+            return department, name, capture, None, None, _workflow_failure(error, capture)
+
+    def consume(pool=None):
+        with httpx.Client(timeout=60, trust_env=False, follow_redirects=False) as client:
+            auth = SalesAuth(settings, client)
             try:
-                result = _run_workflow(settings, department=department, progress=progress,
-                                       web_session=web_session, client=client, auth=auth,
-                                       **({'salesperson': name} if name is not None else {}))
-            except Exception as error:
-                # 单部门异常在调度边界留痕，不能终止其他独立部门。
-                result = _workflow_failure(error)
-            departments.append({**result, 'department': department,
-                                **({'salesperson': name} if name is not None else {})})
-            summary['ready_prices'] += result['ready_prices']
-            write_verified(manifest, summary)
-            if name is not None and on_roster_scope is not None:
-                on_roster_scope(departments[-1])
-            if progress:
-                progress(f"{department} 处理结果：{result['status']}。")
-            if result.get('stopped_by_rate_limit'):
-                # 账号级 500003 影响整次任务，不继续请求其他部门或销售员。
-                break
+                daily_fees = refresh_daily_fees(settings, client=client, auth=auth)
+            except SourceUnavailable as error:
+                event('erp.failed', exception=error, source='erp', stage='collect', error_code='source_unavailable')
+                daily_fees = None
+            current_fx = _capture_round_fx(settings)
+
+            def finish(department, name, capture, headers, native, failure):
+                scope = {'department': department, **({'salesperson': name} if name is not None else {})}
+                result = failure or {}
+                try:
+                    if failure is None:
+                        result = _evaluate_capture(settings, capture, replay=False, progress=progress,
+                            headers=headers, native=native, daily_fees=daily_fees, current_fx=current_fx,
+                            client=client, auth=auth)
+                    result.update(scope)
+                    if name is not None and on_roster_scope is not None:
+                        on_roster_scope(result)
+                    if progress:
+                        progress(f"{department} 处理结果：{result['status']}。")
+                except Exception as error:
+                    result.update(_workflow_failure(error, capture))
+                    result.update(scope)
+                departments.append(result)
+                return result
+
+            if pool is None:
+                with _session(settings) as web_session:
+                    for department, name in scopes:
+                        if finish(*collect(department, name, web_session)).get('stopped_by_rate_limit'):
+                            break
+                return
+
+            pending = Queue()
+
+            def produce():
+                try:
+                    with _session(settings) as web_session:
+                        for department, name in scopes:
+                            pending.put(collect(department, name, web_session))
+                finally:
+                    pending.put(None)
+
+            producer = pool.submit(copy_context().run, produce)
+            while (task := pending.get()) is not None:
+                finish(*task)
+            producer.result()
+
+    if names is None:
+        consume()
+    else:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            pool.submit(copy_context().run, consume, pool).result()
+    summary['ready_prices'] = sum(result['ready_prices'] for result in departments)
     if len(departments) == len(scopes) and all(department['status'] == 'completed' for department in departments):
         summary['status'] = 'completed'
     elif summary['ready_prices'] or any(department['status'] == 'completed' for department in departments):
@@ -150,39 +202,49 @@ def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, prog
     return summary
 
 
-def _workflow_failure(error):
+def _workflow_failure(error, capture=None):
     error_id = event('erp.failed', exception=error, source='erp', synthetic=False,
                      stage='collect', error_code='workflow_failed')
-    return {'status': 'failed', 'error_id': error_id, 'ready_prices': 0, 'execution_allowed': False,
-            'stopped_by_rate_limit': isinstance(error, ErpAccountRateLimited)}
+    result = {'status': 'failed', 'error_id': error_id, 'ready_prices': 0, 'execution_allowed': False,
+              'stopped_by_rate_limit': isinstance(error, ErpAccountRateLimited)}
+    if capture is not None:
+        result.update({key: capture[key] for key in ('capture_id', 'capture_complete', 'cleaning_status')})
+        result['stopped_by_rate_limit'] |= capture.get('stopped_by_rate_limit', False)
+    return result
 
 
-def _run_workflow(settings, *, department, web_session, client, auth, progress=None, salesperson=None):
-    # 每批只绑定启动时的当日检查；同日后续批次再补查失败的范围。
-    daily_fees = refresh_daily_fees(settings, client=client, auth=auth)
-    collected = capture_erp_bulk(settings, department=department, progress=progress,
-                                 web_session=web_session, salesperson=salesperson)
-    saved = save_capture(settings.runtime_dir, collected)
-    capture_id = saved['capture_id']
+def _capture_round_fx(settings):
     try:
-        # 原件成功但清洗失败时不得让后续空文件看起来像已完成。
-        if saved['cleaning_status'] != 'saved':
-            raise OSError('原件已存档，清洗失败；请按采集编号重建清洗')
-        return _evaluate_capture(settings, capture_id, replay=False, progress=progress, daily_fees=daily_fees,
-                                 web_session=web_session, client=client, auth=auth)
-    except Exception as error:
-        # 算价或清洗失败时，仍保留已经写入的采集编号供核对。
-        return {**_workflow_failure(error), 'capture_id': capture_id, 'department': department,
-                'capture_complete': saved['capture_complete'], 'cleaning_status': saved['cleaning_status'],
-                'stopped_by_rate_limit': saved.get('stopped_by_rate_limit', False) or isinstance(error, ErpAccountRateLimited)}
+        current_fx = query_current_erp_fx(settings)
+    except SourceUnavailable:
+        return None
+    fx_path = Path(settings.runtime_dir) / 'source-fx' / (current_fx['ref'] + '.json')
+    write_verified(fx_path, current_fx)
+    return current_fx
 
 
-def _evaluate_capture(settings, capture_id, *, replay, evidence=None, exports=None, progress=None, daily_fees=None,
-                      web_session=None, client=None, auth=None):
-    capture = load_capture(settings.runtime_dir, capture_id)
+def _capture_shortcut(capture):
     limited = capture.get('stopped_by_rate_limit', False)
     empty = capture['capture_complete'] and not any(group['candidate_order_ids'] for group in capture['groups'])
-    if not replay and (limited or empty):
+    return limited or empty
+
+
+def _capture_erp_sources(settings, capture, progress, web_session):
+    if _capture_shortcut(capture):
+        return None, None
+    headers = capture_order_headers(settings, capture, progress=progress, web_session=web_session)
+    try:
+        native = capture_erp_details(settings, capture, progress=progress, web_session=web_session)
+    except SourceUnavailable:
+        native = None
+    return headers, native
+
+
+def _evaluate_capture(settings, capture, *, replay, evidence=None, exports=None, progress=None, daily_fees=None,
+                      current_fx=None, headers=None, native=None, client=None, auth=None):
+    capture_id = capture['capture_id']
+    if not replay and _capture_shortcut(capture):
+        limited = capture.get('stopped_by_rate_limit', False)
         # 账号限流时停止本部门的后续取证。完整空名单已经确认无需进一步取数。
         return {
             'capture_id': capture_id, 'department': capture['department'], 'mode': 'capture',
@@ -190,11 +252,9 @@ def _evaluate_capture(settings, capture_id, *, replay, evidence=None, exports=No
             'capture_complete': capture['capture_complete'], 'cleaning_status': 'saved',
             'stopped_by_rate_limit': limited, 'ready_prices': 0, 'execution_allowed': False,
         }
-    current_fx = None
     sales_ref = None
     sales = None
     native_ref = None
-    headers = None
     headers_ref = None
     headers_status = 'not_requested'
     platform_ref = None
@@ -211,25 +271,19 @@ def _evaluate_capture(settings, capture_id, *, replay, evidence=None, exports=No
     official_history = None
     native_status = 'not_requested'
     sales_status = 'not_requested'
-    fx_status = 'file_evidence' if evidence is not None else 'not_requested'
+    fx_status = ('file_evidence' if evidence is not None else 'not_requested') if replay else (
+        'saved' if current_fx is not None else 'unavailable')
     if not replay:
-        headers = capture_order_headers(settings, capture, progress=progress, web_session=web_session)
-        content = Path(headers['artifact_file']).read_bytes()
-        headers = json.loads(content)
         headers_ref = {key:headers[key] for key in ('source_id','erp_capture_id','synthetic','sample_only',
             'acquisition_complete','artifact_file')}
-        headers_ref['sha256'] = sha256(content).hexdigest()
+        headers_ref['sha256'] = sha256(Path(headers['artifact_file']).read_bytes()).hexdigest()
         headers_status = 'saved' if headers['acquisition_complete'] else 'partial'
-        try:
-            native = capture_erp_details(settings, capture, progress=progress, web_session=web_session)
-        except SourceUnavailable:
+        if native is None:
             native_status = 'unavailable'
         else:
-            content = Path(native['artifact_file']).read_bytes()
-            native = json.loads(content)
             native_ref = {key:native[key] for key in ('source_id','erp_capture_id','synthetic','sample_only',
                           'acquisition_complete','summary','artifact_file')}
-            native_ref['sha256'] = sha256(content).hexdigest()
+            native_ref['sha256'] = sha256(Path(native['artifact_file']).read_bytes()).hexdigest()
             native_status = 'saved' if native['acquisition_complete'] else 'partial'
             # 先核对同订单的财务、明细和店铺，再按负修正一次毛利圈定导出范围。
             erp_only = prepare_order_losses(capture, native, order_headers=headers)
@@ -275,10 +329,11 @@ def _evaluate_capture(settings, capture_id, *, replay, evidence=None, exports=No
                     'acquisition_complete','artifact_file')}
                 platform_ref['sha256'] = sha256(content).hexdigest()
                 platform_status = 'saved' if platform['acquisition_complete'] else 'partial'
-        fixed_fees = capture_current_fees(settings, capture, daily=daily_fees)
-        fixed_fees_ref = {key:fixed_fees[key] for key in ('source_id','erp_capture_id','synthetic','sample_only',
-            'acquisition_complete','artifact_file')}
-        fixed_fees_ref['sha256'] = sha256(Path(fixed_fees['artifact_file']).read_bytes()).hexdigest()
+        if daily_fees is not None:
+            fixed_fees = capture_current_fees(settings, capture, daily=daily_fees)
+            fixed_fees_ref = {key:fixed_fees[key] for key in ('source_id','erp_capture_id','synthetic','sample_only',
+                'acquisition_complete','artifact_file')}
+            fixed_fees_ref['sha256'] = sha256(Path(fixed_fees['artifact_file']).read_bytes()).hexdigest()
         local_history = capture_local_price_history(settings,capture)
         content = Path(local_history['artifact_file']).read_bytes()
         local_history = json.loads(content)
@@ -293,16 +348,6 @@ def _evaluate_capture(settings, capture_id, *, replay, evidence=None, exports=No
             online_preparation = prepare_online_states(capture,pricing_targets,sales=sales,
                 platform=platform,local_history=local_history,fixed_fees=fixed_fees,
                 official_history=official_history,price_references=price_references)
-        try:
-            current_fx = query_current_erp_fx(settings)
-        except SourceUnavailable:
-            # 公共汇率不可取时保留订单及缺项报告，不填默认汇率、不回退旧日配置。
-            fx_status = 'unavailable'
-        else:
-            fx_path = Path(settings.runtime_dir) / 'source-fx' / (current_fx['ref'] + '.json')
-            write_verified(fx_path, current_fx)
-            current_fx = json.loads(fx_path.read_text(encoding='utf-8'))
-            fx_status = 'saved'
     report = save_pricing_preview(settings.runtime_dir, capture_id, evidence, exports=exports,
                                   current_fx=current_fx, sales_source=sales_ref, native_source=native_ref,
                                   order_preparation=order_preparation, order_headers_source=headers_ref,

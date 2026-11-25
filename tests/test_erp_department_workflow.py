@@ -100,24 +100,34 @@ def test_workflow_continues_after_incomplete_or_failed_department(tmp_path, monk
     sessions = []
     monkeypatch.setattr(erp_workflow, '_roster', lambda settings, required_day: None)
 
-    def run_department(settings, *, department, progress, web_session, client, auth):
-        sessions.append((web_session, client, auth))
+    def collect(settings, *, department, web_session, **kwargs):
+        sessions.append(web_session)
         attempted.append(department)
-        if department == 'Tiktok一部':
-            return {'status': 'blocked', 'ready_prices': 0}
         if department == 'Tiktok五部':
             raise RuntimeError('synthetic departmental failure')
+        return {'capture_id': department, 'cleaning_status': 'saved', 'capture_complete': False}
+
+    def evaluate(settings, capture, *, client, auth, **kwargs):
+        clients.append((client, auth))
+        if capture['capture_id'] == 'Tiktok一部':
+            return {'status': 'blocked', 'ready_prices': 0}
         return {'status': 'completed', 'ready_prices': 1}
 
-    monkeypatch.setattr(erp_workflow, '_run_workflow', run_department, raising=False)
+    clients = []
+    monkeypatch.setattr(erp_workflow, 'refresh_daily_fees', lambda *a, **k: {})
+    monkeypatch.setattr(erp_workflow, 'query_current_erp_fx', lambda *a: {'ref': 'test-fx'})
+    monkeypatch.setattr(erp_workflow, 'capture_erp_bulk', collect)
+    monkeypatch.setattr(erp_workflow, 'save_capture', lambda runtime, result: result)
+    monkeypatch.setattr(erp_workflow, '_capture_erp_sources', lambda *a: (None, None))
+    monkeypatch.setattr(erp_workflow, '_evaluate_capture', evaluate)
     result = erp_workflow.run_workflow(Settings(_env_file=None, runtime_dir=tmp_path))
     assert attempted == ['Tiktok一部', 'Tiktok五部', 'Tiktok十二部', 'Tiktok二十二部']
     assert [dept['status'] for dept in result['departments']] == ['blocked', 'failed', 'completed', 'completed']
     assert result['status'] == 'needs_attention'
     assert result['ready_prices'] == 2
-    assert all(all(actual is expected for actual, expected in zip(session, sessions[0]))
-               for session in sessions)
-    assert sessions[0][1].is_closed
+    assert all(session is sessions[0] for session in sessions)
+    assert all(client is clients[0][0] and auth is clients[0][1] for client, auth in clients)
+    assert clients[0][0].is_closed
     assert not result['execution_allowed']
     assert json.loads((Path(result['artifact_dir']) / 'result.json').read_text()) == result
 
@@ -125,6 +135,7 @@ def test_workflow_continues_after_incomplete_or_failed_department(tmp_path, monk
 def test_failed_department_keeps_the_saved_capture_id(tmp_path, monkeypatch):
     monkeypatch.setattr(erp_workflow, '_roster', lambda settings, required_day: None)
     monkeypatch.setattr(erp_workflow, 'refresh_daily_fees', lambda *args, **kwargs: {})
+    monkeypatch.setattr(erp_workflow, 'query_current_erp_fx', lambda *a: {'ref': 'test-fx'})
     monkeypatch.setattr(erp_workflow, 'ERP_DEPARTMENTS', ('Tiktok一部',))
     monkeypatch.setattr(erp_workflow, 'capture_erp_bulk', lambda *args, **kwargs: {})
     monkeypatch.setattr(erp_workflow, 'save_capture', lambda *args: {
@@ -223,18 +234,26 @@ def test_round_reuses_real_erp_and_sales_authentication_and_clock(tmp_path, monk
     key = VariantKey(platform='TikTok',shop_id='SHOP',site='PH',product_id='PRODUCT',
                      item_id='ITEM',sku='SKU',warehouse='WAREHOUSE')
 
-    def run_department(settings, *, department, progress, web_session, client, auth):
-        capture = {'capture_id':department,'groups':[{'candidate_order_ids':['ORDER']}]}
-        # 两个连续步骤及下一部门共用同一网页登录和间隔。
-        for _ in range(2):
-            assert capture_order_headers(settings,capture,web_session=web_session)['acquisition_complete']
+    def collect(settings, *, department, web_session, **kwargs):
+        capture = {'capture_id': department, 'cleaning_status': 'saved', 'capture_complete': False,
+                   'groups': [{'candidate_order_ids': ['ORDER']}]}
+        assert capture_order_headers(settings, capture, web_session=web_session)['acquisition_complete']
+        return capture
+
+    def evaluate(settings, capture, *, headers, client, auth, **kwargs):
+        assert headers['acquisition_complete']
         assert capture_recent_price_changes(settings,[key],client=client,auth=auth)['acquisition_complete']
         platform = capture_platform_controls(settings,capture,
             [{'erp_shop':'SHOPPH','product_id':'PRODUCT','item_id':'ITEM'}],client=client,auth=auth)
         assert platform['issues'][0]['code'] == 'company_activity_state_conflicting_or_missing'
         return {'status':'completed','ready_prices':0}
 
-    monkeypatch.setattr(erp_workflow, '_run_workflow', run_department)
+    monkeypatch.setattr(erp_workflow, 'refresh_daily_fees', lambda *a, **k: {})
+    monkeypatch.setattr(erp_workflow, 'query_current_erp_fx', lambda *a: {'ref': 'test-fx'})
+    monkeypatch.setattr(erp_workflow, 'capture_erp_bulk', collect)
+    monkeypatch.setattr(erp_workflow, 'save_capture', lambda runtime, result: result)
+    monkeypatch.setattr(erp_workflow, 'capture_erp_details', lambda *a, **k: None)
+    monkeypatch.setattr(erp_workflow, '_evaluate_capture', evaluate)
     settings = Settings(_env_file=None,runtime_dir=tmp_path,
                         erp_username='U',erp_password='P',vendor_username='U',vendor_password='P',
                         erp_capture_request_interval_seconds=16,sales_request_interval_seconds=2)

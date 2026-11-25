@@ -7,6 +7,7 @@ import subprocess
 import sys
 from copy import deepcopy
 from decimal import Decimal
+from threading import Event, get_ident
 
 import pytest
 
@@ -86,12 +87,92 @@ def test_failed_cleaning_does_not_publish_pending_prices(tmp_path, monkeypatch):
     assert not list(tmp_path.rglob('pending-prices.json'))
 
 
+def test_roster_overlaps_erp_with_sales_and_isolates_scope_failures(tmp_path, monkeypatch):
+    from app.services import erp_workflow as workflow
+
+    names = ['甲', '乙', '丙', '丁']
+    department = 'Tiktok一部'
+    monkeypatch.setattr(workflow, '_roster', lambda *_: names)
+    monkeypatch.setattr(workflow, 'ERP_ROSTER_DEPARTMENTS', dict.fromkeys(names, department))
+    second_started, first_in_sales = Event(), Event()
+    erp_calls, sales_calls, public_calls, callbacks = [], [], [], []
+    fees = object()
+    fx = {'ref': 'test-shared-fx'}
+
+    def refresh(settings, *, client, auth):
+        public_calls.append(('fees', get_ident(), client, auth))
+        return fees
+
+    def query(settings):
+        public_calls.append(('fx', get_ident()))
+        return fx
+
+    def bulk(settings, *, salesperson, web_session, **kwargs):
+        erp_calls.append(('bulk', salesperson, get_ident(), web_session))
+        if salesperson == '乙':
+            second_started.set()
+            assert first_in_sales.wait(5), 'ERP 不应在首人销售启动前就结束第二人'
+        return {'capture_id': salesperson, 'capture_complete': False, 'cleaning_status': 'saved'}
+
+    def save(runtime, capture):
+        erp_calls.append(('save', capture['capture_id']))
+        return capture
+
+    def headers(settings, capture, *, web_session, **kwargs):
+        erp_calls.append(('headers', capture['capture_id'], get_ident(), web_session))
+        return {'name': capture['capture_id']}
+
+    def details(settings, capture, *, web_session, **kwargs):
+        erp_calls.append(('details', capture['capture_id'], get_ident(), web_session))
+        if capture['capture_id'] == '乙':
+            raise RuntimeError('mock ERP detail failure')
+        return {'name': capture['capture_id']}
+
+    def sales(settings, capture, *, headers, native, daily_fees, current_fx, client, auth, **kwargs):
+        name = capture['capture_id']
+        sales_calls.append((name, get_ident(), client, auth))
+        if name == '甲':
+            first_in_sales.set()
+            assert second_started.wait(5), '第二人的 ERP 应与首人销售重叠'
+        assert headers == native == {'name': name}
+        assert daily_fees is fees and current_fx is fx
+        return {'status': 'completed', 'ready_prices': 1}
+
+    def submit(scope):
+        callbacks.append((scope['salesperson'], get_ident()))
+        if scope['salesperson'] == '丙':
+            raise RuntimeError('mock submission failure')
+        scope['callback_completed'] = True
+
+    for name, fake in [('refresh_daily_fees', refresh), ('query_current_erp_fx', query),
+                       ('capture_erp_bulk', bulk), ('save_capture', save), ('capture_order_headers', headers),
+                       ('capture_erp_details', details), ('_evaluate_capture', sales)]:
+        monkeypatch.setattr(workflow, name, fake)
+    result = workflow.run_workflow(Settings(_env_file=None, runtime_dir=tmp_path), on_roster_scope=submit)
+
+    assert [call[0] for call in public_calls] == ['fees', 'fx']
+    assert [call[:2] for call in erp_calls] == [(stage, name) for name in names
+                                               for stage in ('bulk', 'save', 'headers', 'details')]
+    erp_thread, erp_session = erp_calls[0][2:]
+    assert all(call[2:] == (erp_thread, erp_session) for call in erp_calls if call[0] != 'save')
+    _, sales_thread, client, auth = public_calls[0]
+    assert public_calls[1] == ('fx', sales_thread)
+    assert erp_thread != sales_thread != get_ident()
+    assert sales_calls == [(name, sales_thread, client, auth) for name in ('甲', '丙', '丁')]
+    assert callbacks == [(name, sales_thread) for name in names]
+    assert [scope['status'] for scope in result['departments']] == ['completed', 'failed', 'failed', 'completed']
+    assert result['departments'][1]['capture_id'] == '乙'
+    assert result['departments'][-1]['callback_completed']
+    assert result['status'] == 'needs_attention' and result['ready_prices'] == 2
+    assert json.loads(Path(result['artifact_dir'], 'result.json').read_text()) == result
+
+
 @pytest.mark.parametrize('fx_available', [True, False])
 def test_fresh_collection_runs_download_clean_evaluate_and_archive(tmp_path, monkeypatch, fx_available):
     from app.services import erp_workflow
     from test_erp_bulk_capture import run
     from test_daily_sales_fees import setup as setup_fees
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timezone
     from app.domain.engine import BEIJING
     from app.adapters.current_pricing_fees import refresh_daily_fees
     collected = {}
@@ -127,8 +208,7 @@ def test_fresh_collection_runs_download_clean_evaluate_and_archive(tmp_path, mon
         if not fx_available:
             from app.adapters.base import SourceUnavailable
             raise SourceUnavailable('test company FX unavailable')
-        observed = max(datetime.now(timezone.utc), max(datetime.fromisoformat(t['queried_at']) for group in collected['groups']
-                       for batch in group['batches'] for t in batch['polls'])) + timedelta(seconds=1)
+        observed = datetime.now(timezone.utc)
         return {'date':observed.astimezone(BEIJING).date().isoformat(), 'display_units_per_cny':{'CNY':'1','PHP':'10'},
                 'version':'erp-current-config-usage-day-v1', 'ref':'test-company-fx',
                 'queried_at':observed.isoformat(), 'synthetic':True,
@@ -157,6 +237,9 @@ def test_fresh_collection_runs_download_clean_evaluate_and_archive(tmp_path, mon
     assert [item['reason'] for item in candidates['unresolved']] == ['shop_unverified']
     assert result['fx_status'] == ('saved' if fx_available else 'unavailable')
     assert (tmp_path / 'source-fx' / 'test-company-fx.json').is_file() is fx_available
+    if fx_available:
+        stored_fx = json.loads((tmp_path / 'source-fx' / 'test-company-fx.json').read_text())
+        assert datetime.fromisoformat(stored_fx['queried_at']) < datetime.fromisoformat(collected['queried_at'])
     assert any('汇率' in message for message in result['global_issues']) is not fx_available
     # ERP财务样例没有父产品字段，销售阶段应留下具体缺项，而非声称已取全。
     assert result['sales_status'] == 'partial'

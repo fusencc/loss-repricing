@@ -57,10 +57,12 @@ def test_readback_under_one_percent_does_not_verify(context):
                 return replace(result,actual_price=Decimal('12.65'))
             return result
     enable(factory)
-    PricingService(factory,BelowMargin(cfg.runtime_dir),cfg).run_batch('one-percent-readback')
+    service = PricingService(factory, BelowMargin(cfg.runtime_dir), cfg)
+    service.run_batch('one-percent-readback')
+    service.reconcile()
     with factory() as session:
         records=[e for e in session.query(Execution).all() if e.request['key']['site']=='MY']
         assert records
         assert all(e.state=='mismatch' for e in records)
-    assert 'MY' in settings_value(factory)['paused_sites']
+    assert 'MY' not in settings_value(factory)['paused_sites']
 

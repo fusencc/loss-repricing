@@ -157,21 +157,22 @@ class Worker:
                 from app.services.erp_workflow import run_workflow
                 from app.services.erp_roster_pricing import run_roster_pricing
                 from app.services.erp_capture_store import write_verified
-                # 采集只读，再交给真实定价服务执行已有的提交和回读检查。
+                # 采集只读，消费者线程通过工厂新建会话，不复用任务会话。
                 config = service_config.model_copy(update={'live_submit_enabled': False})
+                job_id = job.id
                 pricing_batches = []
 
                 def price_scope(scope):
                     if service_config.adapter_mode == 'live':
                         from app.services.roster_filter_records import save_roster_filter_records
                         try:
-                            save_roster_filter_records(self.factory, config.runtime_dir, job.id, roster_date, scope)
+                            save_roster_filter_records(self.factory, config.runtime_dir, job_id, roster_date, scope)
                         except Exception as exc:
                             # 日志归档失败留因，不重采、不影响其他独立商品的既有执行。
                             scope['history_log_error_id'] = event('worker.roster_history_log_failed', exception=exc)
                     if (scope['ready_prices'] and service_config.adapter_mode == 'live'
                             and service_config.live_submit_enabled):
-                        result = run_roster_pricing(self.service, job.id, roster_date, scope)
+                        result = run_roster_pricing(self.service, job_id, roster_date, scope)
                         pricing_batches.append(result)
                         scope['pricing_batch'] = result
 

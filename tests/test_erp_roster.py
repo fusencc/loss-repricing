@@ -31,12 +31,16 @@ def test_roster_only_passes_people_to_their_confirmed_department(settings, monke
     monkeypatch.setattr(workflow, 'ERP_ROSTER_NAMES', (' 甲 ', '乙', '甲'))
     monkeypatch.setattr(workflow, 'ERP_ROSTER_DEPARTMENTS', {'甲': 'Tiktok一部', '乙': 'Tiktok五部'})
     calls = []
-    def run(settings, *, department, salesperson, **kwargs):
+    def collect(settings, *, department, salesperson, **kwargs):
         calls.append((department, salesperson))
-        if department == 'Tiktok一部' and salesperson == '甲':
+        if salesperson == '甲':
             raise ValueError('单个范围失败')
-        return {'status':'completed', 'ready_prices':0, 'execution_allowed':False}
-    monkeypatch.setattr(workflow, '_run_workflow', run)
+        return {'capture_id': 'saved', 'capture_complete': True, 'groups': [],
+                'cleaning_status': 'saved', 'department': department}
+    monkeypatch.setattr(workflow, 'capture_erp_bulk', collect)
+    monkeypatch.setattr(workflow, 'save_capture', lambda runtime, result: result)
+    monkeypatch.setattr(workflow, 'refresh_daily_fees', lambda *a, **k: {})
+    monkeypatch.setattr(workflow, 'query_current_erp_fx', lambda *a: {'ref': 'test-fx'})
     result = workflow.run_workflow(settings, roster_date=DAY)
     assert calls == [('Tiktok一部', '甲'), ('Tiktok五部', '乙')]
     assert result['salespersons'] == ['甲', '乙']
@@ -85,33 +89,3 @@ def test_local_file_cannot_replace_code_roster(settings):
 def test_other_days_not_implicitly_restricted(settings):
     settings.erp_roster_date = date(2026, 11, 26)
     assert workflow._roster(settings, None) is None
-
-
-def test_single_scope_passes_name_to_bulk_capture(settings, monkeypatch):
-    calls = []
-    monkeypatch.setattr(workflow, 'refresh_daily_fees', lambda *a, **k: {})
-    monkeypatch.setattr(workflow, 'capture_erp_bulk', lambda *a, **k: calls.append(k) or {})
-    monkeypatch.setattr(workflow, 'save_capture', lambda *a: {'capture_id':'saved', 'cleaning_status':'saved'})
-    monkeypatch.setattr(workflow, '_evaluate_capture', lambda *a, **k: {'status':'completed'})
-    workflow._run_workflow(settings, department='Tiktok一部', salesperson='甲', web_session=None, client=None, auth=None)
-    assert calls[0]['salesperson'] == '甲'
-    assert calls[0]['department'] == 'Tiktok一部'
-
-
-def test_each_scope_is_archived_before_callback_and_next_seller(settings, monkeypatch):
-    monkeypatch.setattr(workflow, 'ERP_ROSTER_NAMES', ('甲', '乙'))
-    monkeypatch.setattr(workflow, 'ERP_ROSTER_DEPARTMENTS', {'甲': 'Tiktok一部', '乙': 'Tiktok五部'})
-    calls = []
-
-    def collect(settings, *, salesperson, **kwargs):
-        calls.append('collect:' + salesperson)
-        return {'status': 'completed', 'ready_prices': 1}
-
-    def submit(scope):
-        manifest, = (settings.runtime_dir / 'erp-workflows').glob('*/result.json')
-        assert json.loads(manifest.read_text())['departments'][-1] == scope
-        calls.append('submit:' + scope['salesperson'])
-
-    monkeypatch.setattr(workflow, '_run_workflow', collect)
-    workflow.run_workflow(settings, roster_date=DAY, on_roster_scope=submit)
-    assert calls == ['collect:甲', 'submit:甲', 'collect:乙', 'submit:乙']

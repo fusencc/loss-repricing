@@ -74,6 +74,7 @@ def test_ambiguous_aliases_are_blocked_without_combining_loss_samples(context):
 
 def test_reevaluate_worker_submits_only_selected_target_and_unknown_only_queries(context):
     factory, cfg, _ = context
+    cfg = cfg.model_copy(update={'erp_roster_schedule_enabled': False})
     source = RenamedSource(cfg.runtime_dir)
     service = PricingService(factory, source, cfg)
     batch = service.run_batch('held')
@@ -156,6 +157,7 @@ def test_current_items_and_counts_omit_resolved_history_but_preserve_batches(cli
     first = state.service.run_batch('held')
     enable(state.factory)
     state.service.run_batch('enabled')
+    state.service.reconcile()
     current = client.get('/api/items').json()
     verified = {row['key']['item_id'] for row in current if row['status'] == '已核验'}
     assert len(verified) == 7
@@ -220,6 +222,7 @@ def test_migration_preserves_legacy_verified_cooldown_and_json_history(context):
     enable(factory)
     service = PricingService(factory, source, cfg)
     service.run_batch('old-success')
+    service.reconcile()
     legacy_guards(factory)
     with factory() as session:
         before = {e.id: e.request for e in session.scalars(select(Execution))}
@@ -509,6 +512,7 @@ def test_old_terminal_result_does_not_replace_new_external_pending_source(client
     service = PricingService(state.factory, source, state.config)
     enable(state.factory)
     service.run_batch('already-verified')
+    service.reconcile()
     original_collect = source.collect
     def external_pending(day):
         snapshot = original_collect(day)

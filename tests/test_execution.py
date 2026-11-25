@@ -42,7 +42,9 @@ def test_readback_above_reference_is_not_verified_within_old_amount_tolerance(co
             result=super().lookup(*args)
             return replace(result,actual_price=result.actual_price+Decimal(overshoot))
     enable(factory)
-    PricingService(factory,Capped(cfg.runtime_dir),cfg).run_batch('reference-readback')
+    service = PricingService(factory, Capped(cfg.runtime_dir), cfg)
+    service.run_batch('reference-readback')
+    service.reconcile()
     with factory() as session:
         execution=session.scalar(select(Execution))
         assert execution.state==expected
@@ -82,7 +84,9 @@ def test_reference_priority_can_submit_and_verify_even_with_loss_or_no_price_inc
             snapshot.online[0].sku_price_reference=ceiling(cap)
             return snapshot
     enable(factory)
-    PricingService(factory,ReferencePriority(cfg.runtime_dir),cfg).run_batch('reference-priority')
+    service = PricingService(factory, ReferencePriority(cfg.runtime_dir), cfg)
+    service.run_batch('reference-priority')
+    service.reconcile()
     with factory() as session:
         execution=session.scalar(select(Execution))
         assert execution is not None and execution.state=='verified'
@@ -106,7 +110,9 @@ def test_duplicate_online_references_keep_one_profit_source_for_readback(context
             snapshot.lines=snapshot.lines[:2]
             return snapshot
     enable(factory)
-    PricingService(factory,DuplicateReference(cfg.runtime_dir),cfg).run_batch('duplicate-reference')
+    service = PricingService(factory, DuplicateReference(cfg.runtime_dir), cfg)
+    service.run_batch('duplicate-reference')
+    service.reconcile()
     with factory() as session:
         execution=session.scalar(select(Execution))
         assert execution.state=='verified'
@@ -115,18 +121,34 @@ def test_duplicate_online_references_keep_one_profit_source_for_readback(context
         assert execution.request['trace']['online_rows'][0]['sku_price_reference']['marketing_price']=='10.8'
 
 
-def test_empty_pilot_never_submits_then_enabled_batch_verifies(context):
-    factory, cfg, adapter = context
+def test_batch_submits_all_items_before_background_readback(context):
+    factory, cfg, _ = context
+
+    class TrackedAdapter(DemoAdapter):
+        lookups = 0
+
+        def lookup(self, *args):
+            self.lookups += 1
+            return super().lookup(*args)
+
+    adapter = TrackedAdapter(cfg.runtime_dir)
     service = PricingService(factory, adapter, cfg)
-    first = service.run_batch("initial")
-    assert isinstance(first, str)
+    assert isinstance(service.run_batch('initial'), str)
     with factory() as session:
         assert session.query(Execution).count() == 0
     enable(factory)
-    second = service.run_batch("enabled")
+    batch_id = service.run_batch('enabled')
+    assert adapter.lookups == 0
     with factory() as session:
-        verified = session.scalars(select(Item).where(Item.batch_id == second, Item.status == "已核验")).all()
-        assert len(verified) >= 2
+        pending = session.scalars(select(Execution)).all()
+        assert len(pending) >= 2
+        assert all(execution.state == 'accepted' for execution in pending)
+        assert all(session.get(VariantGuard, execution.variant_id).execution_id == execution.id
+                   for execution in pending)
+    service.reconcile()
+    with factory() as session:
+        verified = session.scalars(select(Item).where(Item.batch_id == batch_id, Item.status == '已核验')).all()
+        assert len(verified) == len(pending)
         assert all(session.scalar(select(Execution).where(Execution.item_id == item.id)).evidence for item in verified)
 
 
@@ -169,7 +191,9 @@ def test_three_price_mismatches_keep_guards_without_pausing_site(context):
             return result
 
     enable(factory)
-    PricingService(factory, BadPrice(cfg.runtime_dir), cfg).run_batch("bad-price")
+    service = PricingService(factory, BadPrice(cfg.runtime_dir), cfg)
+    service.run_batch('bad-price')
+    service.reconcile()
     assert settings_value(factory)["paused_sites"] == []
     with factory() as session:
         items = session.scalars(select(Item)).all()

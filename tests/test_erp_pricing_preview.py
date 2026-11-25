@@ -464,7 +464,7 @@ def test_live_missing_native_order_only_skips_that_order(source_files, has_shop_
     assert [(row['order_id'], row['code']) for row in report['issues']] == [('000003', 'missing_order_details')]
 
 
-def test_live_conflicting_shop_scope_never_localizes_a_missing_order(source_files):
+def test_live_conflicting_shop_scope_does_not_invalidate_other_orders(source_files):
     from app.adapters.erp_pricing import prepare_pricing
     capture,evidence=source_files;prep=live_scoped_preparation(capture,evidence)
     prep['shop_scopes']['000003']['erp_shop']='UNRELATED-NAME'
@@ -473,7 +473,7 @@ def test_live_conflicting_shop_scope_never_localizes_a_missing_order(source_file
     assert report['summary']['normalized_detail_lines'] == 2
 
 
-def test_positive_evidence_of_conflicting_shop_ids_still_blocks_preparation(source_files):
+def test_conflicting_shop_ids_only_exclude_related_targets(source_files):
     from app.adapters.erp_pricing import prepare_pricing
     capture,evidence=source_files;prep=live_scoped_preparation(capture,evidence)
     prep['orders'][0]['lines'][0]['mapping']['key']['shop_id']='SALES-DIFFERENT-ID'
@@ -652,7 +652,7 @@ def test_later_candidate_page_failure_keeps_already_aligned_finance(source_files
 
 
 @pytest.mark.parametrize('failure', ['first_page', 'all_finance_batches'])
-def test_completely_failed_source_is_never_reported_as_complete_empty_source(source_files, failure):
+def test_completely_failed_source_is_unknown_while_other_sources_continue(source_files, failure):
     capture, evidence = source_files
     capture['capture_complete'] = False
     group = capture['groups'][2]
@@ -753,3 +753,50 @@ def test_live_missing_finance_excludes_only_that_order_even_for_the_same_target(
     assert len(decisions) == 1
     assert decisions[0].ready and decisions[0].key.item_id == '0001001'
     assert decisions[0].upload_price > Decimal('20')
+
+
+@pytest.mark.parametrize('source', ['loss_allocatable', 'loss_pending', 'blocked_allocatable'])
+def test_one_verified_source_is_enough_and_preserves_coverage_evidence(source_files, source):
+    capture, evidence = source_files
+    capture['groups'] = [group for group in capture['groups'] if group['source'] == source]
+    ids = set(capture['groups'][0]['candidate_order_ids'])
+    evidence['orders'] = [order for order in evidence['orders'] if order['order_id'] in ids]
+    report = preview_pricing(capture, evidence)
+    assert report['evaluation_complete_sources'] == [source]
+    assert any(row['ready'] for row in report['decisions'])
+    assert len(report['source_coverage']) == 4
+    assert all(not row['preparation_complete'] for row in report['source_coverage'] if row['source'] != source)
+    assert all(row['source'] == source for decision in report['decisions'] for row in decision['trace']['source_rows'])
+
+
+@pytest.mark.parametrize('defect', ['missing_order_shop', 'order_shop_conflict', 'mapping_shop_mismatch', 'missing_details'])
+def test_order_evidence_defect_keeps_independent_target_and_source_coverage(source_files, defect):
+    capture, evidence = source_files
+    if defect == 'missing_order_shop':
+        for group in capture['groups']:
+            for row in group['rows']:
+                if row['orderid'] == '000001':
+                    row['fields']['店铺'] = None
+    elif defect == 'order_shop_conflict':
+        capture['groups'][0]['rows'][0]['fields']['店铺'] = '另一店铺'
+    elif defect == 'mapping_shop_mismatch':
+        evidence['orders'][0]['lines'][0]['mapping']['erp_shop'] = '另一店铺'
+    else:
+        evidence['orders'].pop(0)
+    report = preview_pricing(capture, evidence)
+    assert len(report['evaluation_complete_sources']) == 4
+    assert any(row['key']['item_id'] == '0001002' and row['ready'] for row in report['decisions'])
+    assert all(row['reason_code'] != 'incomplete_sources' for row in report['decisions'])
+
+
+def test_ambiguous_shop_ids_only_isolate_the_related_shop_targets(source_files):
+    from app.adapters.erp_pricing import prepare_pricing
+
+    capture, evidence = source_files
+    prep = live_scoped_preparation(capture, evidence)
+    prep['orders'][0]['lines'][0]['mapping']['key']['shop_id'] = 'CONFLICTING-ID'
+    report = prepare_pricing(capture, order_preparation=prep).report
+    assert len(report['evaluation_complete_sources']) == 4
+    assert [report['references']['lines'][rid]['order_id'] for rid in report['references']['retained_row_ids']] == ['000002']
+    assert any(issue['order_id'] == '000001' and issue['code'] == 'mapping_shop_mismatch' for issue in report['issues'])
+

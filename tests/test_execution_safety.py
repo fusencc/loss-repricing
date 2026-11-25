@@ -154,11 +154,12 @@ def test_unknown_keeps_every_lock_and_never_retransmits(safety_context):
     service = PricingService(factory, adapter, cfg)
     service.run_batch("unknown")
     original = executions(factory)
+    assert not adapter.lookups
     clock[0] += timedelta(days=4)
     service.reconcile()
     service.run_batch("still-unknown")
     assert len(adapter.submissions) == 3
-    assert len(adapter.lookups) == 6
+    assert len(adapter.lookups) == 3
     with factory() as session:
         for execution in original:
             assert session.get(Execution, execution.id).state == "unknown"

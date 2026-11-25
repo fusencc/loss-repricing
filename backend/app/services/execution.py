@@ -308,8 +308,6 @@ class PricingService:
             if self._submit(item_id, decision, business_date, roster=roster) is False:
                 self._rollover(run_key, batch_id, selected_item_id, fixed_day=fixed_day)
                 break
-            # 单条完成即核验；超差保留本条锁和证据，其他独立目标继续。
-            self.reconcile(item_id=item_id, summarize_batch=False)
         else:
             # 最后一个候选可能在计算/挂起阶段跨日，没有下一轮循环替它触发重新取数。
             if utcnow().astimezone(BEIJING).date() != business_date:
@@ -542,7 +540,7 @@ class PricingService:
         event('execution.result_saved', execution_id=execution_id, item_id=item_id, batch_id=item.batch_id,
               state=execution.state, source=self.adapter.mode, synthetic=getattr(self.adapter, 'synthetic', False))
 
-    def reconcile(self, item_id=None, target_id=None, *, summarize_batch=True):
+    def reconcile(self, item_id=None, target_id=None):
         # 核验不受暂停开关限制；否则暂停后已送达的请求将永久失去跟踪。
         with self.factory() as session:
             # 依据模式隔离约束：只让原始批次同模式的适配器回读；其他模式的状态和锁原样保留。
@@ -679,9 +677,8 @@ class PricingService:
                     Execution.variant_id == current.variant_id,
                     Execution.state.in_(["submitting", "accepted", "unknown", "mismatch"])
                 ).order_by(Execution.created_at, Execution.id).limit(1))
-                if summarize_batch:
-                    # 后台回查与批次、通知同事务。批次内逐条回查由运行入口收尾。
-                    self._write_batch_summary(session, item.batch_id)
+                # 后台回查与批次、通知同事务。
+                self._write_batch_summary(session, item.batch_id)
             if current.state in {'verified', 'failed', 'mismatch'}:
                 event({'verified': 'execution.verified', 'failed': 'execution.rejected',
                        'mismatch': 'execution.mismatch'}[current.state],

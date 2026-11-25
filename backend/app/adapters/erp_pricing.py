@@ -493,11 +493,10 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
     if current_fx is not None and (
         current_fx.synthetic != capture.synthetic or current_fx.date != business_date
         or current_fx.queried_at.astimezone(BEIJING).date() != business_date
-        or current_fx.queried_at < latest_observation or not valid_observation_window
     ):
         raise ValueError('实时汇率业务使用日、查询时点或样例属性与本次采集不一致')
     fx = evidence.fx if evidence else current_fx
-    evaluated_at = evidence.evaluated_at if evidence else (current_fx.queried_at if current_fx else (live.observed_at if live else None))
+    evaluated_at = evidence.evaluated_at if evidence else (live.observed_at if live else (current_fx.queried_at if current_fx else None))
 
     scope_by_source = {
         source: group.scope_bloc(capture.department, capture.salesperson) for source, group in groups.items()
@@ -533,8 +532,7 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
         if (live.erp_capture_id != capture.capture_id or live.synthetic != capture.synthetic
                 or live.sample_only != capture.sample_only
                 or live.observed_at.astimezone(BEIJING).date() != business_date
-                or live.observed_at < latest_observation
-                or (current_fx is not None and live.observed_at > current_fx.queried_at)):
+                or live.observed_at < latest_observation):
             raise ValueError('实时订单准备与采集范围、样本或观察时点不一致')
         orders = {order.order_id:order for order in live.orders}
         if (orders.keys() | live.shop_scopes.keys()) - memberships.keys():
@@ -556,8 +554,7 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
                 or live_online.observed_at.astimezone(BEIJING).date() != business_date
                 or live_online.evaluated_at < live.observed_at
                 or live_online.evaluated_at > live_online.observed_at
-                or live_online.evaluated_at.astimezone(BEIJING).date() != business_date
-                or (current_fx is not None and live_online.observed_at > current_fx.queried_at)):
+                or live_online.evaluated_at.astimezone(BEIJING).date() != business_date):
             raise ValueError('实时在线准备与采集范围、样本或观察时点不一致')
         contracts = {entry.contract.site:entry.contract for entry in live_online.contracts}
         if len(contracts)!=len(live_online.contracts):
@@ -623,9 +620,16 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
     ambiguous_shop_ids = {shop_id for ids in shop_ids_by_name.values() if len(ids) > 1 for shop_id in ids}
     for order_id, source_rows in memberships.items():
         # 财务范围核对失败的来源不能贡献候选，也不牵连其他已核对来源。
-        source_rows = {source: rows for source, rows in source_rows.items() if source in complete_sources}
-        if not source_rows:
+        available_rows = {source: rows for source, rows in source_rows.items() if source in complete_sources}
+        if not available_rows:
+            shops = {row.fields.shop for rows in source_rows.values() for row in rows
+                     if row.fields.shop and row.fields.shop.strip()}
+            if problem := _order_problem(source_rows, groups, shops):
+                _add_issue(issues, order_id, list(source_rows), problem)
+            if order_id not in orders:
+                _add_issue(issues, order_id, list(source_rows), 'missing_order_details')
             continue
+        source_rows = available_rows
         order = orders.get(order_id)
         sources = list(source_rows)
         shops = {row.fields.shop for rows in source_rows.values() for row in rows
@@ -753,7 +757,7 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
         if unavailable_lists:
             global_issues.append(f"候选名单未取全：{'、'.join(unavailable_lists)}；不能将缺失来源视为零订单；已验证订单可独立算价")
         else:
-            global_issues.append("四类候选覆盖或明细归属仍有未定位缺口")
+            global_issues.append("部分候选来源覆盖尚未核对；已验证来源订单可独立算价")
     if fx is None:
         global_issues.append("缺少带日期及来源引用的汇率，尚未进入算价")
 
@@ -799,7 +803,7 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
         as_of=max([latest_observation, live.observed_at, *(entry.state.observed_at for entry in live_online.online)]) if live_online else (max(latest_observation, live.observed_at) if live else latest_observation), business_date=business_date,
         fx_date=fx.date, fx_rates=fx.source_rates if current_fx is not None else fx.rates,
         fx_rate_unit='cny_per_currency' if current_fx is not None else 'currency_per_cny',
-        # 仅实时来源逐批核对后可使用已观察订单范围；文件回放维持完整来源门禁。
+        # 候选范围只描述来源证据，缺失来源不冒充完整零订单。
         complete_sources=complete_sources, candidate_scope=candidate_scope, lines=lines, online=online_states,
         contracts=contracts, source_versions=source_versions,
     )

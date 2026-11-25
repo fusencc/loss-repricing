@@ -235,14 +235,18 @@ def test_preview_batch_preserves_partial_failure_and_independent_verification(re
     run = client.post("/api/batches/run")
     assert run.status_code == 200
     job_id = run.json()["job_id"]
-    Worker(factory, app.state.service).tick()
+    worker = Worker(factory, app.state.service)
+    worker.tick(now.timestamp())
     job = client.get(f"/api/jobs/{job_id}").json()
     assert job["state"] == "done"
     batch_id = job["batch_id"]
     detail = client.get(f"/api/batches/{batch_id}")
     assert detail.status_code == 200
-    assert detail.json()["status"] == "completed"
+    assert detail.json()["status"] == "pending_verification"
     assert sorted(sent) == ["0001001", "0001002"]
+    assert not observed
+    worker.tick(now.timestamp() + 61)
+    assert client.get(f"/api/batches/{batch_id}").json()["status"] == "completed"
     assert observed == sent[:1]
     with factory() as session:
         rows = {item.key["item_id"]: attempt for item, attempt in session.execute(
