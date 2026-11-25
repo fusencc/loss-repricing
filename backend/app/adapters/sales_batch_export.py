@@ -174,11 +174,7 @@ def _export_file(client, auth, ids, bloc, *, checkpoint=None):
                                 raise ValueError('sales_export_file_too_large')
                     return bytes(content)
                 content = read(download, 'download')
-                # 提交实测 datas=null。唯一新增任务还必须用文件内的完整产品集合核对，
-                # 避免并发时把他人的文件认成本批，缺失范围不进入本批算价。
                 rows = _parse_export(content, set(ids), bloc)
-                if {row['产品ID'] for _, row in rows} != set(ids):
-                    raise ValueError('sales_export_product_coverage_incomplete')
                 save(state='downloaded', stage='complete', rows=len(rows), bytes=len(content))
                 return content, task_id, rows
         sleep(5)

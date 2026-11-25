@@ -68,6 +68,56 @@ def test_export_download_verifies_coverage_and_uses_original_headers(tmp_path):
             _export_file(client, auth, [first, '1234567890123456703'], '集团二部')
 
 
+def test_partial_export_keeps_variants_and_reports_only_missing_shop_product_pairs(tmp_path):
+    from io import BytesIO
+
+    import httpx
+    from openpyxl import Workbook
+
+    from app.adapters import sales_batch_export as sales
+    from app.config import Settings
+
+    found, missing = '1234567890123456701', '1234567890123456702'
+    book = Workbook()
+    sheet = book.active
+    sheet.append(sales.COLUMNS)
+    for sku in ('A', 'B'):
+        row = {'集团': '集团二部', '店铺名称': 'SHOPPH', '站点': 'PH', '产品ID': found,
+               '本地主sku': 'MAIN', '本地子sku': sku, '平台子sku': sku, '商品ID': 'I' + sku}
+        sheet.append([row.get(column) for column in sales.COLUMNS])
+    buffer = BytesIO()
+    book.save(buffer)
+    book.close()
+
+    def route(request):
+        path = request.url.path
+        if path.endswith('/token'):
+            return httpx.Response(200, json={'access_token': 'test', 'expires_in': 3600})
+        if path == sales.EXPORT:
+            return httpx.Response(200, json={'resp_code': 0, 'datas': {'id': '1'}})
+        if path == sales.TASKS:
+            tasks = [{'id': '1', 'taskType': 1, 'status': 3, 'excelUrl': 'http://121.46.237.218:19110/export.xlsx'}]
+            return httpx.Response(200, json={'resp_code': 0, 'datas': {'data': tasks}})
+        if path == sales.CURRENCY_RATES:
+            return httpx.Response(200, json=[])
+        assert path == '/export.xlsx'
+        return httpx.Response(200, content=buffer.getvalue())
+
+    settings = Settings(_env_file=None, runtime_dir=tmp_path, vendor_username='u', vendor_password='p',
+                        sales_request_interval_seconds=0)
+    candidates = {'O1': [found], 'O2': [missing], 'O3': [found]}
+    scopes = {order: {'erp_shop': shop, 'shop_id': shop + '-id'} for order, shop in
+              [('O1', 'SHOPPH'), ('O2', 'SHOPPH'), ('O3', 'OTHERPH')]}
+    with httpx.Client(transport=httpx.MockTransport(route)) as client:
+        result = sales.capture_sales_batch(settings, {'capture_id': 'test', 'groups': []}, candidates, scopes, client=client)
+    assert [(v['shopName'], v['productId'], v['localSellerSku'], v['sellerSkuId']) for v in result['variants']] == [
+        ('SHOPPH', found, 'A', 'IA'), ('SHOPPH', found, 'B', 'IB')]
+    assert not result['acquisition_complete']
+    assert result['issues'] == [
+        {'code': 'sales_export_shop_product_missing', 'product_id': found, 'shop': 'OTHERPH'},
+        {'code': 'sales_export_shop_product_missing', 'product_id': missing, 'shop': 'SHOPPH'}]
+
+
 def test_official_history_filters_candidates_before_online_preparation(monkeypatch):
     from types import SimpleNamespace
 
