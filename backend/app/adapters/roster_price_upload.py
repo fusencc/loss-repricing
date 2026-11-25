@@ -85,6 +85,9 @@ class RosterPriceTransport:
             # 算价快照可能只保存两种当前价格。实时 OFF 必须与本轮用的精确成交系数吻合。
             observed_factor = MoneyRatio(Decimal(1)) - MoneyRatio(observed_discount, Decimal(100))
             observed = datetime.fromisoformat(control['observed_at'])
+            raw_stock = variant.get('overseasStockSum')
+            stock = None if raw_stock in (None, '') else money(raw_stock)
+            current_fulfillment = 'overseas' if stock is not None and stock > 0 else 'direct'
             expected_parent = (shop_name, key.shop_id, key.product_id, online.main_sku)
             if (
                 tuple(parent.get(field) for field in ('shopName', 'shopId', 'productId', 'localMainSku')) != expected_parent
@@ -93,6 +96,8 @@ class RosterPriceTransport:
                     (shop_name, key.shop_id, key.product_id, key.sku)
                 or sku['seller_sku'] != key.sku
                 or variant['currency'] != online.currency or sku['price']['currency'] != online.currency
+                or (online.profit_check.overseas_stock == 0 and stock != 0)
+                or current_fulfillment != online.profit_check.mode
                 or not _warehouse_matches(variant, key.warehouse)
                 or retail != online.retail_price or money(sku['price']['sale_price']) != retail
                 or actual != baseline_actual or not 0 <= observed_discount < 100 or observed_factor != baseline_factor

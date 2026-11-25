@@ -113,16 +113,39 @@ class Worker:
             if daily and scheduled_day < current_day:
                 # 日任务只消费本日数据。旧执行继续走独立核验，新日由其自己的唯一日任务处理。
                 state, error = "cancelled", "原定时任务已过业务日，按新业务日定时任务处理"
+            elif daily and job.payload.get('resume_roster_workflow'):
+                from app.models import Audit
+                from app.services.erp_roster_pricing import resume_roster_stock_pricing
+                if (not roster_date or scheduled_day != roster_date.isoformat()
+                        or service_config.erp_roster_submit_date != roster_date
+                        or service_config.adapter_mode != 'live' or not service_config.live_submit_enabled):
+                    raise ValueError('零库存续跑只适用已授权的同日名单')
+                resume_id = job.payload['resume_roster_workflow']
+                results = resume_roster_stock_pricing(self.service, job.id, roster_date, resume_id)
+                with transaction(self.factory) as session:
+                    session.add(Audit(id=str(uuid4()), action='roster.zero_stock_resumed', actor='worker',
+                                      detail={'job_id': job.id, 'workflow_id': resume_id, 'sellers': results},
+                                      created_at=stamp()))
             elif daily and roster_date and scheduled_day == roster_date.isoformat():
                 from app.services.erp_workflow import run_workflow
                 from app.services.erp_roster_pricing import run_roster_pricing
                 from app.services.erp_capture_store import write_verified
                 # 采集只读，再交给真实定价服务执行已有的提交和回读检查。
                 config = service_config.model_copy(update={'live_submit_enabled': False})
-                capture = run_workflow(config, roster_date=roster_date)
-                if (service_config.adapter_mode == 'live' and service_config.live_submit_enabled
-                        and capture['ready_prices']):
-                    capture['pricing_batches'] = run_roster_pricing(self.service, job.id, roster_date, capture)
+                pricing_batches = []
+
+                def price_scope(scope):
+                    if scope['ready_prices']:
+                        result = run_roster_pricing(self.service, job.id, roster_date, scope)
+                        pricing_batches.append(result)
+                        scope['pricing_batch'] = result
+
+                if service_config.adapter_mode == 'live' and service_config.live_submit_enabled:
+                    capture = run_workflow(config, roster_date=roster_date, on_roster_scope=price_scope)
+                else:
+                    capture = run_workflow(config, roster_date=roster_date)
+                if pricing_batches:
+                    capture['pricing_batches'] = pricing_batches
                     write_verified(Path(capture['artifact_dir']) / 'result.json', capture)
                 from app.services.roster_notices import enqueue_roster_notices
                 try:

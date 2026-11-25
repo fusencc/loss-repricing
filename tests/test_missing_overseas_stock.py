@@ -68,3 +68,8 @@ def test_manual_correction_keeps_missing_stock_warning():
     result = manual_decision(snapshot([line(k)], [state]), state, Decimal('12.66'),
                              'synthetic', 'C1', NOW)
     assert result.ready and result.trace['warnings'] == [WARNING]
+
+
+@pytest.mark.parametrize('stock', [0, '0', '0.00'])
+def test_known_zero_stock_does_not_require_a_default_warehouse_name(stock):
+    assert _warehouse_matches({'overseasStockSum': stock, 'warehousename': 'online'}, 'ERP')

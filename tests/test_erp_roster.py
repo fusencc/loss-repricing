@@ -96,3 +96,22 @@ def test_single_scope_passes_name_to_bulk_capture(settings, monkeypatch):
     workflow._run_workflow(settings, department='Tiktok一部', salesperson='甲', web_session=None, client=None, auth=None)
     assert calls[0]['salesperson'] == '甲'
     assert calls[0]['department'] == 'Tiktok一部'
+
+
+def test_each_scope_is_archived_before_callback_and_next_seller(settings, monkeypatch):
+    monkeypatch.setattr(workflow, 'ERP_ROSTER_NAMES', ('甲', '乙'))
+    monkeypatch.setattr(workflow, 'ERP_ROSTER_DEPARTMENTS', {'甲': 'Tiktok一部', '乙': 'Tiktok五部'})
+    calls = []
+
+    def collect(settings, *, salesperson, **kwargs):
+        calls.append('collect:' + salesperson)
+        return {'status': 'completed', 'ready_prices': 1}
+
+    def submit(scope):
+        manifest, = (settings.runtime_dir / 'erp-workflows').glob('*/result.json')
+        assert json.loads(manifest.read_text())['departments'][-1] == scope
+        calls.append('submit:' + scope['salesperson'])
+
+    monkeypatch.setattr(workflow, '_run_workflow', collect)
+    workflow.run_workflow(settings, roster_date=DAY, on_roster_scope=submit)
+    assert calls == ['collect:甲', 'submit:甲', 'collect:乙', 'submit:乙']

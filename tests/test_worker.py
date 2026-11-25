@@ -186,7 +186,7 @@ def test_pilot_day_at_nine_routes_only_to_roster_and_publishes_once(tmp_path, mo
     calls = []
     drive_calls = []
 
-    def capture(config, *, roster_date):
+    def capture(config, *, roster_date, on_roster_scope=None):
         assert roster_date == pilot_day and config.live_submit_enabled is False
         calls.append(roster_date)
         return {'status': 'completed', 'ready_prices': 0, 'departments': []}
@@ -237,20 +237,25 @@ def test_roster_with_ready_prices_hands_same_job_and_day_to_pricing(tmp_path, mo
     service.config = Settings(_env_file=None, runtime_dir=tmp_path,
                               coordination_required=False, live_submit_enabled=True)
     calls = []
-    capture = {'status': 'completed', 'ready_prices': 1, 'departments': [],
+    first = {'salesperson': '桂露', 'ready_prices': 1}
+    second = {'salesperson': '莫雯舒', 'ready_prices': 1}
+    capture = {'status': 'completed', 'ready_prices': 2, 'departments': [first, second],
                'artifact_dir': str(tmp_path)}
 
-    def collect(config, *, roster_date):
+    def collect(config, *, roster_date, on_roster_scope=None):
         assert not config.live_submit_enabled
         assert roster_date == pilot_day
+        if on_roster_scope:
+            on_roster_scope(first)
+        assert [person for _, person in calls] == ['桂露']
+        on_roster_scope(second)
         return capture
 
-    def submit(service_arg, run_key, day, collected):
+    def submit(service_arg, run_key, day, scope):
         assert service_arg is service
         assert day == pilot_day
-        assert collected is capture
-        calls.append(run_key)
-        return [{'salesperson': '桂露', 'batch_id': 'price-batch', 'state': 'evaluated'}]
+        calls.append((run_key, scope['salesperson']))
+        return {'salesperson': scope['salesperson'], 'batch_id': 'price-batch', 'state': 'evaluated'}
 
     monkeypatch.setattr('app.services.erp_workflow.run_workflow', collect)
     monkeypatch.setattr('app.services.erp_roster_pricing.run_roster_pricing', submit)
@@ -260,7 +265,32 @@ def test_roster_with_ready_prices_hands_same_job_and_day_to_pricing(tmp_path, mo
 
     with factory() as session:
         job = session.query(Job).one()
-        assert calls == [job.id]
+        assert calls == [(job.id, '桂露'), (job.id, '莫雯舒')]
         assert job.state == 'done'
     assert capture['pricing_batches'][0]['batch_id'] == 'price-batch'
+    engine.dispose()
+
+
+def test_zero_stock_resume_reuses_original_daily_job(tmp_path, monkeypatch):
+    from datetime import date
+
+    engine, factory, service = setup(tmp_path)
+    day = date(2026, 11, 25)
+    service.config = Settings(_env_file=None, runtime_dir=tmp_path, coordination_required=False,
+                              live_submit_enabled=True, erp_roster_submit_date=day)
+    calls = []
+
+    def resume(service_arg, job_id, roster_date, manifest_id):
+        assert service_arg is service and roster_date == day
+        calls.append((job_id, manifest_id))
+        return {'桂露': {'targets': 4}}
+
+    monkeypatch.setattr('app.services.erp_roster_pricing.resume_roster_stock_pricing', resume)
+    job_id = enqueue(factory, 'run', {'date': str(day), 'resume_roster_workflow': 'a' * 32}, f'daily:{day}')
+    Worker(factory, service).tick(datetime(2026, 11, 25, 1, 5, tzinfo=timezone.utc).timestamp())
+
+    with factory() as session:
+        job = session.query(Job).one()
+        assert job.id == job_id and job.state == 'done'
+    assert calls == [(job_id, 'a' * 32)]
     engine.dispose()

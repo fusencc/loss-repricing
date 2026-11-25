@@ -70,6 +70,16 @@ def _bound(capture, source, schema):
 
 
 def _warehouse_matches(variant, warehouse):
+    raw_stock = variant.get('overseasStockSum')
+    try:
+        stock = None if raw_stock in (None, '') else _number(raw_stock)
+    except ValueError:
+        return False
+    # 2026-11-25：库存明确为零即按直发核对，ERP 与销售默认仓名可不同。
+    if stock == 0:
+        return True
+    if stock is not None and stock < 0:
+        return False
     text = variant.get('overseasStockWarehouseInfo')
     if isinstance(text, str):
         try:
@@ -89,12 +99,8 @@ def _warehouse_matches(variant, warehouse):
                 continue
         if len(matches) == 1:
             return True
-    # 缺库存按2026-11-20确认选直发，但仍须默认仓库名精确匹配，不放宽归属。
-    try:
-        stock = variant.get('overseasStockSum')
-        return (stock in (None, '') or _number(stock) == 0) and variant.get('warehousename') == warehouse
-    except ValueError:
-        return False
+    # 库存未知时保留原直发核验，不能把缺值当成已证实为零。
+    return stock is None and variant.get('warehousename') == warehouse
 
 
 def prepare_order_losses(capture, native, sales=None, *, order_headers=None):

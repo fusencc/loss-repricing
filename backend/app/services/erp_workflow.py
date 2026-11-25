@@ -79,7 +79,7 @@ def _roster(settings, required_day):
 
 
 def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, progress=None,
-                 roster_date: date | None = None, roster_person=None):
+                 roster_date: date | None = None, roster_person=None, on_roster_scope=None):
     """按部门串行完成只读采集和算价，显式指定采集编号时回放单批。"""
     if roster_person is not None and (roster_date is None or roster_person not in ERP_ROSTER_DEPARTMENTS):
         raise ValueError('名单刷新须绑定单日名单中的销售员')
@@ -133,6 +133,8 @@ def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, prog
                                 **({'salesperson': name} if name is not None else {})})
             summary['ready_prices'] += result['ready_prices']
             write_verified(manifest, summary)
+            if name is not None and on_roster_scope is not None:
+                on_roster_scope(departments[-1])
             if progress:
                 progress(f"{department} 处理结果：{result['status']}。")
     if all(department['status'] == 'completed' for department in departments):
