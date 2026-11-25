@@ -5,9 +5,9 @@ from types import SimpleNamespace
 from app.services import erp_workflow as workflow
 
 
-def test_incomplete_sources_prefetches_known_targets_but_preserves_block(tmp_path, monkeypatch):
+def test_rate_limited_partial_capture_prices_known_targets(tmp_path, monkeypatch):
     capture = {'capture_id': 'capture', 'department': 'D', 'capture_complete': False,
-               'groups': [{'candidate_order_ids': ['order']}], 'stopped_by_rate_limit': False}
+               'groups': [{'candidate_order_ids': ['order']}], 'rate_limit_observed': True}
 
     def artifact(name, **extra):
         data = {'source_id': name, 'erp_capture_id': 'capture', 'synthetic': True,
@@ -43,7 +43,7 @@ def test_incomplete_sources_prefetches_known_targets_but_preserves_block(tmp_pat
     monkeypatch.setattr(workflow, 'capture_sku_price_references', lambda *a, **k: {})
     monkeypatch.setattr(workflow, 'prepare_online_states', lambda *a, **k: {'online': [], 'issues': []})
     monkeypatch.setattr(workflow, 'save_pricing_preview', lambda *a, **k: {'preview_id': 'preview'})
-    final = {'preview_id': 'preview', 'synthetic': True, 'decisions': [],
+    final = {'preview_id': 'preview', 'synthetic': True, 'decisions': [{'ready': True}],
              'global_issues': ['候选名单未取全'], 'issues': [], 'summary': {}}
     monkeypatch.setattr(workflow, 'load_pricing_preview', lambda *a: (final, 'digest'))
     monkeypatch.setattr(workflow, 'summarize_seller_candidates', lambda *a: {})
@@ -51,7 +51,7 @@ def test_incomplete_sources_prefetches_known_targets_but_preserves_block(tmp_pat
     result = workflow._evaluate_capture(SimpleNamespace(runtime_dir=tmp_path), capture, replay=False,
                                         headers=headers, native=native, daily_fees={})
     assert seen == [{'erp_shop': 'shop', 'erp_sku': 'sku', 'main_sku': 'main', 'key': key}]
-    assert result['status'] == 'blocked' and result['ready_prices'] == 0
+    assert result['status'] == 'needs_attention' and result['ready_prices'] == 1
     assert result['global_issues'] == ['候选名单未取全']
     saved = json.loads((tmp_path / 'erp-workflows' / result['artifact_dir'].split('/')[-1] / 'unresolved.json').read_text())
     assert saved['global_issues'] == ['候选名单未取全']

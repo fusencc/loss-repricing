@@ -33,6 +33,7 @@ from app.adapters.live_online_preparation import prepare_online_states
 from app.services.erp_capture_store import load_capture, rebuild_clean_capture, save_capture, write_verified
 from app.services.erp_pricing import load_pricing_preview, save_pricing_preview
 from app.services.erp_seller_candidates import summarize_seller_candidates
+from app.services.erp_roster_capture import project_seller_capture
 
 def filter_candidate_history(settings, targets, *, client=None, auth=None):
     """按子商品查询近72小时官方历史；仅明确有调价记录时排除，未知继续。"""
@@ -103,7 +104,9 @@ def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, prog
     if names is not None:
         if any(ERP_ROSTER_DEPARTMENTS.get(name) not in ERP_DEPARTMENTS for name in names):
             raise ValueError('代码中的销售员名单缺少有效部门归属，不进行 ERP 采集')
-        scopes = [(ERP_ROSTER_DEPARTMENTS[name], name) for name in names]
+        by_department = {department: [name for name in names if ERP_ROSTER_DEPARTMENTS[name] == department]
+                         for department in ERP_DEPARTMENTS}
+        scopes = [(department, people) for department, people in by_department.items() if people]
     else:
         scopes = [(department, None) for department in ERP_DEPARTMENTS]
     directory = Path(settings.runtime_dir) / 'erp-workflows' / uuid4().hex
@@ -120,20 +123,18 @@ def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, prog
     manifest = directory / 'result.json'
     write_verified(manifest, summary)
 
-    def collect(department, name, web_session):
+    def collect(department, people, web_session):
         capture = None
         try:
             if progress:
-                progress(f'开始处理 {department}。')
-            collected = capture_erp_bulk(settings, department=department, salesperson=name,
-                                         progress=progress, web_session=web_session)
+                progress(f'开始采集 {department}。')
+            collected = capture_erp_bulk(settings, department=department, progress=progress, web_session=web_session,
+                                         **({'roster_salespeople': people} if people is not None else {}))
             capture = save_capture(settings.runtime_dir, collected)
-            if capture['cleaning_status'] != 'saved':
-                raise OSError('原件已存档，清洗失败；请按采集编号重建清洗')
             headers, native = _capture_erp_sources(settings, capture, progress, web_session)
-            return department, name, capture, headers, native, None
+            return capture, headers, native, None
         except Exception as error:
-            return department, name, capture, None, None, _workflow_failure(error, capture)
+            return capture, None, None, _workflow_failure(error, capture)
 
     def consume(pool=None):
         with httpx.Client(timeout=60, trust_env=False, follow_redirects=False) as client:
@@ -162,15 +163,16 @@ def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, prog
                     result.update(_workflow_failure(error, capture))
                     result.update(scope)
                 departments.append(result)
+                if names is not None:
+                    departments.sort(key=lambda entry: names.index(entry['salesperson']))
                 summary['ready_prices'] += result['ready_prices']
                 write_verified(manifest, summary)
                 return result
 
             if pool is None:
                 with _session(settings) as web_session:
-                    for department, name in scopes:
-                        if finish(*collect(department, name, web_session)).get('stopped_by_rate_limit'):
-                            break
+                    for department, _ in scopes:
+                        finish(department, None, *collect(department, None, web_session))
                 return
 
             pending = Queue()
@@ -178,12 +180,18 @@ def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, prog
             def produce():
                 try:
                     with _session(settings) as web_session:
-                        for department, name in scopes:
-                            item = collect(department, name, web_session)
-                            pending.put(item)
-                            if ((item[2] and item[2].get('stopped_by_rate_limit'))
-                                    or (item[5] and item[5].get('stopped_by_rate_limit'))):
-                                break
+                        for department, people in scopes:
+                            capture, headers, native, failure = collect(department, people, web_session)
+                            for person in people:
+                                if failure is not None:
+                                    pending.put((department, person, None, None, None, dict(failure)))
+                                    continue
+                                try:
+                                    projected = project_seller_capture(settings.runtime_dir, capture, headers, native, person)
+                                except Exception as error:
+                                    pending.put((department, person, None, None, None, _workflow_failure(error)))
+                                else:
+                                    pending.put((department, person, *projected, None))
                 finally:
                     pending.put(None)
 
@@ -197,7 +205,8 @@ def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, prog
     else:
         with ThreadPoolExecutor(max_workers=2) as pool:
             pool.submit(copy_context().run, consume, pool).result()
-    if len(departments) == len(scopes) and all(department['status'] == 'completed' for department in departments):
+    expected = len(scopes) if names is None else len(names)
+    if len(departments) == expected and all(department['status'] == 'completed' for department in departments):
         summary['status'] = 'completed'
     elif summary['ready_prices'] or any(department['status'] == 'completed' for department in departments):
         summary['status'] = 'needs_attention'
@@ -211,10 +220,10 @@ def _workflow_failure(error, capture=None):
     error_id = event('erp.failed', exception=error, source='erp', synthetic=False,
                      stage='collect', error_code='workflow_failed')
     result = {'status': 'failed', 'error_id': error_id, 'ready_prices': 0, 'execution_allowed': False,
-              'stopped_by_rate_limit': isinstance(error, ErpAccountRateLimited)}
+              'rate_limit_observed': isinstance(error, ErpAccountRateLimited)}
     if capture is not None:
         result.update({key: capture[key] for key in ('capture_id', 'capture_complete', 'cleaning_status')})
-        result['stopped_by_rate_limit'] |= capture.get('stopped_by_rate_limit', False)
+        result['rate_limit_observed'] |= capture.get('rate_limit_observed', False)
     return result
 
 
@@ -229,9 +238,7 @@ def _capture_round_fx(settings):
 
 
 def _capture_shortcut(capture):
-    limited = capture.get('stopped_by_rate_limit', False)
-    empty = capture['capture_complete'] and not any(group['candidate_order_ids'] for group in capture['groups'])
-    return limited or empty
+    return capture['capture_complete'] and not any(group['candidate_order_ids'] for group in capture['groups'])
 
 
 def _capture_erp_sources(settings, capture, progress, web_session):
@@ -249,13 +256,11 @@ def _evaluate_capture(settings, capture, *, replay, evidence=None, exports=None,
                       current_fx=None, headers=None, native=None, client=None, auth=None):
     capture_id = capture['capture_id']
     if not replay and _capture_shortcut(capture):
-        limited = capture.get('stopped_by_rate_limit', False)
-        # 账号限流时停止本部门的后续取证。完整空名单已经确认无需进一步取数。
         return {
             'capture_id': capture_id, 'department': capture['department'], 'mode': 'capture',
-            'status': 'blocked' if limited else 'completed',
-            'capture_complete': capture['capture_complete'], 'cleaning_status': 'saved',
-            'stopped_by_rate_limit': limited, 'ready_prices': 0, 'execution_allowed': False,
+            'status': 'completed',
+            'capture_complete': capture['capture_complete'], 'cleaning_status': capture.get('cleaning_status', 'saved'),
+            'ready_prices': 0, 'execution_allowed': False,
         }
     sales_ref = None
     sales = None
@@ -382,7 +387,8 @@ def _evaluate_capture(settings, capture, *, replay, evidence=None, exports=None,
     })
     result = {
         **provenance, 'status': status, 'mode': 'replay' if replay else 'capture',
-        'capture_complete': capture['capture_complete'], 'cleaning_status': 'saved',
+        'capture_complete': capture['capture_complete'], 'cleaning_status': capture.get('cleaning_status', 'saved'),
+        'rate_limit_observed': any(src and src.get('rate_limit_observed') for src in (capture, headers, native)),
         'fx_status': fx_status,
         'sales_status': sales_status,
         'native_status': native_status,

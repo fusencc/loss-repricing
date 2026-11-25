@@ -215,7 +215,7 @@ def desktop_main():
         return 1
     log_event('capture.saved', stage='save', complete=result['capture_complete'])
     log_event('erp.completed', stage='capture', complete=result['capture_complete'],
-              limited=bool(result.get('stopped_by_rate_limit', False)))
+              limited=bool(result.get('rate_limit_observed', False)))
     print('结果文件：',result['result_file'])
     print(json.dumps(result['summary'],ensure_ascii=False,indent=2))
     for group in result['groups']:

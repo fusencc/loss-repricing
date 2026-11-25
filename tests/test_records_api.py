@@ -216,14 +216,13 @@ def test_price_stages_split_loss_and_profit_check_steps(client):
     stages = rows['i3']['decision']['stages']
     assert stages['currency'] == 'MYR' and stages['fx_rate'] == '0.65'
     assert [(row['label'], row['price']) for row in stages['rows']] == [
-        ('① 原实际营销价', '14.0000'), ('② 补亏损', '25.9602'), ('③ 利润校验', '34.8680')]
-    # 每1MYR折0.65元；增量与涨幅相对上一环节，正数由前端补 + 号。
-    assert [row['cny'] for row in stages['rows']] == ['9.1000', '16.8741', '22.6642']
-    assert [row['change_cny'] for row in stages['rows']] == [None, '7.7741', '5.7901']
+        ('① 原实际营销价', '14'), ('② 补亏损', '25.96'), ('③ 利润校验', '34.87')]
+    # 每1MYR折0.65元；增量与涨幅先按原值计算，再四舍五入展示。
+    assert [row['cny'] for row in stages['rows']] == ['9.1', '16.87', '22.66']
+    assert [row['change_cny'] for row in stages['rows']] == [None, '7.77', '5.79']
     assert [row['change_percent'] for row in stages['rows']] == [None, '85.43', '34.31']
-    # 在线利润率导致的变动只出现在 ③ 利润校验行：校正额 8.9078 MYR × 0.65 = 5.7901 元。
-    assert [row['profit_change_cny'] for row in stages['rows']] == [None, None, '5.7901']
-    assert stages['rows'][1]['trial_profit'] == '-0.8000'
+    assert [row['profit_change_cny'] for row in stages['rows']] == [None, None, '5.79']
+    assert stages['rows'][1]['trial_profit'] == '-0.8'
     assert stages['rows'][1]['trial_margin_percent'] == '-3.08'
     assert all('trial_margin_percent' not in stages['rows'][index] for index in (0, 2))
 
@@ -245,7 +244,15 @@ def test_price_stages_never_invent_the_loss_step_or_fx_rate(client):
         batch.snapshot = {'fx_rates': {'MYR': '1.5385', 'CNY': '1'}, 'fx_date': '2026-11-17'}
     stages = {row['id']: row for row in client.get('/api/records').json()['items']}['i3']['decision']['stages']
     # 该记录原始价 12.00 MYR；12 ÷ 1.5385 = 7.7998 元。
-    assert stages['rows'][0]['cny'] == '7.7998'
+    assert stages['rows'][0]['cny'] == '7.8'
+
+
+def test_price_stages_round_once_from_saved_values():
+    from app.services.records import price_stages
+    result = price_stages({'current_actual': '10.00499', 'target_actual': '10.005'},
+                          {'station_currency': 'MYR'}, {}, key(0))
+    assert result['rows'][0]['price'] == '10'
+    assert result['rows'][2]['price'] == '10.01'
 
 
 def test_reference_stage_shows_decrease_without_claiming_profit_check_passed():
@@ -256,7 +263,7 @@ def test_reference_stage_shows_decrease_without_claiming_profit_check_passed():
                        {'fx_rates':{'MYR':'1'},'fx_rate_unit':'cny_per_currency'},key(0))
     final=stages['rows'][2]
     assert final['label']=='③ 参考价优先'
-    assert final['price']=='9.0000' and final['change_cny']=='-2.2000'
+    assert final['price'] == '9' and final['change_cny'] == '-2.2'
     assert final['profit_change_cny'] is None
 
 
@@ -339,6 +346,31 @@ def test_live_roster_reuses_persisted_salesperson_for_regular_and_stock_batches(
     assert rows[0]['seller']['id'] == rows[1]['seller']['id'] is not None
 
 
+def test_live_roster_receipt_changes_display_and_merge_but_preserves_readback(client):
+    with client.app.state.factory.begin() as session:
+        item = session.get(Item, 'i0')
+        batch = session.get(Batch, item.batch_id)
+        batch.mode = 'live'
+        batch.run_key = f'erp-roster:job:桂露:{batch.business_date}'
+        batch.snapshot = {'source_versions': {'erp_roster_salesperson': '桂露'}}
+        item.status = '待核验'
+        session.add(Item(id='earlier', batch_id=batch.id, variant_id='prior', key=item.key,
+            status='待处理', phase='proposed', reason='准备', decision=item.decision, updated_at=batch.created_at))
+        session.add(Execution(id='old-mismatch', item_id=item.id, variant_id=item.variant_id, state='mismatch',
+            request={}, response={'status': 'accepted'}, evidence={'actual_price': '1.23'},
+            created_at=item.updated_at, updated_at=item.updated_at))
+    data = client.get('/api/records').json()
+    item, = [row for row in data['items'] if row['batch_id'] == 'b0']
+    assert item['status'] == '已提价' and item['reason'] == '提价上传完成'
+    assert item['execution']['state'] == 'mismatch' and item['execution']['actual_price'] == '1.23'
+    assert [step['id'] for step in item['process']] == ['earlier', 'i0']
+    with client.app.state.factory.begin() as session:
+        assert session.get(Item, 'i0').status == '待核验'
+        session.get(Batch, 'b0').run_key = 'ordinary-live-job'
+    rows = {row['id']: row for row in client.get('/api/records').json()['items']}
+    assert rows['i0']['status'] == '待核验' and 'earlier' in rows
+
+
 def test_live_roster_separates_sellers_even_with_the_same_project_owner(client):
     with client.app.state.factory.begin() as session:
         for name, item_id in (('桂露', 'i0'), ('莫雯舒', 'i3')):
@@ -369,7 +401,8 @@ def test_roster_department_uses_saved_batch_scope_when_online_snapshot_has_no_de
     assert row['department'] == 'Tiktok五部'
     assert row['seller']['name'] == '曹雪娇'
     assert row['execution']['actual_price'] == '5.225'
-    assert row['status'] == '已核验'
+    assert row['execution']['state'] == 'verified'
+    assert row['status'] == '已提价'
     unknown = client.get('/api/records', params={'department': 'unassigned'}).json()
     assert 'i3' not in {row['id'] for row in unknown['items']}
 

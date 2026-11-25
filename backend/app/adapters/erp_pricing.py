@@ -113,7 +113,7 @@ class CaptureGroup(BaseModel):
             if not salesperson.name or salesperson.name != salesperson.name.strip():
                 return None
             key, value = ("username", salesperson.name) if kind == "loss" else ("shopUsernameid", salesperson.id)
-            if self.filters.get(key) != value:
+            if value is None or self.filters.get(key) != value:
                 return None
             extra_scope.add(key)
         filter_keys = set(self.filters) - extra_scope
@@ -205,7 +205,7 @@ class CaptureGroup(BaseModel):
 
 class CaptureSalesperson(BaseModel):
     name: StrictStr
-    id: Identifier
+    id: Identifier | None = None
 
 
 class BulkCapture(BaseModel):
@@ -220,6 +220,7 @@ class BulkCapture(BaseModel):
     groups: list[CaptureGroup]
     salesperson: CaptureSalesperson | None = None
     department: StrictStr | None = None
+    roster_parent_capture_id: Identifier | None = None
 
 
 class EvidenceModel(BaseModel):
@@ -498,8 +499,10 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
     fx = evidence.fx if evidence else current_fx
     evaluated_at = evidence.evaluated_at if evidence else (live.observed_at if live else (current_fx.queried_at if current_fx else None))
 
+    # 派生个人档案的请求范围仍是部门；财务行归属在下游按个人核对。
+    request_salesperson = None if capture.roster_parent_capture_id else capture.salesperson
     scope_by_source = {
-        source: group.scope_bloc(capture.department, capture.salesperson) for source, group in groups.items()
+        source: group.scope_bloc(capture.department, request_salesperson) for source, group in groups.items()
     }
     scope_blocs = set(scope_by_source.values())
     blocked_platforms = {str(group.filters.get("ptid")) for group in groups.values() if group.source.startswith("blocked_")}

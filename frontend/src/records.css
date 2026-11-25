@@ -11,6 +11,7 @@
 .records-header p{color:var(--r-muted);font-size:13px;margin-top:10px}.records-header-end{display:flex;gap:24px;align-items:center}.records-source{font-size:12px;text-align:right;color:var(--r-mint)}.records-source small{display:block;font-size:11px;color:var(--r-muted);margin-top:3px}
 .records-page :focus-visible,.records-dialog :focus-visible{outline:2px solid var(--r-mint);outline-offset:4px}
 .records-overview{display:flex;justify-content:space-between;align-items:center;gap:22px;margin-bottom:17px;font-size:12px;color:var(--r-muted)}.records-overview>div:first-child{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}.records-overview strong{font-size:16px;font-weight:600;color:var(--r-text)}.records-counts{display:flex;align-items:center;gap:19px;flex-wrap:wrap}.records-counts>span{display:inline-flex;align-items:center;gap:7px;white-space:nowrap}.records-counts b{color:var(--r-text);font-weight:600}.records-counts i,.records-status i{display:inline-block;flex:none;width:5px;height:5px;border-radius:50%;background:currentColor}.records-counts i.verified{color:var(--r-mint)}.records-counts i.pending{color:var(--r-purple)}.records-counts i.attention{color:var(--r-amber)}
+.records-refreshing{color:var(--r-mint)}
 .records-glass{border:1px solid var(--r-edge);border-radius:22px;overflow:hidden;background:linear-gradient(125deg,#aabde317,#ffffff09);box-shadow:inset 0 1px #ffffff1c,0 18px 70px #02081d26;backdrop-filter:blur(22px)}
 .records-panel-heading{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:21px 25px 18px;border-bottom:1px solid var(--r-line)}.records-panel-heading h2{font-size:16px;font-weight:600}.records-panel-heading>span{font-size:12px;color:var(--r-muted)}
 .records-table{width:100%;border-collapse:collapse;table-layout:fixed;text-align:left}.records-table th{font-size:12px;font-weight:400;color:var(--r-muted);padding:15px 16px;background:#ffffff05;border-bottom:1px solid var(--r-line)}.records-table td{padding:24px 16px;border-bottom:1px solid var(--r-line);vertical-align:middle;overflow-wrap:anywhere}.records-table th:first-child,.records-table td:first-child{padding-left:25px}.records-table th:last-child,.records-table td:last-child{padding-right:25px}.records-table th:nth-child(1){width:14%}.records-table th:nth-child(2){width:15%}.records-table th:nth-child(3){width:13%}.records-table th:nth-child(4){width:10%}.records-table th:nth-child(5){width:14%}.records-table th:nth-child(6){width:9%}.records-table th:nth-child(7){width:11%}.records-table th:nth-child(8){width:14%}.records-table tr:last-child td{border-bottom:0}.records-table td>strong{display:block;font-size:14px;font-weight:500}.records-table td>small,.records-person-button small{display:block;font-size:11px;color:var(--r-muted);margin-top:6px}.records-person-row{cursor:pointer}.records-person-row:hover,.records-person-row:focus-within{background:#b9d3ed0b}.records-person-button{display:flex;align-items:center;gap:11px;width:100%;border:0;padding:5px 0;background:none;color:var(--r-text);font:inherit;text-align:left;cursor:pointer;border-radius:6px}.records-person-button strong{font-size:16px;font-weight:600}.records-person-button small{font-size:11px;white-space:nowrap}.records-avatar{width:37px;height:37px;border-radius:50%;display:grid;place-items:center;flex:none;color:var(--r-mint);background:#9bd0d324;border:1px solid #b5ebdd2e;font-size:14px}.records-avatar.tone-1{color:var(--r-purple);background:#c0b0f121;border-color:#cebef530}.records-avatar.tone-2{color:var(--r-amber);background:#e7c28d1a;border-color:#e7c28d2e}.records-avatar.tone-3{color:#b5d8f8;background:#9acaf41a;border-color:#9acaf42e}
@@ -45,9 +46,39 @@
 .records-log-search input::placeholder{color:var(--r-faint)}
 .records-log-search input:focus-visible{outline:2px solid var(--r-mint);outline-offset:1px}
 .records-log-search-icon{position:absolute;right:9px;width:14px;height:14px;color:var(--r-faint);pointer-events:none}
-.records-log-title{display:flex;align-items:baseline;flex-wrap:nowrap;gap:6px 12px;min-width:0}
+.records-log-title{display:flex;align-items:center;gap:12px;min-width:0;padding-right:16px}
 .records-log-title h2{flex:1 1 auto;margin:0;min-width:0;overflow-wrap:anywhere}
-.records-log-title .records-log-download{align-self:center;flex:none}
+.records-log-actions,.records-log-date-range{display:flex;align-items:center;gap:6px}
+.records-log-actions{justify-content:flex-end;flex:0 0 auto;flex-wrap:wrap;max-width:100%;font-size:12px;color:var(--r-muted)}
+.records-log-date-label{white-space:nowrap}
+.records-log-date-range .el-date-editor{--el-date-editor-width:115px;--el-input-height:30px;--el-input-bg-color:#ffffff08;--el-input-border-color:var(--r-line);--el-input-hover-border-color:var(--r-edge);--el-input-text-color:var(--r-text);--el-input-icon-color:var(--r-muted);font-size:inherit}
+.records-log-date-range .el-input__wrapper{padding:0 7px}
+.records-log-date-range .el-input__prefix-inner>.el-icon{margin-right:4px}
+.records-log-download:disabled,.records-log-download:disabled:hover{opacity:.4;cursor:default;color:var(--r-muted);background:#ffffff08;border-color:var(--r-line)}
+@media(max-width:720px){.records-log-title{flex-direction:column;align-items:stretch;padding-right:0}.records-log-actions{justify-content:flex-start}.records-log-date-range .el-date-editor{--el-date-editor-width:102px}}
+@media(max-width:480px){.records-log-date-label{flex-basis:100%}}
+@media(max-width:370px){.records-log-date-range .el-date-editor{--el-date-editor-width:94px;font-size:11px}}
+
+/* 日历由 Element Plus 挂到弹窗外，只给这一组日期浮层着色。 */
+.records-log-calendar.el-popper{
+  --el-bg-color-overlay:rgba(26,36,59,.87);
+  --el-text-color-primary:#f3f7fc;
+  --el-text-color-regular:#e2eaf7;
+  --el-text-color-placeholder:#a9b8d0;
+  --el-color-primary:#b4f4df;
+  --el-color-white:#172b38;
+  --el-border-color-light:#dbe8ff21;
+  --el-border-color-lighter:#dbe8ff21;
+  --el-disabled-border-color:#dbe8ff38;
+  --el-box-shadow-light:0 12px 32px #050b1c66;
+  --el-popper-border-radius:12px;
+  backdrop-filter:blur(16px);
+}
+.records-log-calendar .el-date-picker{--el-datepicker-bg-color:transparent;width:min(322px,calc(100vw - 18px))}
+.records-log-calendar .el-picker-panel__content{width:auto}
+.records-log-calendar :is(button,[tabindex]):focus-visible{outline:2px solid var(--el-color-primary);outline-offset:-2px}
+.records-no-priced{color:var(--r-muted);font-size:12px}
+@media(max-width:680px){.records-no-priced{grid-column:1/-1;grid-row:2}.records-no-priced+.records-progress-cell{grid-row:3}.records-no-priced~.records-time-cell{grid-row:4}}
 .records-log-filter-count{display:inline-block;min-width:1em;margin-left:4px;font-variant-numeric:tabular-nums}
 .records-log-empty{margin:0;padding:38px 20px;text-align:center;font-size:13px;color:var(--r-muted)}
 @media(max-width:680px){.records-log-filter{padding:12px 19px}.records-log-search input{width:100%}.records-log-search{flex:1}}
@@ -64,7 +95,7 @@
 .records-log-heading>div:first-child{min-width:0}
 .records-log-heading h3{font-size:14px;font-weight:500;line-height:1.5;overflow-wrap:anywhere}
 .records-log-heading p{color:var(--r-muted);font-size:11px;margin-top:5px;overflow-wrap:anywhere}
-/* 原生按钮支持键盘与读屏；保留原始文本可选中，复制反馈使用统一消息浮层，不占用商品身份区域。 */
+/* 原生按钮支持键盘与读屏，原始文本也可以选中来手动复制。 */
 .records-id-copy{display:block;min-width:0}
 .records-id-copy-button{display:inline-flex;align-items:baseline;gap:5px;max-width:100%;padding:0;border:0;border-radius:3px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;user-select:text}
 .records-id-copy-button>span{min-width:0;overflow-wrap:anywhere}
@@ -73,7 +104,6 @@
 .records-id-copy-button svg{width:12px;height:12px;flex:none;align-self:center;color:var(--r-muted)}
 .records-id-copy-button:hover{color:var(--r-mint)}
 .records-id-copy-button:focus-visible{outline:2px solid var(--r-mint);outline-offset:3px}
-.records-id-copy-button:disabled{cursor:wait}
 /* 状态是价格明细之外的独立列，顶部对齐并在本列居中；不使用位移或绝对定位覆盖金额。 */
 .records-log-state{grid-column:3;grid-row:1;align-self:start;justify-self:stretch;display:flex;flex-direction:column;align-items:center;gap:7px;min-width:0}
 /* 原因是本条保存的说明；保留换行、允许长文本断行，始终占用自身网格高度。 */

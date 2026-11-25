@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { api, errorMessage, timeLabel } from './api'
+import { api, display, errorMessage, timeLabel } from './api'
 interface RateRow { currency: string | null; source_rate: string | null; units_per_cny: string | null; error: string | null }
 interface RateResult { queried_at: string; effective_date: string | null; message: string; rows: RateRow[] }
 const busy = ref(false)
@@ -26,11 +26,15 @@ async function query() {
       <p>查询时间：{{ timeLabel(result.queried_at) }} · 生效日期：{{ result.effective_date || '接口未提供' }}</p>
       <el-table :data="result.rows" max-height="480" empty-text="接口本次未返回汇率">
         <el-table-column prop="currency" label="来源币种" min-width="95" />
-        <el-table-column prop="source_rate" label="接口原始汇率" min-width="135" />
-        <el-table-column prop="units_per_cny" label="每 1 CNY 对应外币（推断参考）" min-width="230" show-overflow-tooltip />
+        <el-table-column label="接口配置汇率" min-width="135">
+          <template #default="{ row }">{{ display(row.source_rate) }}</template>
+        </el-table-column>
+        <el-table-column label="每 1 CNY 对应外币（推断参考）" min-width="230" show-overflow-tooltip>
+          <template #default="{ row }">{{ display(row.units_per_cny) }}</template>
+        </el-table-column>
         <el-table-column prop="error" label="异常说明" min-width="180" />
       </el-table>
-      <p class="muted">原始汇率按“每单位外币折合人民币”推断转换，待公司确认。参考值由后端计算，暂未进入自动改价。</p>
+      <p class="muted">原始汇率按“每单位外币折合人民币”推断转换，待公司确认。数值最多展示两位小数，原始汇率精度不变。</p>
     </template>
   </section>
 </template>

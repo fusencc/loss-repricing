@@ -35,7 +35,7 @@ const labels: Record<string, string> = {
   unknown: '投递结果未知',
   demo: '演示投递',
 }
-const itemStatuses: ItemStatus[] = ['待处理', '待核验', '已核验', '不调价']
+const itemStatuses: ItemStatus[] = ['待处理', '待核验', '已提价', '已核验', '不调价']
 
 async function load() {
   const version = ++requestVersion

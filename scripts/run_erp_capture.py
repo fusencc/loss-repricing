@@ -127,7 +127,7 @@ class LiveReporter:
             'result_file': str(path),
             'capture_complete': data.get('capture_complete'),
             'selection_complete': data.get('selection_complete'),
-            'stopped_by_rate_limit': data.get('stopped_by_rate_limit'),
+            'rate_limit_observed': data.get('rate_limit_observed'),
             'salesperson': data.get('salesperson'),
             'summary': summary,
             'groups': [
@@ -263,7 +263,7 @@ def main(argv=None):
         'capture_complete': result.get('capture_complete'),
         'selection_complete': result.get('selection_complete'),
         'sample_only': result.get('sample_only'),
-        'stopped_by_rate_limit': result.get('stopped_by_rate_limit'),
+        'rate_limit_observed': result.get('rate_limit_observed'),
         'salesperson': result.get('salesperson'),
         'summary': result.get('summary'),
         'groups': [
@@ -287,7 +287,7 @@ def main(argv=None):
     reporter.emit(f"result.json：{result.get('result_file')}")
     reporter.emit(f"summary.json：{run_dir / 'summary.json'}")
     reporter.emit(f"本轮选择范围完成={ok}；整池完成={result.get('capture_complete')}；"
-                  f"限流停止={result.get('stopped_by_rate_limit')}")
+                  f"出现限流={result.get('rate_limit_observed')}")
     for group in result.get('groups') or []:
         reporter.emit(
             f"结束 {group.get('source')}: rows={len(group.get('rows') or [])} "

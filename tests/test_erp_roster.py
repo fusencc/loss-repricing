@@ -31,18 +31,20 @@ def test_roster_only_passes_people_to_their_confirmed_department(settings, monke
     monkeypatch.setattr(workflow, 'ERP_ROSTER_NAMES', (' 甲 ', '乙', '甲'))
     monkeypatch.setattr(workflow, 'ERP_ROSTER_DEPARTMENTS', {'甲': 'Tiktok一部', '乙': 'Tiktok五部'})
     calls = []
-    def collect(settings, *, department, salesperson, **kwargs):
-        calls.append((department, salesperson))
-        if salesperson == '甲':
+    def collect(settings, *, department, roster_salespeople, **kwargs):
+        calls.append((department, tuple(roster_salespeople)))
+        if roster_salespeople == ['甲']:
             raise ValueError('单个范围失败')
         return {'capture_id': 'saved', 'capture_complete': True, 'groups': [],
                 'cleaning_status': 'saved', 'department': department}
     monkeypatch.setattr(workflow, 'capture_erp_bulk', collect)
     monkeypatch.setattr(workflow, 'save_capture', lambda runtime, result: result)
+    monkeypatch.setattr(workflow, 'project_seller_capture', lambda _, capture, headers, native, name:
+                        (capture, headers, native))
     monkeypatch.setattr(workflow, 'refresh_daily_fees', lambda *a, **k: {})
     monkeypatch.setattr(workflow, 'query_current_erp_fx', lambda *a: {'ref': 'test-fx'})
     result = workflow.run_workflow(settings, roster_date=DAY)
-    assert calls == [('Tiktok一部', '甲'), ('Tiktok五部', '乙')]
+    assert calls == [('Tiktok一部', ('甲',)), ('Tiktok五部', ('乙',))]
     assert result['salespersons'] == ['甲', '乙']
     assert result['roster_date'] == str(DAY)
     assert result['status'] == 'needs_attention'

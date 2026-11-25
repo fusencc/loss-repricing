@@ -113,6 +113,7 @@ const labels: Record<string, string> = {
   proposed: '待批准',
   queued: '已排队',
   executing: '执行中',
+  uploaded: '上传完成',
   verified: '已核验',
   failed: '失败',
   stale: '已失效',
@@ -209,11 +210,13 @@ const labels: Record<string, string> = {
         刷新修正状态
       </el-button>
       <p class="muted">
-        排队或执行中的方案会短时自动刷新；可随时手动刷新，保留尚未提交的输入。
+        已保存的价格最多显示两位小数，审批仍按提交时的原值执行。排队或执行中的方案会短时自动刷新；可随时手动刷新，保留尚未提交的输入。
       </p>
     </div>
     <el-table :data="corrections" empty-text="暂无修正方案">
-      <el-table-column prop="desired_actual" label="目标实际价" />
+      <el-table-column label="目标实际价">
+        <template #default="{ row }">{{ display(row.desired_actual) }}</template>
+      </el-table-column>
       <el-table-column label="状态">
         <template #default="{ row }">
           {{ labels[row.state] || row.state }}

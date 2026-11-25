@@ -14,7 +14,7 @@ import httpx
 from app.adapters.base import SourceUnavailable
 from app.adapters.erp_bulk_capture import EXPORT_POLL_LIMIT, TASKS, _save_xlsx, _session, _value
 from app.adapters.erp_export_mapping import ERP_COLUMNS, _xlsx_rows
-from app.adapters.erp_web import ErpAccountRateLimited, error_evidence
+from app.adapters.erp_web import error_evidence
 from app.services.erp_capture_store import write_verified
 
 
@@ -49,7 +49,7 @@ def capture_erp_details(settings, capture, *, client=None, web_session=None, bat
         'queried_at':datetime.now(timezone.utc).isoformat(), 'requested_order_ids':requested,
         'batches':[{'number':offset//batch_size+1, 'order_ids':requested[offset:offset+batch_size],
                     'status':'not_attempted', 'polls':[]} for offset in range(0, len(requested), batch_size)],
-        'rows':[], 'files':[], 'issues':[], 'stopped_by_rate_limit':False, 'pricing_ready':False,
+        'rows':[], 'files':[], 'issues':[], 'pricing_ready':False,
         'stopped_by_pending_task':False,
         'artifact_file':str((directory / 'result.json').resolve()),
     }
@@ -58,6 +58,7 @@ def capture_erp_details(settings, capture, *, client=None, web_session=None, bat
         result['issues'].append({'code':code, **scope})
 
     def checkpoint():
+        result['rate_limit_observed'] = any(i.get('error_kind') == 'rate_limited' for i in result['issues'])
         result['acquisition_complete'] = not result['issues'] and all(
             batch['status'] == 'complete' for batch in result['batches'])
         result['summary'] = {'requested_orders':len(requested),
@@ -132,17 +133,12 @@ def capture_erp_details(settings, capture, *, client=None, web_session=None, bat
                         if pending:
                             result['stopped_by_pending_task'] = True
                             break
-                        if isinstance(error, ErpAccountRateLimited):
-                            result['stopped_by_rate_limit'] = True
-                            break
                         if isinstance(error, httpx.HTTPStatusError) and error.response.status_code in (401, 403):
                             break
                     finally:
                         checkpoint()
     except (SourceUnavailable, httpx.HTTPError, ValueError) as error:
         issue('detail_source_failed', **error_evidence(error))
-        if isinstance(error, ErpAccountRateLimited):
-            result['stopped_by_rate_limit'] = True
     result['completed_at'] = datetime.now(timezone.utc).isoformat()
     checkpoint()
     return result

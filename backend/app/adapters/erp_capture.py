@@ -108,8 +108,6 @@ def _read_sample_group(post, group, limit):
         evidence = error_evidence(error)
         page.update(evidence)
         group.update(evidence, failed_pages=[1], stop_reason='read_failed')
-        if isinstance(error, ErpAccountRateLimited):
-            raise
 
 
 def _read_sample_detail(post, detail):
@@ -121,8 +119,6 @@ def _read_sample_detail(post, detail):
         detail['rows'] = [_project(row, DETAIL_FIELDS) for row in lines]
     except (SourceUnavailable, httpx.HTTPError, ValueError, TypeError) as error:
         detail.update(error_evidence(error))
-        if isinstance(error, ErpAccountRateLimited):
-            raise
 
 
 def _summarize_sample_group(group, limit):
@@ -154,56 +150,44 @@ def capture_erp_sample(settings, *, limit=5, client=None):
         raise ValueError('每组抽样数量必须为1至10')
     started_at = datetime.now(timezone.utc).isoformat()
     groups, details, detail_by_order = [], [], {}
-    rate_limited = False
     with _erp_reader(settings, client) as post:
-        try:
-            for kind in ('loss', 'blocked'):
-                for status in (4, 3):
-                    path = '/Api/deficit/list' if kind == 'loss' else '/Api/order/list'
-                    # status=4可配货、3待处理；bloc/blocs及jzfh沿用已核实的网页筛选。
-                    filters = ({'platform': settings.erp_capture_platform, 'bloc': settings.erp_capture_bloc}
-                               if kind == 'loss' else {'ptid': settings.erp_capture_platform_id,
-                                                      'blocs': settings.erp_capture_bloc, 'jzfh': '1'})
-                    group = {'kind': kind, 'status': status, 'endpoint': path,
-                             'filters': dict(filters, status=status, page=1, limit=limit),
-                             'rows': [], 'total': None, 'error': None, 'sample_only': True,
-                             'pages': [], 'failed_pages': [], 'list_complete': False, 'excluded_platform_rows': 0}
-                    groups.append(group)
-                    _read_sample_group(post, group, limit)
-                    for row in group['rows']:
-                        order = row.get('orderid')
-                        source = {'kind': kind, 'status': status}
-                        if not isinstance(order, str) or not order.strip():
-                            details.append({'orderid': None, 'rows': [], 'sources': [source],
-                                            'error': '订单标识缺失或类型无效，未读取明细',
-                                            'loss_allocation_confirmed': False})
-                            continue
-                        if order in detail_by_order:
-                            sources = detail_by_order[order]['sources']
-                            if source not in sources:
-                                sources.append(source)
-                            continue
-                        detail = {'orderid': order, 'rows': [], 'sources': [source], 'error': None,
-                                  'loss_allocation_confirmed': False}
-                        details.append(detail)
-                        detail_by_order[order] = detail
-                        _read_sample_detail(post, detail)
-                    _summarize_sample_group(group, limit)
-        except ErpAccountRateLimited:
-            rate_limited = True
-    for group in groups:
-        group.setdefault('fetched_rows', len(group['rows']))
-        group.setdefault('unique_orders', len({r.get('orderid') for r in group['rows'] if isinstance(r.get('orderid'), str)}))
-        group.setdefault('duplicate_rows', len(group['rows']) - group['unique_orders'])
-        if rate_limited and 'stop_reason' not in group:
-            group['stop_reason'] = 'account_rate_limited'
+        for kind in ('loss', 'blocked'):
+            for status in (4, 3):
+                path = '/Api/deficit/list' if kind == 'loss' else '/Api/order/list'
+                # status=4可配货、3待处理；bloc/blocs及jzfh沿用已核实的网页筛选。
+                filters = ({'platform': settings.erp_capture_platform, 'bloc': settings.erp_capture_bloc}
+                           if kind == 'loss' else {'ptid': settings.erp_capture_platform_id,
+                                                  'blocs': settings.erp_capture_bloc, 'jzfh': '1'})
+                group = {'kind': kind, 'status': status, 'endpoint': path,
+                         'filters': dict(filters, status=status, page=1, limit=limit),
+                         'rows': [], 'total': None, 'error': None, 'sample_only': True,
+                         'pages': [], 'failed_pages': [], 'list_complete': False, 'excluded_platform_rows': 0}
+                groups.append(group)
+                _read_sample_group(post, group, limit)
+                for row in group['rows']:
+                    order = row.get('orderid')
+                    source = {'kind': kind, 'status': status}
+                    if not isinstance(order, str) or not order.strip():
+                        details.append({'orderid': None, 'rows': [], 'sources': [source],
+                                        'error': '订单标识缺失或类型无效，未读取明细',
+                                        'loss_allocation_confirmed': False})
+                        continue
+                    if order in detail_by_order:
+                        sources = detail_by_order[order]['sources']
+                        if source not in sources:
+                            sources.append(source)
+                        continue
+                    detail = {'orderid': order, 'rows': [], 'sources': [source], 'error': None,
+                              'loss_allocation_confirmed': False}
+                    details.append(detail)
+                    detail_by_order[order] = detail
+                    _read_sample_detail(post, detail)
+                _summarize_sample_group(group, limit)
     result = {'source_version': 'erp-web-sample-20261105-v1',
               'queried_at': started_at, 'finished_at': datetime.now(timezone.utc).isoformat(),
               'source_kind': 'erp_web_backend', 'finance_enabled': False,
               'request_interval_seconds': settings.erp_capture_request_interval_seconds,
-              'stopped_by_rate_limit': rate_limited,
-              'not_read_groups': [{'kind': k, 'status': st} for k in ('loss','blocked') for st in (4,3)
-                                  if not any(g['kind']==k and g['status']==st for g in groups)],
+              'rate_limit_observed': any(read.get('error_kind') == 'rate_limited' for read in (*groups, *details)),
               'page_size': limit, 'max_pages': 1, 'pricing_ready': False,
               'complete': False, 'sample_only': True, 'groups': groups, 'details': details,
               'permission_scope_verified': False,
@@ -221,6 +205,5 @@ def capture_erp_sample(settings, *, limit=5, client=None):
         'detail_reads_failed': sum(d['orderid'] is not None and bool(d['error']) for d in details),
         'missing_order_ids': sum(d['orderid'] is None for d in details),
         'detail_rows': sum(len(d['rows']) for d in details)}
-    result['summary']['detail_orders_not_attempted'] = result['summary']['unique_orders'] - len(detail_by_order)
     result['validation'] = build_sample_validation(result)
     return result

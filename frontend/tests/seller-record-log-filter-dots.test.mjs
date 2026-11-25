@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises'
 import { createServer } from 'vite'
 import { createSSRApp } from 'vue'
 import { renderToString } from 'vue/server-renderer'
-import { groupBySeller, recordTone } from '../src/records-model.ts'
+import { recordTone } from '../src/records-model.ts'
 
 let server, Component
 before(async () => {
@@ -20,12 +20,12 @@ test('all three display status filters have decorative tone dots before their un
     key: { sku: '', item_id: '', shop_id: 'synthetic-shop', site: 'PH' },
   }))
   const original = structuredClone(rows)
-  const html = await renderToString(createSSRApp(Component, { seller: groupBySeller(rows)[0] }))
+  const html = await renderToString(createSSRApp(Component, { items: rows, emptyMessage: '当天无记录。' }))
   const filter = html.match(/<div class="records-log-states">([\s\S]*?)<\/div>/)?.[1]
   assert.ok(filter)
   const buttons = [...filter.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/g)]
   assert.equal(buttons.length, 4)
-  // 待核验并入待处理，筛选项只保留三态，按钮数量仍取该销售员完整历史。
+  // 待核验并入待处理，筛选项只保留三态。
   for (const [index, [state, label, count]] of [
     ['全部', '全部', 4], ['已提价', '已提价', 1], ['待处理', '待处理', 2], ['不调价', '不调价', 1],
   ].entries()) {
@@ -47,7 +47,7 @@ test('filter dots reuse existing status palette while native buttons and filteri
   const source = await readFile(new URL('../src/SellerRecordLogs.vue', import.meta.url), 'utf8')
   const css = await readFile(new URL('../src/records.css', import.meta.url), 'utf8')
   assert.match(source, /@click="statusFilter = state"/)
-  assert.match(source, /filterRecordItems\(props\.seller\.items, statusFilter\.value, keyword\.value\)/)
+  assert.match(source, /filterRecordItems\(props\.items, statusFilter\.value, keyword\.value\)/)
   assert.match(source, /:class="recordTone\(state\)" aria-hidden="true"/)
   assert.match(css, /\.records-log-filter-dot\{[^}]*width:5px;height:5px;[^}]*border-radius:50%;background:currentColor;[^}]*color:var\(--r-muted\)/)
   for (const [tone, variable] of [['verified', '--r-mint'], ['attention', '--r-amber']]) {

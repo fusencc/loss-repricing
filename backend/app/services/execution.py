@@ -40,29 +40,36 @@ class PricingService:
         if self._roster_channel is not None:
             self._roster_channel.close()
 
-    def _enrich(self, snapshot):
+    def _enrich(self, snapshot, *, roster=None):
         """真实近期调价由开放接口证明；本地档案只补充未知执行锁和人工保护。"""
         result = snapshot.model_copy(deep=True)
-        official = None
         if self.adapter.mode == 'live':
-            official = capture_recent_price_changes(self.config,[row.key for row in result.online],now=utcnow())
-            result.source_versions['recent_price_history'] = official['source_id']
+            # 名单复用 ERP 首查的有效计数及明确的未知，只补查此前未覆盖的子商品。
+            history = dict.fromkeys(roster.unknown_history_ids) if roster is not None else {}
+            if roster is not None:
+                history.update((row.key.item_id, row.recent_price_log) for row in result.online
+                               if row.recent_price_log is not None)
+            missing = {row.key.item_id: row.key for row in result.online if row.key.item_id not in history}
+            if missing or roster is None:
+                official = capture_recent_price_changes(self.config, list(missing.values()), now=utcnow())
+                result.source_versions['recent_price_history'] = official['source_id']
+                for item_id, key in missing.items():
+                    try:
+                        history[item_id] = recent_price_log_for(official, key)
+                    except (ValueError, TypeError, KeyError):
+                        history[item_id] = None
         with self.factory() as session:
             protections = session.scalars(select(Protection).where(Protection.active.is_(True))).all()
             for online in result.online:
                 guard = session.get(VariantGuard, online.key.target_identity())
                 if self.adapter.mode == 'live':
-                    online.history_known, online.pending_submission, online.last_increase_at = False, False, None
-                    online.recent_price_log = None
-                    try:
-                        online.recent_price_log = recent_price_log_for(official,online.key)
-                        online.history_known = True
-                    except (ValueError,TypeError,KeyError):
-                        pass  # 该目标保持历史未知，不影响其他有效计数。
+                    online.recent_price_log = history[online.key.item_id]
+                    online.history_known = online.recent_price_log is not None
+                    online.last_increase_at = None
                     pending = session.scalar(select(Execution.id).join(Item,Execution.item_id==Item.id)
                         .join(Batch,Item.batch_id==Batch.id).where(Batch.mode=='live',
                             Execution.variant_id==online.key.target_identity(),
-                            Execution.state.not_in(['failed','verified'])).limit(1))
+                            Execution.state.not_in(['failed','verified','uploaded'])).limit(1))
                     online.pending_submission = pending is not None
                 if guard:
                     online.pending_submission = online.pending_submission or bool(guard.execution_id)
@@ -163,7 +170,7 @@ class PricingService:
         # 日界后生成新批次，旧批次里已经送达的意图仍由reconcile独立跟进。
         actual_key = f"{run_key}:{business_date.isoformat()}"
         initial = roster.collect(business_date)[0] if roster is not None else self.adapter.collect(business_date)
-        snapshot = self._enrich(initial)
+        snapshot = self._enrich(initial, roster=roster)
         evaluation_time = utcnow()
         if problem := snapshot_problem(snapshot, evaluation_time, business_date):
             # 不完整的重取不能覆盖先前候选，也不能将未返回的商品标为不调。
@@ -415,6 +422,17 @@ class PricingService:
                 item = session.get(Item, item_id)
                 item.status, item.phase, item.reason = "待核验", "blocked", "同一在线变体仍在核验或距生效不足72小时"
                 return None
+            if roster is not None:
+                # 已确认成功的本程序任务可能晚于复用的 ERP 首查；持锁去重，不再访问官方接口。
+                previous = session.scalar(select(Execution.id).join(Item, Execution.item_id == Item.id)
+                    .join(Batch, Batch.id == Item.batch_id).where(Batch.mode == 'live',
+                        Execution.variant_id == identity, Execution.state == 'uploaded',
+                        Execution.created_at > cutoff).limit(1))
+                if previous:
+                    session.get(VariantGuard, identity).execution_id = None
+                    item.status, item.phase = '不调价', 'excluded'
+                    item.reason, item.updated_at = '近72小时本系统已有成功调价任务，不重复上传', stamp()
+                    return None
             session.add(Execution(id=execution_id, item_id=item_id, variant_id=identity, state="submitting",
                 request=decision.model_dump(mode="json"), response={}, evidence={}, created_at=stamp(), updated_at=stamp()))
             if decision.trace.get("correction_id"):
@@ -423,7 +441,7 @@ class PricingService:
                 correction.execution_id, correction.state = execution_id, "executing"
             item = session.get(Item, item_id)
             item.status, item.phase, item.updated_at = "待核验", "submitting", stamp()
-            item.reason = "执行意图已持久保存，等待逐行结果与实际价格"
+            item.reason = '执行意图已保存，等待上传结果'
         # 事务退出后才能记录“已持久保存”，日志不冒充数据库提交成功。
         event('execution.intent_saved', execution_id=execution_id, item_id=item_id, batch_id=item.batch_id,
               source=self.adapter.mode, synthetic=getattr(self.adapter, 'synthetic', False))
@@ -437,8 +455,8 @@ class PricingService:
         if not allowed:
             self._hold(item_id, reason)
             return
-        if self.adapter.mode == 'live' and not manual:
-            # 批内可复用算价输入，但上传前重查该子SKU，捕获其他入口刚产生的日志。
+        if self.adapter.mode == 'live' and not manual and roster is None:
+            # 通用实时批次仍在提交前复查；名单已使用本轮首查结果。
             official = capture_recent_price_changes(self.config,[decision.key],now=utcnow())
             decision.trace['official_price_history_before_submit'] = official
             try:
@@ -534,6 +552,8 @@ class PricingService:
             if result.status == "rejected":
                 item.status = "待处理"
                 session.get(VariantGuard, execution.variant_id).execution_id = None
+            elif roster is not None and result.status == 'accepted':
+                item.status = '已提价'
             else:
                 item.status = "待核验"
             item.updated_at = stamp()
@@ -559,16 +579,19 @@ class PricingService:
                 decision = Decision.model_validate(execution.request)
                 if decision.key.target_identity() != execution.variant_id:
                     raise ValueError("保存的调价请求与执行锁目标不一致")
-                if self.adapter.mode == "live" and ROSTER_UPLOAD_TRACE in decision.trace:
+                roster_task = self.adapter.mode == 'live' and ROSTER_UPLOAD_TRACE in decision.trace
+                if roster_task:
                     result = self._roster_transport().lookup(execution.id, execution.task_id, decision)
                 else:
                     result = self.adapter.lookup(execution.id, execution.task_id, decision.key)
-                if result.price_record is not None:
+                if result.status == 'unknown':
+                    continue  # 没有新结果，不动执行锁和已展示的上传状态。
+                if not roster_task and result.price_record is not None:
                     from app.services.price_log_archive import validate_price_record_binding
                     validate_price_record_binding(result.price_record, execution.id, decision.key,
                         decision.upload_price, result.actual_price)
                 difference_ratio = None
-                if (result.status == "accepted" and result.actual_price is not None
+                if (not roster_task and result.status == "accepted" and result.actual_price is not None
                         and result.actual_price.is_finite() and result.actual_price > 0):
                     # 有精确比值就校验并使用它；旧记录仅按持久目标价核验。
                     if decision.target_actual is None or decision.target_actual <= 0:
@@ -599,7 +622,7 @@ class PricingService:
                 # SQLite 须在读取前取得写锁，避免并发回查从读事务升级时报忙。
                 if session.get_bind().dialect.name == "sqlite":
                     _lock_runtime_settings(session)
-                control = lock_control(session, decision.key) if self.config.coordination_required else None
+                control = lock_control(session, decision.key) if self.config.coordination_required and not roster_task else None
                 # 迁移前同一目标可能已有多个未知执行；锁行串行化全部历史执行的释放。
                 guard = session.scalar(select(VariantGuard).where(
                     VariantGuard.variant_id == execution.variant_id).with_for_update())
@@ -609,16 +632,20 @@ class PricingService:
                 # 单条证据落库与商品锁释放串行，超差不触发站点暂停。
                 if session.get_bind().dialect.name != "sqlite":
                     _lock_runtime_settings(session)
-                last_observed_at = parse_stamp(current.evidence.get("observed_at"))
+                last_observed_at = None if roster_task else parse_stamp(current.evidence.get("observed_at"))
                 if (result.status == "accepted" and last_observed_at is not None
                         and result.observed_at is not None and result.observed_at.utcoffset() is not None
                         and result.observed_at <= last_observed_at):
                     # 超差后须有更新的价格观测，晚到的旧快照或同一时点的冲突值不能解锁。
                     continue
                 item = session.get(Item, current.item_id)
-                if result.status == "rejected":
+                if roster_task and result.status == 'accepted':
+                    current.state, item.phase, item.status = 'uploaded', 'uploaded', '已提价'
+                    item.reason = result.message or '调价任务成功'
+                    current.evidence = {**current.evidence, 'row_status': 'success', 'message': item.reason}
+                elif result.status == "rejected":
                     current.state, item.phase, item.status = "failed", "failed", "待处理"
-                    current.evidence = {"row_status": "rejected", "message": result.message}
+                    current.evidence = {**current.evidence, "row_status": "rejected", "message": result.message}
                     item.reason = result.message or "逐行处理已确认失败，需重新评估"
                 elif (difference_ratio is not None and result.price_basis == "actual_including_vat" and result.observed_at is not None
                       and result.observed_at.tzinfo is not None
@@ -679,8 +706,8 @@ class PricingService:
                 ).order_by(Execution.created_at, Execution.id).limit(1))
                 # 后台回查与批次、通知同事务。
                 self._write_batch_summary(session, item.batch_id)
-            if current.state in {'verified', 'failed', 'mismatch'}:
-                event({'verified': 'execution.verified', 'failed': 'execution.rejected',
+            if current.state in {'uploaded', 'verified', 'failed', 'mismatch'}:
+                event({'uploaded': 'execution.uploaded', 'verified': 'execution.verified', 'failed': 'execution.rejected',
                        'mismatch': 'execution.mismatch'}[current.state],
                       execution_id=execution.id, item_id=execution.item_id, batch_id=item.batch_id,
                       state=current.state, source=self.adapter.mode, synthetic=getattr(self.adapter, 'synthetic', False))

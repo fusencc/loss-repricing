@@ -257,24 +257,38 @@ class ManualLiveAdapter:
         write_verified(self.directory / ('upload-response-'+execution_id+'.json'), value)
         return HttpAdapter._upload_result(value, {'single_data_row_number': 2})
 
-    def lookup(self, execution_id, task_id, key, *, check_amount=True):
+    def _task_evidence(self, execution_id, key, task_id=None):
+        intent = json.loads((self.directory / ('intent-'+execution_id+'.json')).read_text())
+        if key != self.key or intent['authorization'] != self.authorization:
+            raise ValueError('核验身份冲突')
+        a = self.authorization
+        new_rows = [r for r in self._logs() if str(r['id']) not in intent['previous_log_ids']]
+        matches = [r for r in new_rows if r.get('type') == 2 and r['id'] not in (None, '')
+            and (task_id is None or str(r['id']) == task_id)
+            and r.get('shopName') == a['shop_name'] and r.get('productId') == key.product_id
+            and r.get('sellerSkuId') == key.item_id and r.get('priceIncludeVat') is not None
+            and money(r['priceIncludeVat']) == money(a['upload_price'])]
+        return intent, new_rows, matches
+
+    @staticmethod
+    def _task_outcome(log):
+        status = log['status']
+        if status == 2:
+            return LookupResult('accepted', message=f"调价任务 {log['id']} 已成功")
+        if status in (3, 5, 6):
+            return LookupResult('rejected', message=f'调价任务明确失败，状态：{status}')
+        return LookupResult('unknown', message=f'调价任务状态：{status}；继续核验，不重传')
+
+    def lookup(self, execution_id, task_id, key):
         try:
-            intent = json.loads((self.directory / ('intent-'+execution_id+'.json')).read_text())
-            if key != self.key or intent['authorization'] != self.authorization:
-                raise ValueError('核验身份冲突')
             a, k = self.authorization, self.key
-            rows = self._logs()
-            matches = [r for r in rows if str(r['id']) not in intent['previous_log_ids'] and r.get('type') == 2
-                and r.get('shopName') == a['shop_name'] and r.get('productId') == k.product_id
-                and r.get('sellerSkuId') == k.item_id and r.get('priceIncludeVat') is not None
-                and money(r['priceIncludeVat']) == money(a['upload_price'])]
+            intent, new_rows, matches = self._task_evidence(execution_id, key)
             if len(matches) != 1:
                 # 本次实测只有一行数据，明确返回第1行店名不存在。结合无新任务及
                 # 当前价仍为原基线，才能把旧unknown终结为失败；不直接重发旧意图。
                 reply_path = self.directory / ('upload-response-'+execution_id+'.json')
                 reply = json.loads(reply_path.read_text()) if reply_path.exists() else {}
                 rejected = (reply.get('resp_code') == 0 and reply.get('resp_msg') == '上传完成,第1行店铺名不存在;')
-                new_rows = [r for r in rows if str(r['id']) not in intent['previous_log_ids']]
                 if rejected and not new_rows:
                     readback = capture_platform_controls(self.settings,
                         {'capture_id':'reject-'+execution_id,'synthetic':False,'sample_only':True},
@@ -292,10 +306,9 @@ class ManualLiveAdapter:
                 raise ValueError('本次目标价任务尚未唯一出现')
             log = matches[0]
             write_verified(self.directory / 'latest-task.json', log)
-            if log['status'] in (3, 5, 6):
-                return LookupResult('rejected', message='调价任务明确失败，状态：'+str(log['status']))
-            if log['status'] != 2:
-                return LookupResult('unknown', message='调价任务状态：'+str(log['status'])+'；继续核验，不重传')
+            outcome = self._task_outcome(log)
+            if outcome.status != 'accepted':
+                return outcome
             detail = self._request('GET', '/Api/api-tiktok-sales/operationLog/getRequestAndResponseById', params={'id': log['id']})
             if detail.get('resp_code') != 0: raise ValueError('调价任务详情未取得')
             capture = {'capture_id': 'verify-'+execution_id, 'synthetic': False, 'sample_only': True}
@@ -317,12 +330,12 @@ class ManualLiveAdapter:
                        'product_id': v['productId'], 'item_id': v['sellerSkuId'], 'shop_id': v['shopId']}
             if v.get('marketPrice') in (None, ''):
                 current['marketing_source_field'] = 'company.priceIncludeVat (confirmed_no_activity)'
-            expected = money(intent['decision']['trace']['rounded_actual']) if check_amount else None
+            expected = money(intent['decision']['trace']['rounded_actual'])
             actual = verify_price_evidence(a, intent['previous_log_ids'], log, detail['datas'], current, expected)
             full = FeeModel.model_validate(intent['decision']['trace']['online_rows'][0]['profit_check']['model'])
             upper = saved_price_limit(intent['decision']['trace'])
             actual_check = full.evaluate(MoneyRatio(actual))
-            if check_amount and upper is None and not actual_check.meets_minimum_margin:
+            if upper is None and not actual_check.meets_minimum_margin:
                 raise ValueError('回读营销价在线利润率未达到1%')
             observed = utcnow()
             # 官方统计/最新成功价只作独立证据补充，不代替已绑定任务和当前平台价。
@@ -338,8 +351,7 @@ class ManualLiveAdapter:
             price_record = build_price_record(execution_id, k, a['shop_name'], money(a['upload_price']),
                 log, current, observed, official, submitted_at=submitted_at)
             write_verified(self.directory / ('price-record-'+execution_id+'-'+uuid4().hex+'.json'), price_record)
-            archive_prefix = 'verified-' if check_amount else 'observed-'
-            write_verified(self.directory / (archive_prefix+execution_id+'.json'), {'log': log, 'current': current,
+            write_verified(self.directory / ('verified-'+execution_id+'.json'), {'log': log, 'current': current,
                 'actual_profit': str(actual_check.profit.decimal()),
                 'minimum_margin_required': upper is None,
                 'online_margin_passed': actual_check.meets_minimum_margin,

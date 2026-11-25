@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { createServer } from 'vite'
 import { createSSRApp } from 'vue'
 import { renderToString } from 'vue/server-renderer'
-import { groupBySeller } from '../src/records-model.ts'
+import { ID_INJECTION_KEY } from 'element-plus'
+import { filterRecordBusinessDates } from '../src/records-model.ts'
 
 let server, Component
 before(async () => {
@@ -25,7 +26,9 @@ const item = () => ({
     ] } },
   execution: { uploaded_price: '18.236' },
 })
-const render = async row => renderToString(createSSRApp(Component, { seller: groupBySeller([row])[0] }))
+const renderItems = (items, emptyMessage = '当天无记录。') => renderToString(createSSRApp(Component, { items, emptyMessage })
+  .provide(ID_INJECTION_KEY, { prefix: 0, current: 0 }))
+const render = row => renderItems([row])
 
 test('the loss price omits trial profit hints including zero', async () => {
   const row = item()
@@ -39,21 +42,25 @@ test('the loss price omits trial profit hints including zero', async () => {
   assert.doesNotMatch(await render(row), /按初步补亏后的营销价试算|每件利润|利润率/)
 })
 
-test('dialog title omits the date and counts, while filter buttons show full seller counts including zero', async () => {
-  const { readFile } = await import('node:fs/promises')
-  const page = await readFile(new URL('../src/RecordsPage.vue', import.meta.url), 'utf8')
-  const source = await readFile(new URL('../src/SellerRecordLogs.vue', import.meta.url), 'utf8')
-  assert.match(page, /#header="\{ titleId, titleClass \}"[\s\S]*<h2 :id="titleId"[^>]*>\{\{ logTitle \}\}<\/h2>\s*<button[^>]*records-log-download/)
-  assert.doesNotMatch(page, /records-log-date|logDateTitle|\{\{ logDate \}\}/)
-  assert.doesNotMatch(page + source, /logHitCount|logTotal|records-log-count|hit-count|hitCount|defineEmits/)
-  assert.match(source, /seller\.items\.length : seller\.counts\[state\]/)
-  const seller = groupBySeller([item(), { ...item(), id: 'second', status: '待处理' }, { ...item(), id: 'third', status: '已核验', execution:{state:'verified'} }])[0]
-  const saved = structuredClone(seller)
-  const html = await renderToString(createSSRApp(Component, { seller }))
-  for (const [name, count] of [['全部', 3], ['已提价', 1], ['待处理', 2], ['不调价', 0]]) {
+test('status counts and rows reflect the selected dates, including zero counts', async () => {
+  const rows = [{ ...item(), business_date: '2026-11-25' },
+    { ...item(), id: 'second', status: '待处理', business_date: '2026-11-24' },
+    { ...item(), id: 'third', status: '已核验', execution: { state: 'verified' }, business_date: '2026-11-26' }]
+  const saved = structuredClone(rows)
+  const html = await renderItems(filterRecordBusinessDates(rows, { start: '2026-11-24', end: '2026-11-25' }))
+  for (const [name, count] of [['全部', 2], ['已提价', 0], ['待处理', 2], ['不调价', 0]]) {
     assert.ok(html.includes(`${name} <span class="records-log-filter-count">${count}</span>`))
   }
-  assert.deepEqual(seller, saved)
+  assert.match(html, /data-record-id="compact-log"/)
+  assert.match(html, /data-record-id="second"/)
+  assert.doesNotMatch(html, /data-record-id="third"/)
+  assert.deepEqual(rows, saved)
+})
+
+test('an empty date selection explains that there are no records for the date', async () => {
+  const html = await renderItems([])
+  assert.match(html, /当天无记录。/)
+  assert.doesNotMatch(html, /可换状态或清空关键词|data-record-id=/)
 })
 
 test('compact log retains identity, status, three horizontal stage fields and upload evidence without formula text', async () => {
@@ -61,7 +68,7 @@ test('compact log retains identity, status, three horizontal stage fields and up
   const original = structuredClone(row)
   const html = await render(row)
   assert.match(html, /SYNTHETIC-001/)
-  assert.match(html, /<p>合成测试店铺 \/ PH<\/p>/)
+  assert.match(html, /<p>(?:(?!<\/p>).)*aria-label="复制店铺：合成测试店铺"(?:(?!<\/p>).)*<\/button>(?:(?!<\/p>).)*<span> \/ PH<\/span><\/p>/s)
   assert.doesNotMatch(html, /PH \/ Tiktok/)
   assert.equal(row.key.platform, 'Tiktok')
   assert.match(html, /class="attention records-status"><i><\/i>待处理/)
@@ -103,7 +110,7 @@ test('upload is a peer price field and all execution statuses occupy a separate 
     if (status === '已核验') row.execution.state = 'verified'
     const original = structuredClone(row)
     const html = await render(row)
-    assert.match(html, new RegExp(`<div class="records-stage-field" data-field="uploaded-price"><dt>上传含税价</dt><dd><strong>18\\.24 PHP</strong></dd></div><div class="records-stage-field" data-field="updated-time"><dt>最近更新</dt><dd class="records-log-time"><span>—</span></dd></div></dl>(?:<!--.*?-->)*<div class="records-log-state" aria-label="执行状态"><span class="${tone} records-status"><i></i>${label}</span><p class="records-log-reason">${status === '已核验' ? '提价上传完成' : status === '不调价' ? '原因未记录' : '处理异常需要人工提价'}</p></div>`))
+    assert.match(html, new RegExp(`<div class="records-stage-field" data-field="uploaded-price"><dt>上传含税价</dt><dd><strong>18\\.24 PHP</strong></dd></div><div class="records-stage-field" data-field="updated-time"><dt>最近更新</dt><dd class="records-log-time"><span>—</span></dd></div></dl>(?:<!--.*?-->)*<div class="records-log-state" aria-label="执行状态"><span class="${tone} records-status"><i></i>${label}</span><p class="records-log-reason">${status === '已核验' ? '提价上传完成' : status === '不调价' ? '原因未记录' : status === '待核验' ? '上传结果待确认，请勿重复上传' : '处理异常需要人工提价'}</p></div>`))
     assert.equal((html.match(/class="records-log-state"/g) ?? []).length, 1)
     assert.doesNotMatch(html, /<dl[^>]*>(?:(?!<\/dl>).)*records-log-state/s)
     assert.doesNotMatch(html, /<header class="records-log-heading">(?:(?!<\/header>).)*records-log-state/s)
@@ -180,15 +187,22 @@ test('missing upload and ERP margin evidence are not replaced by other saved val
   assert.doesNotMatch(html, /18\.23 PHP|987\.65|999\.11/)
 })
 
-test('missing concrete item IDs stay optional and never use parent IDs or SKU as replacements', async () => {
+test('skipped records show a plain dash only for the missing ID and keep the other ID copyable', async () => {
   for (const missing of [undefined, null, '']) {
-    const row = item()
-    row.key.item_id = missing
-    const html = await render(row)
-    assert.match(html, /商品ID：未记录/)
-    assert.doesNotMatch(html, /商品ID：(PARENT-999|SYNTHETIC-001)|子SKU：/)
-    assert.match(html, /data-stage="original"/)
-    assert.match(html, /<dt>上传含税价<\/dt><dd><strong>18\.24 PHP<\/strong><\/dd>/)
+    for (const [field, label, keptLabel, keptId] of [
+      ['item_id', '商品ID', '产品ID', 'PARENT-999'],
+      ['product_id', '产品ID', '商品ID', '000123'],
+    ]) {
+      const row = item()
+      row.status = '不调价'
+      row.key[field] = missing
+      const html = (await render(row)).replace(/<!--[\s\S]*?-->/g, '')
+      assert.ok(html.includes(`<p>${label}：—</p>`))
+      assert.ok(!html.includes(`复制${label}：`))
+      assert.ok(html.includes(`aria-label="复制${keptLabel}：${keptId}"`))
+      assert.match(html, /data-stage="original"/)
+      assert.match(html, /<dt>上传含税价<\/dt><dd><strong>18\.24 PHP<\/strong><\/dd>/)
+    }
   }
 })
 
@@ -196,17 +210,19 @@ test('item ID stays a single text-only copy target while SKU keeps its icon and 
   const row = item()
   row.key.item_id = '1731919633741415702'
   const html = await render(row)
-  const buttons = [...html.matchAll(/<button[^>]*class="records-id-copy-button"[\s\S]*?<\/button>/g)].map(match => match[0])
-  assert.equal(buttons.length, 3)
+  const buttons = [...html.matchAll(/<button[^>]*class="records-id-copy-button\b[\s\S]*?<\/button>/g)].map(match => match[0])
+  assert.equal(buttons.length, 4)
   assert.match(buttons[0], /复制SKU：SYNTHETIC-001[\s\S]*<svg/)
-  assert.match(buttons[1], /复制商品ID：1731919633741415702/)
-  assert.match(buttons[1], /title="点击复制商品ID"/)
-  assert.match(buttons[1], /<span>商品ID：1731919633741415702<\/span>/)
-  assert.doesNotMatch(buttons[1], /<svg|<br|复制<\/span>/)
-  assert.match(buttons[2], /复制产品ID：PARENT-999/)
-  assert.match(buttons[2], /<span>产品ID：PARENT-999<\/span>/)
-  assert.doesNotMatch(buttons[2], /<svg|<br/)
-  assert.ok(html.indexOf("<span>商品ID：") < html.indexOf("<span>产品ID："))
+  assert.match(buttons[1], /复制店铺：合成测试店铺/)
+  assert.doesNotMatch(buttons[1], /SHOP-001| \/ PH|<svg/)
+  assert.match(buttons[2], /复制商品ID：1731919633741415702/)
+  assert.match(buttons[2], /title="点击复制商品ID"/)
+  assert.match(buttons[2], /<span[^>]*>商品ID：1731919633741415702<\/span>/)
+  assert.doesNotMatch(buttons[2], /<svg|<br|复制<\/span>/)
+  assert.match(buttons[3], /复制产品ID：PARENT-999/)
+  assert.match(buttons[3], /<span[^>]*>产品ID：PARENT-999<\/span>/)
+  assert.doesNotMatch(buttons[3], /<svg|<br/)
+  assert.ok(html.indexOf('商品ID：1731919633741415702') < html.indexOf('产品ID：PARENT-999'))
   const { readFile } = await import('node:fs/promises')
   const css = await readFile(new URL('../src/records.css', import.meta.url), 'utf8')
   const source = await readFile(new URL('../src/RecordIdCopy.vue', import.meta.url), 'utf8')
@@ -218,28 +234,40 @@ test('item ID stays a single text-only copy target while SKU keeps its icon and 
   assert.doesNotMatch(css, /text-overflow:ellipsis/)
 })
 
-test('identity copy buttons expose distinct accessible names and missing IDs remain plain text', async () => {
+test('the fallback shop ID alone is copyable, not the slash or the site', async () => {
+  const row = item()
+  row.shop_name = ''
+  row.key.shop_id = '1912442718471573506'
+  row.key.site = 'MY'
+  const html = await render(row)
+  assert.match(html, /aria-label="复制店铺：1912442718471573506"/)
+  assert.match(html, /<span[^>]*>1912442718471573506<\/span>(?:<!--.*?-->)*<\/button>.*?<span> \/ MY<\/span>/s)
+  assert.doesNotMatch(html, /aria-label="复制店铺：[^"]*MY/)
+})
+
+test('identity copy buttons expose names and empty local live regions; missing values remain plain text', async () => {
   const html = await render(item())
-  assert.match(html, /<h3>.*<button type="button" class="records-id-copy-button" aria-label="复制SKU：SYNTHETIC-001" title="点击复制SKU"/s)
+  assert.match(html, /<h3>.*<button type="button" class="records-id-copy-button\b[^"]*" aria-label="复制SKU：SYNTHETIC-001" title="点击复制SKU"/s)
   assert.match(html, /aria-label="复制商品ID：000123" title="点击复制商品ID"/)
-  assert.match(html, /<span>商品ID：000123<\/span>/)
-  assert.doesNotMatch(html, /records-id-copy-feedback|aria-live|已复制。|复制失败/)
+  assert.match(html, /<span[^>]*>商品ID：000123<\/span>/)
+  assert.equal((html.match(/<span class="records-sr" role="status"[^>]*><\/span>/g) ?? []).length, 4)
+  assert.doesNotMatch(html, /records-id-copy-feedback|已复制。|复制失败/)
   const { readFile } = await import('node:fs/promises')
   const source = await readFile(new URL('../src/RecordIdCopy.vue', import.meta.url), 'utf8')
-  const css = await readFile(new URL('../src/records.css', import.meta.url), 'utf8')
-  assert.match(source, /import \{ ElMessage \} from 'element-plus'/)
-  assert.match(source, /ElMessage\(await copyRecordId\(props\.value, props\.label, document\)\)/)
-  assert.match(source, /finally\s*\{\s*copying\.value = false/)
-  assert.doesNotMatch(source, /feedback|setTimeout|setInterval|aria-live/)
-  assert.doesNotMatch(css, /records-id-copy-feedback/)
+  assert.doesNotMatch(source, /ElMessage/)
+  assert.match(source, /await copyRecordId\(props\.value, props\.label, document\)/)
+  assert.match(source, /<ElTooltip :visible="!!feedback"/)
+  assert.match(source, /window\.setTimeout\(.*result\.duration\)/)
   const row = item()
   row.key.sku = ''
   row.key.item_id = ''
   row.key.product_id = ''
-  const missing = await render(row)
+  row.shop_name = ''
+  row.key.shop_id = ''
+  const missing = (await render(row)).replace(/<!--[\s\S]*?-->/g, '')
   assert.match(missing, /SKU 未记录/)
-  assert.match(missing, /商品ID：未记录/)
-  assert.match(missing, /产品ID：未记录/)
+  assert.match(missing, /<p>商品ID：—<\/p>/)
+  assert.match(missing, /<p>产品ID：—<\/p>/)
   assert.doesNotMatch(missing, /records-id-copy-button/)
 })
 
@@ -253,7 +281,7 @@ test('pending badges show manual pricing instruction while skipped records retai
     const html = await render(row)
     if (status === '不调价') assert.match(html, /<p class="records-log-reason">近72小时内有调价记录\n人工保护；来源待核实<\/p>/)
     else {
-      assert.match(html, /<p class="records-log-reason">处理异常需要人工提价<\/p>/)
+      assert.match(html, status === '待核验' ? /<p class="records-log-reason">上传结果待确认，请勿重复上传<\/p>/ : /<p class="records-log-reason">处理异常需要人工提价<\/p>/)
       assert.doesNotMatch(html, /近72小时内有调价记录|人工保护；来源待核实/)
     }
     assert.doesNotMatch(html, /旧尝试原因|实际有效价已回读核验成功/)
@@ -268,7 +296,7 @@ test('missing saved reasons are explicit and never inferred from other evidence'
       Object.assign(row, { status, reason, seven_days_sales: 22 })
       const html = await render(row)
       if (status === '不调价') assert.match(html, /<p class="records-log-reason">原因未记录<\/p>/)
-      else assert.match(html, /<p class="records-log-reason">处理异常需要人工提价<\/p>/)
+      else assert.match(html, status === '待核验' ? /<p class="records-log-reason">上传结果待确认，请勿重复上传<\/p>/ : /<p class="records-log-reason">处理异常需要人工提价<\/p>/)
       assert.doesNotMatch(html, /三天调价保护|7天销量|实际有效价已回读核验成功/)
     }
   }

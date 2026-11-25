@@ -9,13 +9,13 @@ from test_worker import setup
 def test_daily_roster_notifies_each_salesperson_once_without_project_accounts(tmp_path, monkeypatch):
     engine, factory, service = setup(tmp_path)
     service.config = Settings(
-        _env_file=None, runtime_dir=tmp_path, coordination_required=False,
+        _env_file=None, runtime_dir=tmp_path, coordination_required=False, erp_roster_date='2026-11-25',
         ding_enabled=True, ding_client_id='test-robot', ding_client_secret='test-secret',
         ding_roster_userids={'桂露': '00123', '莫雯舒': '00456'},
     )
     sent = []
 
-    def capture(config, *, roster_date):
+    def capture(config, *, roster_date, on_roster_scope):
         assert config.live_submit_enabled is False
         return {
             'status': 'needs_attention', 'ready_prices': 7,
@@ -90,11 +90,19 @@ def test_roster_template_uses_only_persisted_personal_results_and_acceptance(tmp
 
         first = session.get(Item, 'a')
         second = session.get(Item, 'b')
+        second.decision = {'reason_code': 'pending_submission'}
+        session.flush()
+        _, text = roster_notice_content(session, {'date': day, 'salesperson': '桂露', 'scopes': []}, at)
+        assert '已有未完成的提交，请勿重复上传' in text
         second.key, second.decision = dict(first.key), dict(first.decision)
         second.updated_at = '2026-11-25T02:31:00+00:00'
         session.get(Execution, 'a').state = 'failed'
-        session.get(Execution, 'a').response = {'status': 'rejected'}
-        session.add(Execution(id='b', item_id='b', variant_id='b', state='verified',
+        session.get(Execution, 'a').response = {'status': 'accepted'}
+        session.get(Execution, 'a').evidence = {'row_status': 'rejected'}
+        session.flush()
+        _, text = roster_notice_content(session, {'date': day, 'salesperson': '桂露', 'scopes': []}, at)
+        assert '待处理 2 · 已提价 0 · 不调价 0' in text
+        session.add(Execution(id='b', item_id='b', variant_id='b', state='uploaded',
             request={}, response={'status': 'accepted'}, evidence={}, created_at=at,
             updated_at=second.updated_at))
         session.flush()

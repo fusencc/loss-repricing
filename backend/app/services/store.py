@@ -127,7 +127,7 @@ def write_decisions(session, batch_id, decisions, *, ready_hold=None):
         seen.add(identity)
         item = existing.get(identity)
         if item and (item.id in executed or item.phase in {
-            "submitting", "accepted", "unknown", "verified", "mismatch", "failed",
+            "submitting", "accepted", "unknown", "verified", "uploaded", "mismatch", "failed",
         }):
             continue
         if item is None:
@@ -171,7 +171,7 @@ def current_items(session):
             # 核验在其后终结。更早已结束的本地请求不能解释外部来源的未知提交。
             observed = parse_stamp(latest.decision.get("trace", {}).get("evaluated_at") or latest.updated_at)
             resolved = [row for row in rows if row.id in executions
-                        and executions[row.id].state in {"verified", "failed"}
+                        and executions[row.id].state in {"verified", "uploaded", "failed"}
                         and parse_stamp(executions[row.id].created_at) <= observed
                         <= parse_stamp(executions[row.id].updated_at)]
             if resolved:

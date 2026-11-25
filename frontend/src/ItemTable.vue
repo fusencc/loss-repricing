@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import type { Item } from './api'
-import { statusType, timeLabel } from './api'
+import { display, statusType, timeLabel } from './api'
 
 defineProps<{ items: Item[]; loading?: boolean; emptyText?: string; showPrices?: boolean }>()
 defineEmits<{ select: [item: Item] }>()
 function priceLabel(value: unknown, item: Item) {
   if (typeof value !== 'string') return '—'
   const currency = (item.decision?.trace as { station_currency?: string } | undefined)?.station_currency
-  return currency ? value + ' ' + currency : value
+  return [display(value), currency].filter(Boolean).join(' ')
 }
 function observedPrice(item: Item) {
   return (item.evidence as { actual_price?: string } | undefined)?.actual_price

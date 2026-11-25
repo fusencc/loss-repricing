@@ -26,7 +26,7 @@ def xlsx(headers, rows, broken_dimension=False):
     return result.getvalue()
 
 
-def run(tmp_path, *, issue=None, **capture_options):
+def run(tmp_path, *, issue=None, transient_path=None, failures=0, **capture_options):
     calls = []
     loss = xlsx(['订单编号','订单状态','平台','集团','毛利'],
                 [['0001234567890123456789','可配货','Tiktok','集团二部',-1]], True)
@@ -41,6 +41,10 @@ def run(tmp_path, *, issue=None, **capture_options):
     def handler(r):
         calls.append(r.url.path)
         p = r.url.path
+        if p == transient_path and calls.count(p) <= failures:
+            if calls.count(p) == 1:
+                raise httpx.ReadTimeout('mock timeout', request=r)
+            return httpx.Response(503)
         if p.endswith('/login'): return httpx.Response(200,json={'code':200,'success':True,'data':{'token':'SECRET'}})
         if p.endswith('/dowDeficitOrder'):
             assert json.loads(r.content)['financecheck'] == '3'
@@ -83,8 +87,17 @@ def test_bulk_failure_is_explicit_and_partial_source_is_preserved(tmp_path, issu
     assert result['groups'][0]['error']
     assert len(result['groups'][0]['loss_rows']) == 1
     assert result['groups'][0]['rows'] == []
-    assert result['stopped_by_rate_limit'] is (issue == 'rate')
+    assert result['rate_limit_observed'] is (issue == 'rate')
     if issue == 'rate': assert calls.count('/newIp/report/download/list') == 1
+
+
+@pytest.mark.parametrize('path', ['/Api/deficit/dowDeficitOrder', '/newIp/report/download/list', '/right.xlsx'])
+@pytest.mark.parametrize('failures', [2, 3])
+def test_read_attempts_at_most_three_times(tmp_path, path, failures):
+    result, calls = run(tmp_path, transient_path=path, failures=failures)
+    assert calls.count(path) == 3
+    assert result['capture_complete'] is (failures == 2)
+    assert calls.count('/newIp/report/orderDownload/asyncOrderListDownload') <= 1
 
 
 def test_duplicate_finance_is_kept_for_audit_without_marking_capture_complete(tmp_path):
@@ -241,7 +254,7 @@ def test_cli_partial_capture_has_nonzero_exit_after_save(monkeypatch,tmp_path):
     assert e.value.code == 1
     assert len(list((tmp_path/'source-captures').glob('erp-capture-*.json')))==1
 
-def test_rate_limit_keeps_completed_batch_and_unattempted_orders(tmp_path):
+def test_rate_limit_keeps_completed_batch_and_continues_later_batches(tmp_path):
     ids=['0001','0002','0003','0004','0005']; submissions=[]
     headers=['订单编号','订单状态','平台','集团','毛利','修正毛利','修正一次毛利']
     def rows(selected):return [[i,'可配货','Tiktok','集团二部',-1,-2,-3] for i in selected]
@@ -251,25 +264,26 @@ def test_rate_limit_keeps_completed_batch_and_unattempted_orders(tmp_path):
         if p.endswith('/dowDeficitOrder'):return httpx.Response(200,content=xlsx(headers,rows(ids)))
         if p.endswith('/asyncOrderListDownload'):
             submissions.append(json.loads(r.content)['orderIdList'])
-            return httpx.Response(200,json={'code':200,'data':'下载任务【first】后台执行中'} if len(submissions)==1 else {'code':500003})
+            n = len(submissions)
+            return httpx.Response(200,json={'code':500003} if n == 2 else {'code':200,'data':f'下载任务【batch{n}】后台执行中'})
         if p.endswith('/download/list'):
-            return httpx.Response(200,json={'code':200,'data':[{'source':'orderList','id':'1','fileName':'first','status':'success','downloadUrl':'/first.xlsx'}]})
-        return httpx.Response(200,content=xlsx(headers,rows(ids[:2])))
+            n = len(submissions)
+            return httpx.Response(200,json={'code':200,'data':[{'source':'orderList','id':str(n),'fileName':f'batch{n}','status':'success','downloadUrl':f'/batch{n}.xlsx'}]})
+        return httpx.Response(200,content=xlsx(headers,rows(submissions[-1])))
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         result=capture_erp_bulk(Settings(_env_file=None,runtime_dir=tmp_path,erp_username='u',erp_password='p'),client=client,source="loss_allocatable",export_batch_size=2)
-    assert result['stopped_by_rate_limit'] and not result['capture_complete']
-    assert result['summary']['unique_orders']==2
-    assert [b['status'] for b in result['groups'][0]['batches']]==['complete','failed','not_attempted']
-    assert len(submissions)==2
+    assert result['rate_limit_observed'] and not result['capture_complete']
+    assert result['summary']['unique_orders']==3
+    assert [b['status'] for b in result['groups'][0]['batches']]==['complete','failed','complete']
+    assert submissions == [ids[:2], ids[2:4], ids[4:]]
 
     from app.services.erp_capture_store import find_saved_order, save_capture
     capture_id = save_capture(tmp_path, result)["capture_id"]
     failed = find_saved_order(tmp_path, capture_id, "0003")["groups"][0]
-    skipped = find_saved_order(tmp_path, capture_id, "0005")["groups"][0]
+    later = find_saved_order(tmp_path, capture_id, "0005")["groups"][0]
     assert failed["finance_error_kind"] == "finance_export_failed"
-    assert skipped["finance_error_kind"] == "finance_export_not_attempted"
     assert failed["finance_batches"][0]["status"] == "failed"
-    assert skipped["finance_batches"][0]["status"] == "not_attempted"
+    assert later["finance_batches"][0]["status"] == "complete"
 
 def test_export_preserves_stale_loss_status_as_evidence(tmp_path):
     from app.adapters.erp_bulk_capture import _scope
@@ -592,13 +606,17 @@ def test_blocked_bad_row_does_not_discard_valid_rows_on_the_same_page(bad_row, r
     assert not group.get('failed_pages')
 
 
-def test_blocked_later_page_failure_keeps_and_exports_verified_prefix(tmp_path):
+@pytest.mark.parametrize('limited', [False, True])
+def test_blocked_later_page_failure_keeps_and_exports_verified_prefix(tmp_path, limited):
     from app.adapters.base import SourceUnavailable
+    from app.adapters.erp_web import ErpAccountRateLimited
     ids = [f'B{i:03d}' for i in range(20)]
     submitted = []
     def post(path, body, **kwargs):
         if path == '/Api/order/list':
             if body['page'] == 2:
+                if limited:
+                    raise ErpAccountRateLimited()
                 raise SourceUnavailable('第二页读取失败')
             return {'total': 40, 'records': [
                 {'orderid': order, 'platform': 'Tiktok', 'status': 3, 'jzfh': '1'} for order in ids]}

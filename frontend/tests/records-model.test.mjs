@@ -1,32 +1,14 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { groupBySeller, effectiveTimeLabel, recordDateLabel } from '../src/records-model.ts'
+import { groupBySeller, effectiveTimeLabel, initialRecordDepartment, recordDepartments } from '../src/records-model.ts'
 
-test('title dates distinguish platform effective time, first verification and record updates in Beijing time', () => {
-  const record = (status, execution, updated_at = '2026-11-22T18:00:00Z') => ({ status, execution, updated_at })
-  const effective = record('已核验', { effective_time_source: 'effective_at', effective_at: '2026-11-17T18:00:00Z', confirmed_at: '2026-11-20T01:00:00Z' })
-  const confirmed = record('已核验', { effective_time_source: 'confirmed_at', effective_at: '2026-11-17T01:00:00Z', confirmed_at: '2026-11-19T01:00:00Z' })
-  assert.equal(recordDateLabel([effective]), '提价生效日期：2026/11/18（北京时间）')
-  assert.equal(recordDateLabel([confirmed]), '提价核验日期：2026/11/19（北京时间）')
-  // 受理、待核验与普通更新时间均不能冒充真实提价；即使存在未终结回执也只展示记录更新日期。
-  const pending = record('待核验', { state: 'accepted', effective_at: '2026-11-17T01:00:00Z', confirmed_at: '2026-11-19T01:00:00Z' })
-  assert.equal(recordDateLabel([pending]), '记录更新日期：2026/11/23（北京时间）')
-  assert.equal(recordDateLabel([record('待处理', null)]), '记录更新日期：2026/11/23（北京时间）')
-  const mixed = [pending, confirmed, effective]
-  const saved = structuredClone(mixed)
-  assert.equal(recordDateLabel(mixed), '提价生效日期：2026/11/18；提价核验日期：2026/11/19；记录更新日期：2026/11/23（北京时间）')
-  assert.deepEqual(mixed, saved)
-})
-
-test('title dates show a single day or sorted range and explicitly preserve missing or invalid date evidence', () => {
-  const record = updated_at => ({ status: '待处理', execution: null, updated_at })
-  assert.equal(recordDateLabel([record('2026-11-23T01:00:00Z'), record('2026-11-17T18:00:00Z'), record('2026-11-23T01:00:00Z')]),
-    '记录更新日期：2026/11/18 至 2026/11/23（北京时间）')
-  for (const value of [undefined, null, '', 'not-a-date', '2026-11-23', '2026-11-23T01:00:00']) {
-    assert.equal(recordDateLabel([record(value)]), '提价日期未记录')
-  }
-  assert.equal(recordDateLabel([]), '提价日期未记录')
-  assert.equal(recordDateLabel([record(null), record('2026-11-23T01:00:00+08:00')]), '记录更新日期：2026/11/23；提价日期未记录（北京时间）')
+test('department opens the explicit link, then the last saved choice, then the first department', () => {
+  const [first, fifth, twelfth] = recordDepartments.map(({ id }) => id)
+  assert.equal(initialRecordDepartment(null, null), first)
+  assert.equal(initialRecordDepartment(null, fifth), fifth)
+  assert.equal(initialRecordDepartment(twelfth, fifth), twelfth)
+  assert.equal(initialRecordDepartment('unknown', fifth), fifth)
+  assert.equal(initialRecordDepartment(null, 'retired'), first)
 })
 
 const row = (id, owner, status='待核验') => ({
@@ -37,20 +19,47 @@ const row = (id, owner, status='待核验') => ({
 test('same-name sellers stay separate and all repeated SKU records survive', () => {
   const rows = [row('3','b'),row('2','a'),row('1','b','已核验')]
   const groups = groupBySeller(rows)
-  assert.equal(groups.length,2)
-  assert.deepEqual(groups[0].items.map(r=>r.id),['3','1'])
-  assert.deepEqual(groups[1].items.map(r=>r.id),['2'])
-  assert.equal(groups[0].counts['已提价'],1)
+  assert.deepEqual(groups.map(group => group.id), ['seller:a', 'seller:b'])
+  const [a, b] = groups
+  assert.deepEqual(a.items.map(r=>r.id),['2'])
+  assert.deepEqual(b.items.map(r=>r.id),['3','1'])
+  assert.equal(b.counts['已提价'],1)
   // 待核验并入待处理展示，记录本身与执行证据不改。
-  assert.equal(groups[0].counts['待处理'],1)
-  assert.equal(groups[0].latest.decision.target_actual,'15.123456789123456789')
+  assert.equal(b.counts['待处理'],1)
+  assert.equal(b.latestPriced, rows[2])
+  assert.equal(a.latestPriced, null)
+  assert.deepEqual(groupBySeller([...rows].reverse()).map(group => group.id), ['seller:a', 'seller:b'])
+})
+
+test('seller rows sort by pinyin first character, then full name', () => {
+  const people = ['赵安', '张波', '王林', '张安', '陈小', '李雨']
+  const rows = people.map((name, i) => ({ ...row(`${i}`, `seller-${i}`), seller: { id: `${i}`, name } }))
+  assert.deepEqual(groupBySeller(rows).map(group => group.name), ['陈小', '李雨', '王林', '张安', '张波', '赵安'])
+})
+
+test('seller name sorting keeps the first Unicode character whole', () => {
+  const collator = new Intl.Collator('zh-Hans-u-co-pinyin')
+  const sortedFirsts = ['😀', '🦊'].sort(collator.compare)
+  const people = [...sortedFirsts].reverse().map(first => first + '安')
+  const rows = people.map((name, i) => ({ ...row(`${i}`, `${i}`), seller: { id: `${i}`, name } }))
+  assert.deepEqual(groupBySeller(rows).map(group => group.name), sortedFirsts.map(first => first + '安'))
+})
+
+test('seller summary takes only the latest priced record while preserving all records and status counts', () => {
+  const rows = [row('5', 'a', '不调价'),
+    { ...row('4', 'a'), execution: { state: 'unknown', submit_status: 'accepted' } },
+    { ...row('3', 'a'), execution: { state: 'accepted' } }, row('2', 'a', '已核验')]
+  const [seller] = groupBySeller(rows)
+  assert.equal(seller.latestPriced, rows[2])
+  assert.deepEqual(seller.items, rows)
+  assert.deepEqual(seller.counts, { '已提价': 2, '待处理': 1, '不调价': 1 })
 })
 test('unassigned items remain inspectable, and a literal id cannot collide with the unknown group', () => {
-  const groups=groupBySeller([row('1',null),row('2','unassigned'),row('3',null)])
-  assert.equal(groups.length,2)
-  assert.notEqual(groups[0].id,groups[1].id)
-  assert.deepEqual(groups[0].items.map(r=>r.id),['1','3'])
-  assert.deepEqual(groupBySeller([]),[])
+  const unknown = { ...row('1', null), seller: { id: null, name: '待分配' } }
+  const groups = groupBySeller([unknown, row('2', 'unassigned'), row('3', null)])
+  assert.deepEqual(groups.map(group => group.id), ['seller:unassigned', 'unassigned'])
+  assert.deepEqual(groups[1].items.map(r => r.id), ['1', '3'])
+  assert.deepEqual(groupBySeller([]), [])
 })
 test('confirmed time used for protection is never presented as exact price effective time', () => {
   assert.equal(effectiveTimeLabel('confirmed_at'),'保护起算时间（按首次核验）')
@@ -136,8 +145,10 @@ test('overview keeps real statuses separate from the unconnected activity placeh
   const source = await readFile(new URL('../src/RecordsPage.vue', import.meta.url), 'utf8')
   assert.match(source, /title="算价选中的订单修正一次毛利，按原币展示">修正一次毛利<\/th>/)
   assert.match(source, /class="records-mobile-label">修正一次毛利<\/span>/)
-  assert.match(source, /group\.latest\.first_margin\?\.amount/)
-  assert.match(source, /group\.latest\.first_margin\.currency/)
+  assert.match(source, /group\.latestPriced\.first_margin\?\.amount/)
+  assert.match(source, /group\.latestPriced\.first_margin\.currency/)
+  assert.match(source, /<template v-if="group\.latestPriced">/)
+  assert.match(source, /<td v-else class="records-no-priced" colspan="5">暂无已提价记录<\/td>/)
   assert.match(source, /countRecordStatuses\(data\.value\?\.items/)
   assert.match(source, /group\.counts\[state\]/)
   assert.match(source, /class="records-activity-placeholder"><i class="neutral"><\/i>活动中<\/span>/)
@@ -205,6 +216,6 @@ test('a previous accepted receipt cannot hide a readback mismatch', async () => 
   const { recordStatusLabel, recordStateReason } = await import('../src/records-model.ts')
   const item = { ...row('submitted', 'a'), reason: '回读价格不一致', execution: { state: 'mismatch', submit_status: 'accepted' } }
   assert.equal(recordStatusLabel(item), '待处理')
-  assert.equal(recordStateReason(item), '处理异常需要人工提价')
+  assert.equal(recordStateReason(item), '上传结果待确认，请勿重复上传')
   assert.equal(recordStateReason({ ...item, execution: { state: 'accepted' } }), '提价上传完成')
 })

@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, shallowRef } from 'vue'
 import { isAxiosError } from 'axios'
 import { ElPagination } from 'element-plus'
-import { api, errorMessage, timeLabel, type ErpReconciliation, type Identifier, type Item } from './api'
+import { api, display, errorMessage, timeLabel, type ErpReconciliation, type Identifier, type Item } from './api'
 
 const props = defineProps<{
   fileMode: boolean
@@ -144,7 +144,7 @@ onMounted(() => {
 })
 
 function amount(value: string | null, currency?: string) {
-  return value == null ? '—' : [value, currency].filter(Boolean).join(' ')
+  return value == null ? '—' : [display(value), currency].filter(Boolean).join(' ')
 }
 
 function selectedLine(rowId: string | null) {
@@ -241,7 +241,9 @@ function download() {
           <el-table-column prop="order_id" label="订单号" min-width="155" />
           <el-table-column prop="row_number" label="Excel 行" min-width="80" />
           <el-table-column prop="erp_sku" label="ERP 本地 SKU" min-width="120" />
-          <el-table-column prop="quantity" label="数量" min-width="75" />
+          <el-table-column label="数量" min-width="75">
+            <template #default="{ row }">{{ display(row.quantity) }}</template>
+          </el-table-column>
           <el-table-column label="销售在线变体" min-width="218">
             <template #default="{ row }">
               <template v-if="row.target">

@@ -13,23 +13,23 @@ class ErpBusinessFailure(SourceUnavailable):
 
 
 class ErpAccountRateLimited(ErpBusinessFailure):
-    """2026-11-06已实测500003为账号限流；停止本轮，不自动重登或重试。"""
+    """500003 表示当前请求受账号限流，不自动重登。"""
 
     def __init__(self):
         super().__init__(500003)
-        self.args = ('ERP账号操作频繁，已停止本轮读取；恢复时间及正式限额尚待确认',)
+        self.args = ('ERP账号操作频繁（500003），当前请求未取到数据',)
 
 
 def retry_erp_read(call):
-    """仅供幂等读取调用；读超时或 HTTP 5xx 至多再读一次，调用方每次照常节流。"""
-    for attempt in range(2):
+    """幂等读取遇到读超时或 HTTP 5xx 时，按原节流间隔总共最多尝试三次。"""
+    for attempt in (1, 2, 3):
         try:
             return call()
         except httpx.ReadTimeout:
-            if attempt:
+            if attempt == 3:
                 raise
         except httpx.HTTPStatusError as exc:
-            if attempt or not 500 <= exc.response.status_code <= 599:
+            if attempt == 3 or not 500 <= exc.response.status_code <= 599:
                 raise
 
 

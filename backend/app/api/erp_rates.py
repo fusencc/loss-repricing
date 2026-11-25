@@ -116,7 +116,7 @@ def capture(request: Request, query: Annotated[CaptureQuery, Query()]):
                                                 'capture_complete', 'pricing_ready', 'summary')}
         if 'cleaning_status' in saved:
             response['cleaning_status'] = saved['cleaning_status']
-        response['stopped_by_rate_limit'] = saved.get('stopped_by_rate_limit', False)
+        response['rate_limit_observed'] = saved.get('rate_limit_observed', False)
         response['not_read_groups'] = saved.get('not_read_groups', [])
         return response
     except SourceUnavailable as error:

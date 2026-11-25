@@ -1,30 +1,22 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 import { Search } from '@element-plus/icons-vue'
 import { formatDecimal } from './decimal-display.ts'
 import { timeLabel } from './api'
 import SkuPriceReferenceView from './SkuPriceReference.vue'
 import RecordIdCopy from './RecordIdCopy.vue'
-import { recordPrice, recordTone, recordStatusLabel, recordDisplayStates,
+import { recordPrice, recordTone, recordStatusLabel, recordDisplayStates, countRecordStatuses,
   changeLabel, isPositiveChange, isNegativeAmount, filterRecordItems, stagePriceLabel, recordStageLabel, recordStateReason,
-  type RecordStatusFilter,
-  type SellerGroup } from './records-model'
+  type RecordStatusFilter, type RecordItem } from './records-model'
 
-const props = defineProps<{ seller: SellerGroup }>()
+const props = defineProps<{ items: RecordItem[]; emptyMessage: string }>()
 
-// 筛选只在弹窗内生效：不修改 seller.items 的原始顺序与内容，部门首页统计与下载不受影响。
 const statusFilter = ref<RecordStatusFilter>('全部')
 const keyword = ref('')
 const statuses: RecordStatusFilter[] = ['全部', ...recordDisplayStates]
-// 数量固定取该销售员完整记录；状态和关键词只筛选下方内容，不让按钮数字随自身筛选缩减。
-
-const visibleItems = computed(() => filterRecordItems(props.seller.items, statusFilter.value, keyword.value))
-
-// 每次打开人员弹窗重置筛选，避免上一位销售员的条件串到本人日志。
-watch(() => props.seller.id, () => {
-  statusFilter.value = '全部'
-  keyword.value = ''
-})
+// 状态数字反映选中日期，不随关键词或状态筛选缩减。
+const counts = computed(() => countRecordStatuses(props.items))
+const visibleItems = computed(() => filterRecordItems(props.items, statusFilter.value, keyword.value))
 
 const searchInput = ref<HTMLInputElement | null>(null)
 </script>
@@ -36,7 +28,7 @@ const searchInput = ref<HTMLInputElement | null>(null)
         <button v-for="state in statuses" :key="state" type="button"
           :aria-pressed="statusFilter === state"
           :class="{ active: statusFilter === state }"
-          @click="statusFilter = state"><i v-if="state !== '全部'" class="records-log-filter-dot" :class="recordTone(state)" aria-hidden="true"></i>{{ state }} <span class="records-log-filter-count">{{ state === '全部' ? seller.items.length : seller.counts[state] }}</span></button>
+          @click="statusFilter = state"><i v-if="state !== '全部'" class="records-log-filter-dot" :class="recordTone(state)" aria-hidden="true"></i>{{ state }} <span class="records-log-filter-count">{{ state === '全部' ? items.length : counts[state] }}</span></button>
       </div>
       <div class="records-log-search" role="search">
         <input ref="searchInput" v-model="keyword" type="search"
@@ -46,15 +38,16 @@ const searchInput = ref<HTMLInputElement | null>(null)
       </div>
     </div>
 
-    <div class="records-log-list" tabindex="0" aria-label="完整提价日志，可滚动查看">
+    <div class="records-log-list" tabindex="0" aria-label="所选日期的提价日志，可滚动查看">
       <article v-for="item in visibleItems" :key="item.id" class="records-log" :data-record-id="item.id">
         <header class="records-log-heading">
           <div>
             <h3><RecordIdCopy v-if="item.key.sku" :value="item.key.sku" label="SKU" /><template v-else>SKU 未记录</template></h3>
-            <p>{{ item.shop_name || item.key.shop_id }} / {{ item.key.site }}</p>
+            <p><RecordIdCopy v-if="item.shop_name || item.key.shop_id" :value="item.shop_name || item.key.shop_id"
+              label="店铺" :show-icon="false" inline /><span> / {{ item.key.site }}</span></p>
             <!-- key.item_id 是规范身份中的具体商品 ID；不拿产品 ID 或主 SKU 补齐，缺失只影响展示。 -->
-            <p><RecordIdCopy v-if="item.key.item_id" :value="item.key.item_id" label="商品ID" prefix="商品ID：" :show-icon="false" /><template v-else>商品ID：未记录</template></p>
-            <p><RecordIdCopy v-if="item.key.product_id" :value="item.key.product_id" label="产品ID" prefix="产品ID：" :show-icon="false" /><template v-else>产品ID：未记录</template></p>
+            <p><RecordIdCopy v-if="item.key.item_id" :value="item.key.item_id" label="商品ID" prefix="商品ID：" :show-icon="false" /><template v-else>商品ID：—</template></p>
+            <p><RecordIdCopy v-if="item.key.product_id" :value="item.key.product_id" label="产品ID" prefix="产品ID：" :show-icon="false" /><template v-else>产品ID：—</template></p>
           </div>
         </header>
 
@@ -102,7 +95,7 @@ const searchInput = ref<HTMLInputElement | null>(null)
         <SkuPriceReferenceView :reference="item.decision?.sku_price_reference" :price-limit="item.decision?.price_limit" />
       </article>
       <p v-if="!visibleItems.length" class="records-log-empty" role="status">
-        当前筛选没有匹配的日志，可换状态或清空关键词。
+        {{ items.length ? '当前筛选没有匹配的日志，可换状态或清空关键词。' : emptyMessage }}
       </p>
     </div>
   </div>

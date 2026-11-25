@@ -5,7 +5,7 @@ export interface RecordIdCopyMessage {
 }
 
 // 当前服务器页面为 HTTP：点击时同步选中文本并执行浏览器复制命令，避免依赖仅安全上下文可用的 Clipboard API。
-// SKU/ID 按原文本复制；命令确认写入才显示成功，临时文本始终清理，并恢复弹窗焦点与原选区。
+// 按传入文本复制；命令确认写入才显示成功，临时文本始终清理，并恢复弹窗焦点与原选区。
 export async function copyRecordId(value: string, label: string,
   document: Document): Promise<RecordIdCopyMessage> {
   if (!value) return { type: 'error', message: `${label}未记录，无法复制。`, duration: 3000 }

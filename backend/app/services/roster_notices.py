@@ -1,12 +1,14 @@
 """固定名单复用正式结果模板，按 ERP 采集范围中的姓名定向投递。"""
+from types import SimpleNamespace
+
 from sqlalchemy import select
 
 from app.adapters.dingtalk import DingTalkClient
 from app.db import transaction
 from app.models import Batch, Execution, Item, Job
 from app.services.store import enqueue, stamp
-from app.services.notifications import _card_text, _markdown_text, _notice_category
-from app.services.records import combine_pricing_process
+from app.services.notifications import _card_text, _markdown_text
+from app.services.records import combine_pricing_process, roster_outcome, roster_record_source
 
 
 SCOPE_STATUS = {
@@ -20,7 +22,6 @@ SCOPE_STATUS = {
 def enqueue_roster_notices(factory, config, day, capture):
     if not (config.ding_roster_enabled or config.ding_enabled) or config.adapter_mode != 'live':
         return
-    pricing = {row['salesperson']: row for row in capture.get('pricing_batches', [])}
     for name in capture['salespersons']:
         scopes = [
             {key: row[key] for key in ('department', 'status', 'ready_prices')}
@@ -29,19 +30,6 @@ def enqueue_roster_notices(factory, config, day, capture):
         if not scopes:
             continue
         payload = {'date': day.isoformat(), 'salesperson': name, 'scopes': scopes}
-        if name in pricing:
-            batch_id = pricing[name].get('batch_id')
-            if batch_id:
-                with factory() as session:
-                    execution_states = session.scalars(
-                        select(Execution.state).join(Item, Item.id == Execution.item_id)
-                        .where(Item.batch_id == batch_id)
-                    ).all()
-                payload['pricing'] = {'verified': execution_states.count('verified'),
-                                      'pending': sum(state in {'submitting', 'accepted', 'unknown', 'mismatch'}
-                                                     for state in execution_states)}
-            else:
-                payload['pricing'] = {'blocked': True}
         enqueue(factory, 'erp_roster_notice', payload,
                 f'erp-roster-notice:{day.isoformat()}:{name}')
 
@@ -53,25 +41,19 @@ def roster_notice_content(session, payload, created_at):
         .outerjoin(Execution, Execution.item_id == Item.id)
         .where(Batch.mode == 'live', Batch.business_date == day)
         .order_by(Item.updated_at.desc(), Item.id.desc()))
-    chosen = [(item, execution) for item, batch, execution in rows
-        if batch.run_key.startswith('erp-roster:') and batch.run_key.endswith(f':{name}:{day}')
-        and (batch.snapshot.get('source_versions') or {}).get('erp_roster_salesperson') == name]
-    # 与已部署记录页共用流程合并：补算成功后，旧准备/失败尝试不再计作待处理。
-    projections = [{'id': item.id, 'business_date': day, 'mode': 'live', 'key': item.key,
-                    'decision': item.decision, 'updated_at': item.updated_at, 'reason': item.reason,
-                    'execution': {'state': execution.state,
-                                  'submit_status': (execution.response or {}).get('status')} if execution else None}
-                   for item, execution in chosen]
-    retained = {row['id'] for row in combine_pricing_process(projections)}
-    chosen = [(item, execution) for item, execution in chosen if item.id in retained]
-
-    items = [item for item, _ in chosen]
-    # 展示沿用用户“提交已受理即已提价”的口径，不改写真实执行状态或回读证据。
-    categories = {item.id: ('已提价' if execution and
-        (execution.state in {'accepted', 'verified'} or (execution.response or {}).get('status') == 'accepted')
-        else _notice_category(item)) for item, execution in chosen}
+    # 与记录页共用名单来源和流程合并，补算成功后不再计入旧准备/失败尝试。
+    projections = []
+    for item, batch, execution in rows:
+        if roster_record_source(batch).get('erp_roster_salesperson') != name:
+            continue
+        status, reason = roster_outcome(item, execution)
+        projections.append({'id': item.id, 'business_date': day, 'mode': 'live', 'key': item.key,
+            'decision': item.decision, 'updated_at': item.updated_at, 'reason': reason, 'status': status,
+            'execution': {'state': execution.state, 'submit_status': (execution.response or {}).get('status'),
+                          'row_status': (execution.evidence or {}).get('row_status')} if execution else None})
+    items = [SimpleNamespace(**record) for record in combine_pricing_process(projections)]
     title = '亏损提价处理结果'
-    text = _card_text({'title': title}, items, categories=categories, fallback_time=created_at)
+    text = _card_text({'title': title}, items, fallback_time=created_at)
     text += f'\n\n销售员：{_markdown_text(name)}'
     if not items:
         text += '\n\n暂无已保存的提价记录，未提交价格。'

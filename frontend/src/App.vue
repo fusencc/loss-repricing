@@ -111,6 +111,7 @@ const statusCards = [
   { label: '不调价', color: 'slate', hint: '按当前规则无需调价' },
   { label: '待处理', color: 'amber', hint: '需补齐数据或重新评估' },
   { label: '待核验', color: 'blue', hint: '等待逐行结果或有效价回读' },
+  { label: '已提价', color: 'teal', hint: '价格上传已受理，不代表有效价已核验' },
   { label: '已核验', color: 'teal', hint: '有效价已完成核验' },
 ] as const
 
@@ -498,7 +499,7 @@ onUnmounted(() => {
           <section class="stats" aria-label="商品处理状态">
             <button v-for="card in statusCards" :key="card.label" class="stat-card" type="button" @click="showStatus(card.label)">
               <span class="stat-label"><span :class="`stat-dot ${card.color}`"></span>{{ card.label }}<el-icon><ArrowRight /></el-icon></span>
-              <strong>{{ overview?.counts[card.label] ?? '—' }}</strong>
+              <strong>{{ overview ? (overview.counts[card.label] ?? 0) : '—' }}</strong>
               <span class="stat-hint">{{ card.hint }}</span>
             </button>
           </section>

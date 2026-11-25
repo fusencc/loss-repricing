@@ -47,6 +47,7 @@ CATALOG = {
     'execution.unknown': ('ERROR', '提交结果未知，保留锁且仅查询、不重传'),
     'execution.result_saved': ('INFO', '提交结果分类已保存，受理不等于生效'),
     'execution.lookup_failed': ('WARNING', '核验查询失败，保持原锁并稍后查询'),
+    'execution.uploaded': ('INFO', '名单调价任务已成功，未查询实际售价'),
     'execution.verified': ('INFO', '实际价核验通过，模拟属性另行标注'),
     'execution.rejected': ('WARNING', '已确认本次执行被拒绝'),
     'execution.mismatch': ('WARNING', '实际价格核验未通过，保留商品锁并等待核验'),
@@ -128,7 +129,7 @@ def project_event(data):
         'source': {'erp', 'demo', 'file', 'live'},
         'method': {'GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', 'OTHER'},
         'kind': {'run', 'reconcile', 'correction', 'other'},
-        'state': {'queued', 'running', 'done', 'failed', 'accepted', 'rejected', 'unknown', 'submitting', 'verified', 'mismatch', 'not_submitted'},
+        'state': {'queued', 'running', 'done', 'failed', 'accepted', 'rejected', 'unknown', 'submitting', 'uploaded', 'verified', 'mismatch', 'not_submitted'},
         'stage': {'auth', 'collect', 'export', 'download', 'parse', 'save', 'read', 'rates', 'pool', 'finance', 'poll', 'start', 'complete'},
         'error_code': {'rate_limited', 'source_unavailable', 'invalid_data', 'storage_failed', '500003', 'http_error', 'incomplete', 'unknown'},
     }.items():

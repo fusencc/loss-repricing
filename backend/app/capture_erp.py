@@ -82,14 +82,14 @@ def main():
             print(group['kind'], group['status'], 'total=', group.get('total'),
                   'rows=', len(group['rows']),
                   'stop=', group.get('stop_reason'), 'error=', group['error'])
-        print('stopped_by_rate_limit=', result.get('stopped_by_rate_limit', False))
+        print('rate_limit_observed=', result.get('rate_limit_observed', False))
         print('summary=', json.dumps(result.get('summary', {}), ensure_ascii=False))
         print('capture_complete=', result.get('capture_complete', False), 'pricing_ready=False')
         print('permission_scope_verified=False；取数完成不代表业务时点或账号范围已验收')
         print('sample_only=', result.get('sample_only', False), 'selection_complete=', result.get('selection_complete', False))
         successful = result.get('selection_complete', False) if result.get('sample_only') else result.get('capture_complete', False)
         event('erp.completed', stage='collect', complete=bool(successful),
-              limited=bool(result.get('stopped_by_rate_limit', False)))
+              limited=bool(result.get('rate_limit_observed', False)))
         if not successful:
             parser.exit(1, '批量采集未完成，失败及已成功部分已保存。\n')
     except (SourceUnavailable, OSError, ValueError, KeyError, SQLiteError) as error:

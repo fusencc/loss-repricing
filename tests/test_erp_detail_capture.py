@@ -31,16 +31,16 @@ def capture():
         {'candidate_order_ids':['O1','O2']},{'candidate_order_ids':['O1']}]}
 
 
-def workbook(outside=False):
+def workbook(outside=False, order=None):
     w=Workbook();s=w.active
     s.append(['订单编号','平台','店铺','商品SKU列表','订单数量','SKU修正毛利'])
-    s.append(['O9' if outside else 'O1','Tiktok','SHOP','S1',1,None])
-    s.append(['O1','Tiktok','SHOP','S1',2,None])
-    s.append(['O2','Tiktok','SHOP','S2',1,None])
+    s.append([order or ('O9' if outside else 'O1'),'Tiktok','SHOP','S1',1,None])
+    s.append([order or 'O1','Tiktok','SHOP','S1',2,None])
+    s.append([order or 'O2','Tiktok','SHOP','S2',1,None])
     b=BytesIO();w.save(b);return b.getvalue()
 
 
-def transport(outside=False,rate_limited=False):
+def transport(outside=False):
     calls=[]
     def handler(request):
         calls.append(request.url.path)
@@ -49,7 +49,6 @@ def transport(outside=False,rate_limited=False):
         assert request.headers.get('authorization')=='SECRET-TOKEN'
         if request.url.path=='/newIp/report/orderDownload/asyncOrderDetailDownload':
             ids=json.loads(request.content)['orderIdList']
-            if rate_limited:return httpx.Response(200,json={'code':500003,'data':None})
             assert ids==['O1','O2']
             return httpx.Response(200,json={'code':200,'data':'下载任务【DETAIL-TEST】'})
         if request.url.path=='/newIp/report/download/list':
@@ -136,11 +135,38 @@ def test_unrequested_order_is_archived_but_not_accepted(tmp_path):
     assert result['files'] and any(i['code']=='detail_scope_mismatch' for i in result['issues'])
 
 
-def test_rate_limit_stops_remaining_batches_without_retry(tmp_path):
-    from app.adapters.erp_detail_capture import capture_erp_details
-    mock,calls=transport(rate_limited=True)
-    with httpx.Client(transport=mock) as client:
-        result=capture_erp_details(config(tmp_path),capture(),client=client,batch_size=1)
-    assert not result['acquisition_complete'] and result['stopped_by_rate_limit']
-    assert calls.count('/newIp/report/orderDownload/asyncOrderDetailDownload')==1
-    assert result['batches'][1]['status']=='not_attempted'
+@pytest.mark.parametrize('limited', ['submit', 'poll'])
+def test_detail_rate_limit_keeps_other_batches_without_retry(tmp_path, limited):
+    from app.adapters.erp_detail_capture import DETAIL_EXPORT, TASKS, capture_erp_details
+    submissions, polls = [], []
+
+    def handler(request):
+        path = request.url.path
+        if path.endswith('/login'):
+            return httpx.Response(200, json={'code': 200, 'data': {'accessToken': 'TOKEN'}})
+        if path == DETAIL_EXPORT:
+            order, = json.loads(request.content)['orderIdList']
+            submissions.append(order)
+            if limited == 'submit' and order == 'O2':
+                return httpx.Response(200, json={'code': 500003})
+            return httpx.Response(200, json={'code': 200, 'data': f'下载任务【{order}】'})
+        order = submissions[-1]
+        if path == TASKS:
+            polls.append(order)
+            if limited == 'poll' and order == 'O2':
+                return httpx.Response(200, json={'code': 500003})
+            task = {'source': 'orderDetailList', 'fileName': order, 'id': order,
+                    'status': 'success', 'downloadUrl': f'/file/{order}'}
+            return httpx.Response(200, json={'code': 200, 'data': {'records': [task]}})
+        assert path == f'/file/{order}'
+        return httpx.Response(200, content=workbook(order=order))
+
+    source = {'capture_id': 'C', 'groups': [{'candidate_order_ids': ['O1', 'O2', 'O3']}]}
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        result = capture_erp_details(config(tmp_path), source, client=client, batch_size=1)
+    assert submissions == ['O1', 'O2', 'O3']
+    assert polls == (['O1', 'O3'] if limited == 'submit' else submissions)
+    assert result['rate_limit_observed'] and not result['acquisition_complete']
+    assert [b['status'] for b in result['batches']] == ['complete', 'failed', 'complete']
+    assert {r['order_id'] for r in result['rows']} == {'O1', 'O3'}
+    assert [(i['batch'], i['business_code']) for i in result['issues']] == [(2, 500003)]

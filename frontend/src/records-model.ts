@@ -41,8 +41,7 @@ export interface RecordData {
   departments: { id: string; name: string; total: number }[]; department: string | null
   total: number; shops: number; counts: Partial<Record<ItemStatus, number>>; items: RecordItem[]
 }
-// 用户 2026-11-25 明确要求：待核验直接归类为待处理，页面只保留三态。
-// 受理、提交中、结果未知等未终结证据仍按原执行状态保存在记录中，由原因说明区分。
+// 页面只展示三态；上传受理和实际售价核验是不同的证据。
 export const recordDisplayStates = ['已提价', '待处理', '不调价'] as const
 export type RecordDisplayState = typeof recordDisplayStates[number]
 
@@ -51,9 +50,11 @@ function emptyRecordStatusCounts(): Record<RecordDisplayState, number> {
 }
 
 export interface SellerGroup {
-  id: string; name: string; assigned: boolean; items: RecordItem[]; latest: RecordItem
+  id: string; name: string; assigned: boolean; items: RecordItem[]; latestPriced: RecordItem | null
   counts: Record<RecordDisplayState, number>
 }
+
+const sellerNameOrder = new Intl.Collator('zh-Hans-u-co-pinyin')
 
 export function groupBySeller(items: RecordItem[]): SellerGroup[] {
   const groups = new Map<string, SellerGroup>()
@@ -61,14 +62,23 @@ export function groupBySeller(items: RecordItem[]): SellerGroup[] {
     const id = item.seller.id === null ? 'unassigned' : `seller:${item.seller.id}`
     let group = groups.get(id)
     if (!group) {
-      group = { id, name: item.seller.name, assigned: item.seller.id !== null, items: [], latest: item,
+      group = { id, name: item.seller.name, assigned: item.seller.id !== null, items: [], latestPriced: null,
         counts: emptyRecordStatusCounts() }
       groups.set(id, group)
     }
     group.items.push(item)
-    group.counts[recordStatusLabel(item)] += 1
+    const status = recordStatusLabel(item)
+    group.counts[status] += 1
+    // 接口已按记录更新从新到旧排列，跳过较新的待处理或不调价记录。
+    if (status === '已提价') group.latestPriced ??= item
   }
-  return [...groups.values()]
+  return [...groups.values()].sort((a, b) => {
+    if (a.assigned !== b.assigned) return a.assigned ? -1 : 1
+    const [aFirst = ''] = a.name
+    const [bFirst = ''] = b.name
+    return sellerNameOrder.compare(aFirst, bFirst) || sellerNameOrder.compare(a.name, b.name)
+      || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+  })
 }
 
 export function recordPrice(value: string | null | undefined, item: RecordItem): string {
@@ -91,61 +101,33 @@ export function effectiveTimeLabel(source: string | null | undefined): string {
   return '保护起算时间（来源未记录）'
 }
 
-// 标题日期只投影保存的执行证据。首次核验不是平台真实生效，更新时间也不是提交或生效时间。
-// 与 timeLabel 一致使用北京时间及中文年月日格式；无时区、无效或缺失的时间不猜今天。
-function recordDateEvidence(items: RecordItem[]): { dates: Map<string, string[]>; missing: boolean } {
-  const dates = new Map<string, string[]>()
-  const format = new Intl.DateTimeFormat('zh-CN', {
-    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
-  })
-  const dateText = (value: string | null | undefined): string | null => {
-    if (!value || !/T.*(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return null
-    const date = new Date(value)
-    return Number.isNaN(date.getTime()) ? null : format.format(date)
-  }
-  let missing = items.length === 0
-  for (const item of items) {
-    const execution = item.execution
-    const effective = item.status === '已核验' && execution?.effective_time_source === 'effective_at'
-      ? dateText(execution.effective_at) : null
-    const confirmed = item.status === '已核验' ? dateText(execution?.confirmed_at) : null
-    const updated = dateText(item.updated_at)
-    const label = effective ? '提价生效日期' : confirmed ? '提价核验日期' : '记录更新日期'
-    const date = effective ?? confirmed ?? updated
-    if (!date) { missing = true; continue }
-    const group = dates.get(label) ?? []
-    group.push(date)
-    dates.set(label, group)
-  }
-  return { dates, missing }
+export interface BusinessDateRange {
+  start: string; end: string
 }
 
-// 完整说明只用于标题悬浮提示，保留日期性质、范围与北京时间口径。
-export function recordDateLabel(items: RecordItem[]): string {
-  const { dates, missing } = recordDateEvidence(items)
-  const labels = ['提价生效日期', '提价核验日期', '记录更新日期'].flatMap(label => {
-    const sorted = [...new Set(dates.get(label) ?? [])].sort()
-    if (!sorted.length) return []
-    return [`${label}：${sorted[0]}${sorted.length > 1 ? ` 至 ${sorted[sorted.length - 1]}` : ''}`]
-  })
-  if (missing) labels.push('提价日期未记录')
-  return `${labels.join('；')}${dates.size ? '（北京时间）' : ''}`
+const businessDateFormat = new Intl.DateTimeFormat('sv-SE', {
+  timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+})
+
+export function todayBusinessDateRange(now = new Date()): BusinessDateRange {
+  const today = businessDateFormat.format(now)
+  return { start: today, end: today }
 }
 
-// 标题只展示一个最近日期：同日只显示一次，范围取最新端，不额外标注日期性质。
-export function recordDateValue(items: RecordItem[]): string {
-  const { dates } = recordDateEvidence(items)
-  const all = [...dates.values()].flat().sort()
-  return all.length ? all[all.length - 1]! : '日期未记录'
+export function filterRecordBusinessDates(items: RecordItem[], { start, end }: BusinessDateRange): RecordItem[] {
+  // 按所属批次归日，补核验不会把旧记录算到今天。
+  return items.filter(item => item.business_date >= start && item.business_date <= end)
 }
 
 export function recordStatusLabel(item: RecordItem): RecordDisplayState {
-  // 2026-11-25 用户确认：上传完成即计为已提价，展示口径不改写底层回读证据。
-  const state = item.execution?.state
-  // 后续明确失败、回读不一致或未知优先于旧受理回执；只改变页面分类，不宣告实际生效。
-  if (state === 'mismatch' || state === 'failed' || state === 'unknown' || state === 'submitting') return '待处理'
-  if (state === 'accepted' || state === 'verified' || item.execution?.submit_status === 'accepted') return '已提价'
-  if (item.status === '待核验') return '待处理'
+  const execution = item.execution
+  const state = execution?.state
+  if (state === 'failed' || execution?.row_status === 'rejected' || execution?.submit_status === 'rejected'
+    || state === 'unknown' || state === 'submitting') return '待处理'
+  // 后端把有受理回执的历史名单记录投影为已提价，普通批次仍保留回读超差状态。
+  if (item.status === '已提价' || state === 'uploaded') return '已提价'
+  if (state === 'mismatch') return '待处理'
+  if (state === 'accepted' || state === 'verified' || execution?.submit_status === 'accepted') return '已提价'
   return item.status === '不调价' ? '不调价' : '待处理'
 }
 
@@ -158,9 +140,20 @@ export function countRecordStatuses(items: RecordItem[]): Record<RecordDisplaySt
 // 销售人员只需看到明确的下一步；待处理说明统一，不改写原始原因、执行状态或回执证据。
 export function recordStateReason(item: RecordItem): string {
   const status = recordStatusLabel(item)
-  if (status === '待处理') return '处理异常需要人工提价'
+  if (status === '待处理') {
+    const state = item.execution?.state
+    if (state === 'unknown' || state === 'submitting' || state === 'mismatch'
+      || (item.status === '待核验' && state !== 'failed' && item.execution?.row_status !== 'rejected'
+        && item.execution?.submit_status !== 'rejected')) return '上传结果待确认，请勿重复上传'
+    return '处理异常需要人工提价'
+  }
   if (status === '已提价') return '提价上传完成'
-  return typeof item.reason === 'string' && item.reason.trim() ? item.reason : '原因未记录'
+  const reason = item.reason
+  if (typeof reason !== 'string' || !reason.trim()) return '原因未记录'
+  // 只改写已明确保存官方条数的已知文案；无条数时不推断。
+  const count = /^近72小时存在调价日志，不调价（官方记录 ([1-9]\d*) 条）$/.exec(reason)?.[1]
+    ?? /^近三天存在([1-9]\d*)条调价日志$/.exec(reason)?.[1]
+  return count ? `近3天存在${count}条调价` : reason
 }
 
 // 价格变动展示：后端已给出 target_actual − current_actual 的十进制文本；这里只决定符号和空值文案。
@@ -232,3 +225,8 @@ export function filterRecordItems(items: RecordItem[], status: RecordStatusFilte
 }
 
 export const recordDepartments = ['Tiktok一部', 'Tiktok五部', 'Tiktok十二部', 'Tiktok二十二部'].map(name => ({ id: 'department:' + name, name }))
+
+export function initialRecordDepartment(requested: string | null, saved: string | null): string {
+  const known = (id: string | null) => recordDepartments.find(entry => entry.id === id)?.id
+  return known(requested) ?? known(saved) ?? recordDepartments[0]!.id
+}

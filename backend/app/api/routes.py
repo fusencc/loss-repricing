@@ -164,7 +164,7 @@ def logout(response: Response):
 def overview(request: Request, actor=Depends(require_user)):
     state = request.app.state
     with state.factory() as session:
-        counts = {name: 0 for name in ["不调价", "待处理", "待核验", "已核验"]}
+        counts = {name: 0 for name in ["不调价", "待处理", "待核验", "已核验", "已提价"]}
         visible=[i for i in current_items(session) if can_access(session,actor,i.key)]
         if actor.role == "admin":
             visible_batch_ids = set(session.scalars(select(Batch.id).where(

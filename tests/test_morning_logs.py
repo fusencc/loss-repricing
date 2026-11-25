@@ -1,5 +1,6 @@
 from datetime import date
 from contextlib import closing
+import pytest
 import json
 
 from openpyxl import Workbook, load_workbook
@@ -39,8 +40,8 @@ def setup_log(tmp_path, monkeypatch):
             key = dict(platform='TikTok', shop_id='1919695864650514433', site='TH',
                        product_id='1738438776194172241', item_id=f'173843884476462011{n}',
                        sku=f'SKU-{n}', warehouse='东莞仓库')
-            decision = {'key': key, 'current_actual': '1.2300', 'target_actual': '2.34',
-                        'upload_price': '4.68', 'trace': {'station_currency': 'THB',
+            decision = {'key': key, 'current_actual': '1.23499', 'target_actual': '2.345',
+                        'upload_price': '4.6800', 'trace': {'station_currency': 'THB',
                         'source_versions': {'erp_capture_id': 'capture'}, 'source_rows': [
                             {'order_id': 'erp-order' if n == 0 else 'unknown-order'},
                             {'order_id': 'erp-order' if n == 0 else 'unknown-order'}]}}
@@ -57,7 +58,7 @@ def setup_log(tmp_path, monkeypatch):
     return engine, factory, config
 
 
-def test_detail_log_has_fourteen_columns_and_regenerates_after_readback(tmp_path, monkeypatch):
+def test_detail_log_has_fourteen_columns_and_regenerates_after_upload_acceptance(tmp_path, monkeypatch):
     engine, factory, config = setup_log(tmp_path, monkeypatch)
     path = morning_log.save_morning_log(config, DAY, factory=factory)
     with closing(load_workbook(path)) as book:
@@ -68,42 +69,52 @@ def test_detail_log_has_fourteen_columns_and_regenerates_after_readback(tmp_path
         by_sku = {row[2]: row for row in rows[1:]}
         assert by_sku['SKU-0'][1:8] == ('杨颖', 'SKU-0', '1738438844764620110', '1738438776194172241',
                                   '1919695864650514433', 'TH', '东莞仓库')
-        assert by_sku['SKU-0'][9] == '1.2300'
+        assert by_sku['SKU-0'][9:12] == ('1.23', '2.35', '4.68')
         assert by_sku['SKU-1'][8] == '待核验'
+        assert by_sku['SKU-1'][-1] == '上传结果待确认，请勿重复上传'
     with factory.begin() as session:
-        session.get(Item, 'item-1').status = '已核验'
-        session.get(Execution, 'exec-1').state = 'verified'
+        execution = session.get(Execution, 'exec-1')
+        execution.state, execution.response = 'accepted', {'status': 'accepted'}
+        execution.evidence = {}
     morning_log.save_morning_log(config, DAY, factory=factory)
     with closing(load_workbook(path)) as book:
-        assert {row[2]: row[8] for row in list(book['明细'].values)[1:]}['SKU-1'] == '已核验'
+        assert {row[2]: row[8] for row in list(book['明细'].values)[1:]}['SKU-1'] == '已提价'
     engine.dispose()
 
 
-def test_success_log_refresh_adds_newly_verified_orders_without_rewriting_unchanged_content(tmp_path, monkeypatch):
+@pytest.mark.parametrize(('state', 'receipt', 'row_status', 'priced'), [
+    ('accepted', 'accepted', None, True), ('uploaded', 'accepted', None, True),
+    ('mismatch', 'accepted', None, True), ('mismatch', 'unknown', None, False),
+    ('submitting', 'accepted', None, False), ('failed', 'accepted', 'rejected', False),
+])
+def test_success_log_refresh_uses_accepted_upload_not_price_readback(tmp_path, monkeypatch, state, receipt, row_status, priced):
     engine, factory, config = setup_log(tmp_path, monkeypatch)
     path = morning_log.save_success_log(config, DAY, factory=factory)
     initial = path.read_bytes()
     morning_log.save_success_log(config, DAY, factory=factory)
     assert path.read_bytes() == initial
     with factory.begin() as session:
-        session.get(Item, 'item-1').status = '已核验'
-        session.get(Execution, 'exec-1').state = 'verified'
+        execution = session.get(Execution, 'exec-1')
+        execution.state = state
+        execution.response, execution.evidence = {'status': receipt}, {'row_status': row_status}
     morning_log.save_success_log(config, DAY, factory=factory)
     with closing(load_workbook(path)) as book:
-        assert [row[0] for row in list(book['成功清单'].values)[1:]] == [
-            '0587373171290572533', '0587373171290572534']
+        assert [row[0] for row in list(book['成功清单'].values)[1:]] == (
+            ['0587373171290572533', '0587373171290572534'] if priced else ['0587373171290572533'])
     engine.dispose()
 
 
-def test_missing_real_trade_number_preserves_previous_success_workbook(tmp_path, monkeypatch):
-    import pytest
+def test_missing_trade_number_skips_only_that_order(tmp_path, monkeypatch, caplog):
     engine, factory, config = setup_log(tmp_path, monkeypatch)
+    with factory.begin() as session:
+        execution = session.get(Execution, 'exec-0')
+        request = json.loads(json.dumps(execution.request))
+        request['trace']['source_rows'].append({'order_id': 'missing-order'})
+        execution.request = request
     path = morning_log.save_success_log(config, DAY, factory=factory)
-    initial = path.read_bytes()
-    monkeypatch.setattr('app.services.erp_capture_store.load_capture', lambda *_: {'groups': []})
-    with pytest.raises(ValueError, match='交易号缺失或不唯一'):
-        morning_log.save_success_log(config, DAY, factory=factory)
-    assert path.read_bytes() == initial
+    with closing(load_workbook(path)) as book:
+        assert [row[0] for row in list(book['成功清单'].values)[1:]] == ['0587373171290572533']
+    assert '交易号缺失或不唯一' in caplog.text
     engine.dispose()
 
 
@@ -189,7 +200,6 @@ def test_success_log_does_not_export_explicitly_excluded_order(tmp_path, monkeyp
 
 def test_unknown_upload_keeps_original_workbook_when_records_change(tmp_path, monkeypatch):
     from hashlib import sha256
-    import pytest
     engine, factory, config = setup_log(tmp_path, monkeypatch)
     path = morning_log.save_morning_log(config, DAY, factory=factory)
     original = path.read_bytes()
@@ -228,7 +238,6 @@ def test_cross_day_readback_refreshes_original_business_day(tmp_path, monkeypatc
 
 
 def test_cli_attempts_second_destination_when_first_fails(tmp_path, monkeypatch):
-    import pytest
     engine, factory, config = setup_log(tmp_path, monkeypatch)
     monkeypatch.setattr('app.config.get_settings', lambda: config)
     monkeypatch.setattr('app.db.create_database', lambda *_: (engine, factory))
@@ -246,7 +255,6 @@ def test_cli_attempts_second_destination_when_first_fails(tmp_path, monkeypatch)
 
 def test_cli_does_not_overwrite_replaced_node(tmp_path, monkeypatch):
     from hashlib import sha256
-    import pytest
     path = tmp_path / '11.25早上运行日志.xlsx'
     path.write_bytes(b'changed')
     path.with_suffix('.receipt.json').write_text(json.dumps({

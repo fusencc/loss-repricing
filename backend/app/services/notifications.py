@@ -11,7 +11,7 @@ from app.adapters.dingtalk import DingTalkClient
 from app.services.store import stamp, utcnow, BEIJING
 
 
-NOTICE_ITEM_STATES = ('待处理', '待核验', '已核验', '不调价')
+NOTICE_ITEM_STATES = ('待处理', '待核验', '已提价', '已核验', '不调价')
 
 
 def _coord():
@@ -90,7 +90,7 @@ def notice_batch_mode(session, notice):
 
 
 def _notice_category(item):
-    if item.status == '已核验':
+    if item.status in {'已提价', '已核验'}:
         return '已提价'
     if item.status == '不调价':
         return '不调价'
@@ -103,7 +103,7 @@ def _markdown_text(value):
     return ''.join('\\'+char if char in '\\[]()*_`<>#' else char for char in value)
 
 
-def _card_text(summary, items, *, categories=None, fallback_time=None):
+def _card_text(summary, items, *, fallback_time=None):
     if summary.get('kind') == 'warning':
         details=[]
         for index,item in enumerate(items,1):
@@ -117,10 +117,9 @@ def _card_text(summary, items, *, categories=None, fallback_time=None):
     if processed_at is None:
         raise ValueError('通知缺少记录处理时间')
     processed_at=processed_at.astimezone(BEIJING)
-    category=lambda item: categories[item.id] if categories is not None else _notice_category(item)
-    counts=Counter(category(item) for item in items)
+    counts=Counter(_notice_category(item) for item in items)
     breakdown=' · '.join(f'{label} {counts[label]}' for label in ('待处理','已提价','不调价'))
-    manual=[item for item in items if category(item)=='待处理']
+    manual=[item for item in items if _notice_category(item)=='待处理']
     details=[]
     for index,item in enumerate(manual,1):
         key=item.key

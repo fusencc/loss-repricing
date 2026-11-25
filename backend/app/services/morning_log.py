@@ -3,6 +3,7 @@ import base64
 from datetime import date, datetime
 from hashlib import sha256
 import json
+import logging
 from pathlib import Path
 import shutil
 import subprocess
@@ -12,9 +13,11 @@ from openpyxl.cell import WriteOnlyCell
 from sqlalchemy import select
 
 from app.models import Batch, Execution, Item, Ownership, UserAccount
+from app.services.decimal_display import format_decimal
 from app.services.erp_capture_store import write_verified
 from app.services.store import stamp, BEIJING
 
+logger = logging.getLogger(__name__)
 
 DETAIL_HEADERS = ('处理时间', '销售员', 'SKU', '商品ID', '产品ID', '店铺ID', '站点', '仓配',
                   '状态', '原实际营销价', '目标实际营销价', '上传价', '币种', '处理说明')
@@ -98,7 +101,8 @@ def save_morning_log(config, day, *, factory):
         when = datetime.fromisoformat(record['updated_at']).astimezone(BEIJING).strftime('%Y-%m-%d %H:%M:%S')
         details.append((when, record['seller']['name'], key['sku'], key['item_id'], key['product_id'],
                         key['shop_id'], key['site'], key['warehouse'], record['status'],
-                        decision.get('current_actual'), decision.get('target_actual'), decision.get('upload_price'),
+                        format_decimal(decision.get('current_actual')), format_decimal(decision.get('target_actual')),
+                        format_decimal(decision.get('upload_price')),
                         (decision.get('trace') or {}).get('station_currency'), record['reason']))
     return _save_book(config, day, 'morning-logs', [('明细', DETAIL_HEADERS, details)])
 
@@ -137,25 +141,29 @@ def save_success_log(config, day, *, factory):
     catalogs, orders, times = {}, set(), []
     for record in records:
         execution = record.get('execution') or {}
-        if record['status'] != '已核验' or execution.get('state') != 'verified':
+        if record['status'] != '已提价' and not (record['status'] == '已核验' and execution.get('state') == 'verified'):
             continue
         trace = sources.get(record['id']) or {}
         capture_id = (trace.get('source_versions') or {}).get('erp_capture_id')
         if not capture_id or not trace.get('source_rows'):
-            raise ValueError('提价成功记录缺少原执行订单来源，不能生成交易号过滤清单')
+            logger.warning('本条提价记录缺少原执行订单来源，未导出交易号：%s', record['id'])
+            continue
         if capture_id not in catalogs:
             catalogs[capture_id] = _trade_catalog(config, capture_id)
         for row in trace['source_rows']:
             if row.get('row_id') in (trace.get('excluded_source_rows') or {}):
                 continue
             if row.get('key') and any(row['key'].get(k) != record['key'].get(k) for k in KEY_FIELDS):
-                raise ValueError('订单来源与已核验提价商品不一致')
+                logger.warning('本条订单商品键不一致，未导出交易号：%s', record['id'])
+                continue
             matches = catalogs[capture_id].get(row.get('order_id'), set())
             if len(matches) != 1:
-                raise ValueError('已核验商品的订单交易号缺失或不唯一')
+                logger.warning('本条订单交易号缺失或不唯一，未导出：%s', record['id'])
+                continue
             trade, shop, seller = next(iter(matches))
             if seller != record['seller']['name'] or (record['shop_name'] and shop != record['shop_name']):
-                raise ValueError('订单交易号的店铺或销售员与提价执行不一致')
+                logger.warning('本条订单店铺或销售员不符，未导出交易号：%s', record['id'])
+                continue
             orders.add((trade, shop, seller, '提价成功'))
         times.append(record['updated_at'])
     when = (datetime.fromisoformat(max(times)).astimezone(BEIJING).strftime('%Y-%m-%d %H:%M:%S')

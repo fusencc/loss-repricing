@@ -1,4 +1,4 @@
-"""固定名单逐条复用已实测的单商品含税上传和平台实价核验。"""
+"""固定名单逐条上传单商品含税价，提交后仅查询本次调价任务。"""
 
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -7,7 +7,7 @@ from uuid import UUID
 
 import httpx
 
-from app.adapters.base import SourceUnavailable
+from app.adapters.base import LookupResult, SourceUnavailable
 from app.adapters.erp_order_loss import _warehouse_matches
 from app.adapters.manual_live import ManualLiveAdapter, effective_marketing_fields, validate_authorization
 from app.adapters.normalization import money
@@ -112,7 +112,7 @@ class RosterPriceTransport:
                 adapter._promotion(variant)
             elif activity is not False or observed_discount != 0:
                 raise ValueError('提交前折扣活动未得到确认')
-            # 只查本店本产品当日日志。回读识别新任务必须有上传前基线，查询失败不发送。
+            # 上传前记录已有日志，以便结果未知时只认本次新增任务。
             previous_ids = [str(row['id']) for row in adapter._logs()]
         except (httpx.HTTPError, KeyError, TypeError, ArithmeticError) as exc:
             raise SourceUnavailable('提交前无法确认单品当前价格或操作日志') from exc
@@ -122,13 +122,22 @@ class RosterPriceTransport:
     def submit(self, execution_id, decision):
         proof = decision.trace[ROSTER_UPLOAD_TRACE]
         adapter = self._single(execution_id, proof['authorization'])
-        return adapter.upload_confirmed_price(execution_id, decision, proof['previous_log_ids'])
+        result = adapter.upload_confirmed_price(execution_id, decision, proof['previous_log_ids'])
+        if result.status == 'accepted':
+            result.message = '上传已受理，等待调价任务结果'
+        elif result.status == 'unknown':
+            result.message = '上传结果未知，只查询调价任务，不重传'
+        return result
 
-    def lookup(self, execution_id, task_id, decision):
-        proof = decision.trace[ROSTER_UPLOAD_TRACE]
-        authorization = proof['authorization']
-        if money(authorization['upload_price']) != decision.upload_price:
-            raise ValueError('单品回读授权金额与持久执行不一致')
-        adapter = self._single(execution_id, authorization)
-        # 上传绑定/平台实价由单品接口提供，价格偏差、参考上限、利润和站点暂停由统一服务判断。
-        return adapter.lookup(execution_id, task_id, decision.key, check_amount=False)
+    def lookup(self, execution_id, task_id, decision) -> LookupResult:
+        try:
+            authorization = decision.trace[ROSTER_UPLOAD_TRACE]['authorization']
+            if money(authorization['upload_price']) != decision.upload_price:
+                return LookupResult('unknown', message='授权金额与本次执行不一致')
+            adapter = self._single(execution_id, authorization)
+            _, _, matches = adapter._task_evidence(execution_id, decision.key, task_id)
+            if len(matches) != 1:
+                return LookupResult('unknown', message='本次调价任务尚未唯一匹配，只查询不重传')
+            return adapter._task_outcome(matches[0])
+        except Exception as exc:
+            return LookupResult('unknown', message=f'调价任务查询未完成（{type(exc).__name__}），只查询不重传')

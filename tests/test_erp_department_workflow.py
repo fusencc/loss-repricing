@@ -132,24 +132,23 @@ def test_workflow_continues_after_incomplete_or_failed_department(tmp_path, monk
     assert json.loads((Path(result['artifact_dir']) / 'result.json').read_text()) == result
 
 
-def test_failed_department_keeps_the_saved_capture_id(tmp_path, monkeypatch):
+def test_clean_index_failure_does_not_block_saved_capture(tmp_path, monkeypatch):
     monkeypatch.setattr(erp_workflow, '_roster', lambda settings, required_day: None)
     monkeypatch.setattr(erp_workflow, 'refresh_daily_fees', lambda *args, **kwargs: {})
     monkeypatch.setattr(erp_workflow, 'query_current_erp_fx', lambda *a: {'ref': 'test-fx'})
     monkeypatch.setattr(erp_workflow, 'ERP_DEPARTMENTS', ('Tiktok一部',))
     monkeypatch.setattr(erp_workflow, 'capture_erp_bulk', lambda *args, **kwargs: {})
     monkeypatch.setattr(erp_workflow, 'save_capture', lambda *args: {
-        'capture_id': 'already-saved', 'capture_complete': True, 'cleaning_status': 'failed',
+        'capture_id': 'already-saved', 'capture_complete': True, 'cleaning_status': 'failed', 'groups': [],
+        'department': 'Tiktok一部',
     })
-    monkeypatch.setattr(erp_workflow, '_evaluate_capture', lambda *args, **kwargs: pytest.fail('清洗失败时不得算价'))
 
     result = erp_workflow.run_workflow(Settings(_env_file=None, runtime_dir=tmp_path))
 
-    assert result['status'] == 'blocked'
-    failed, = result['departments']
-    assert failed['status'] == 'failed'
-    assert failed['capture_id'] == 'already-saved'
-    assert failed['cleaning_status'] == 'failed'
+    assert result['status'] == 'completed'
+    department, = result['departments']
+    assert department['capture_id'] == 'already-saved'
+    assert department['cleaning_status'] == 'failed'
 
 
 @pytest.mark.parametrize('bad_scope', [None, 'filter', 'finance_row', 'online'])
@@ -181,6 +180,9 @@ def test_department_archive_scope_is_enforced_by_pricing(bad_scope):
     elif bad_scope == 'online':
         assert report['summary']['ready_prices'] == 0
         assert any(issue['code'] == 'online_department_mismatch' for issue in report['issues'])
+    elif bad_scope == 'finance_row':
+        assert 'loss_allocatable' not in report['evaluation_complete_sources']
+        assert report['summary']['ready_prices'] > 0
     else:
         assert 'loss_allocatable' not in report['evaluation_complete_sources']
         assert report['summary']['ready_prices'] == 0

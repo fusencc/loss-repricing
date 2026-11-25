@@ -35,7 +35,7 @@ def test_callback_failure_never_changes_capture_flow(tmp_path, monkeypatch, caps
 
     result, calls = run(tmp_path / 'business', issue=issue, event_callback=broken_event)
     assert result['capture_complete'] is (issue is None)
-    assert result['stopped_by_rate_limit'] is (issue == 'rate')
+    assert result['rate_limit_observed'] is (issue == 'rate')
     assert result['pricing_ready'] is False
     assert Path(result['result_file']).is_file()
     assert len(observed) > 1

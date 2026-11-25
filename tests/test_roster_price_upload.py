@@ -1,3 +1,4 @@
+import json
 from collections import Counter
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -18,7 +19,7 @@ from fake_adapter import DemoAdapter
 
 @pytest.mark.parametrize('discount,timeout,missing_off', [(0, False, False), (50, True, False), (50, False, True)])
 @pytest.mark.parametrize('price_tail', ['0', '0.01'])
-def test_single_roster_upload_and_readback_use_proven_endpoints(tmp_path, monkeypatch, discount, timeout, missing_off, price_tail):
+def test_roster_lookup_confirms_task_without_reading_prices(tmp_path, monkeypatch, discount, timeout, missing_off, price_tail):
     day = datetime.now(timezone.utc).astimezone(BEIJING).date()
     snapshot = DemoAdapter(tmp_path).collect(day)
     online = snapshot.online[0]
@@ -35,7 +36,8 @@ def test_single_roster_upload_and_readback_use_proven_endpoints(tmp_path, monkey
            'sellerSkuId': key.item_id, 'priceIncludeVat': price, 'priceNew': price}
 
     def source(*args, **kwargs):
-        retail = decision.upload_price if sent[UPLOAD_PATH] else online.retail_price + Decimal(price_tail)
+        assert not sent[UPLOAD_PATH], 'Post-upload lookups must not query current prices'
+        retail = online.retail_price + Decimal(price_tail)
         actual = retail * factor
         return {
             'acquisition_complete': True, 'source_id': 'verified-platform-now',
@@ -74,13 +76,6 @@ def test_single_roster_upload_and_readback_use_proven_endpoints(tmp_path, monkey
         if path.endswith('/operationLog/findByPage'):
             rows = [log] if sent[UPLOAD_PATH] else []
             return httpx.Response(200, json={'resp_code': 0, 'datas': {'count': len(rows), 'data': rows}})
-        if path.endswith('/operationLog/getRequestAndResponseById'):
-            assert req.url.params['id'] == 'new-log'
-            return httpx.Response(200, json={'resp_code': 0, 'datas': {
-                'requestBody': {'skus': [{'id': key.item_id,
-                                          'price': {'currency': online.currency, 'amount': price}}]},
-                'responseResult': {'code': 0},
-            }})
         if path.endswith('/promotion/findByPage'):
             row = {'shopid': key.shop_id, 'promotionId': 'promotion', 'promotionType': 2, 'productType': 2, 'status': 2}
             return httpx.Response(200, json={'code': 0, 'count': 1, 'data': [row]})
@@ -94,8 +89,7 @@ def test_single_roster_upload_and_readback_use_proven_endpoints(tmp_path, monkey
     monkeypatch.setattr('app.adapters.roster_price_upload.capture_platform_controls', source)
     monkeypatch.setattr('app.adapters.manual_live.capture_platform_controls', source)
     monkeypatch.setattr('app.adapters.official_price_logs.capture_official_price_logs',
-                        lambda *_args, **_kw: {'key': key.model_dump(mode='json'), 'shop_name': shop,
-                            'latest_success_query': {'status': 'ok', 'amount': price}})
+                        lambda *_args, **_kw: pytest.fail('Unexpected official stats lookup'))
     config = Settings(_env_file=None, runtime_dir=tmp_path, live_submit_enabled=True,
                       vendor_username='test-vendor', vendor_password='test-only')
     with httpx.Client(transport=httpx.MockTransport(request)) as client:
@@ -108,10 +102,7 @@ def test_single_roster_upload_and_readback_use_proven_endpoints(tmp_path, monkey
         assert transport.submit(execution_id, decision).status == 'unknown'
         results = transport.lookup(execution_id, None, decision)
         assert results.status == 'accepted'
-        assert results.actual_price == decision.upload_price * factor
-        assert results.price_record['execution_id'] == execution_id
-        if not discount:
-            assert 'confirmed_no_activity' in results.price_record['prices']['marketing']['source_field']
+        assert results.actual_price is None and results.observed_at is None and results.price_record is None
         assert sent[UPLOAD_PATH] == 1 and sent[LOGIN_PATH] == 1
 
     workbook = load_workbook(tmp_path / 'erp-roster-price-executions' / execution_id / f'upload-{execution_id}.xlsx')
@@ -122,6 +113,45 @@ def test_single_roster_upload_and_readback_use_proven_endpoints(tmp_path, monkey
         assert all(sheet.cell(2, col).value is None for col in (4, 6, 7, 8, 9))
     finally:
         workbook.close()
+
+
+@pytest.mark.parametrize('rows,task_id,expected', [
+    ([{'id': 'old'}], None, 'unknown'),
+    ([{'id': None}], None, 'unknown'),
+    ([{'id': 'first'}, {'id': 'second'}], None, 'unknown'),
+    ([{'id': 'first'}, {'id': 'second'}], 'second', 'accepted'),
+    ([{}], 'different-id', 'unknown'),
+    ([{'sellerSkuId': 'other'}], None, 'unknown'),
+    ([{'productId': 'other'}], None, 'unknown'),
+    ([{'shopName': 'other'}], None, 'unknown'),
+    ([{'type': 1}], None, 'unknown'),
+    ([{'priceIncludeVat': '999'}], None, 'unknown'),
+    ([{'status': 1}], None, 'unknown'),
+    ([{'status': 3}], None, 'rejected'),
+    ([{'status': 5}], None, 'rejected'),
+    ([{'status': 6}], None, 'rejected'),
+    ([], None, 'unknown'),
+])
+def test_roster_task_requires_unique_new_bound_outcome(tmp_path, monkeypatch, rows, task_id, expected):
+    from app.adapters.manual_live import ManualLiveAdapter
+
+    snapshot = DemoAdapter(tmp_path).collect(datetime.now(BEIJING).date())
+    decision = next(d for d in evaluate(snapshot, snapshot.as_of) if d.ready)
+    key = decision.key
+    a = {'key': key.model_dump(mode='json'), 'shop_name': '测试店', 'upload_price': str(decision.upload_price)}
+    decision.trace[ROSTER_UPLOAD_TRACE] = {'authorization': a}
+    execution_id = str(uuid4())
+    directory = tmp_path / 'erp-roster-price-executions' / execution_id
+    directory.mkdir(parents=True)
+    (directory / f'intent-{execution_id}.json').write_text(json.dumps({'authorization': a, 'previous_log_ids': ['old']}))
+    log = {'id': 'new', 'type': 2, 'status': 2, 'shopName': a['shop_name'], 'productId': key.product_id,
+           'sellerSkuId': key.item_id, 'priceIncludeVat': a['upload_price']}
+    monkeypatch.setattr(ManualLiveAdapter, '_logs', lambda self: [log | row for row in rows])
+    with httpx.Client(transport=httpx.MockTransport(lambda req: pytest.fail(f'Unexpected request: {req.url.path}'))) as client:
+        transport = RosterPriceTransport(Settings(_env_file=None, runtime_dir=tmp_path), client=client)
+        result = transport.lookup(execution_id, task_id, decision)
+        assert result.status == expected
+        assert result.actual_price is None and result.price_record is None
 
 
 @pytest.mark.parametrize('site', ['MY', 'PH', 'SG', 'TH', 'VN'])

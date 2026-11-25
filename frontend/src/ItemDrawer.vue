@@ -87,7 +87,7 @@ const priceLimit = computed(() => {
           <el-tag :type="statusType(item.status)" effect="light">{{ item.status }}</el-tag>
         </div>
         <dl class="detail-grid">
-          <div v-for="(label, key) in identity" :key="key"><dt>{{ label }}</dt><dd>{{ display(item.key[key]) }}</dd></div>
+          <div v-for="(label, key) in identity" :key="key"><dt>{{ label }}</dt><dd>{{ item.key[key] || '—' }}</dd></div>
           <div><dt>更新时间（北京时间）</dt><dd>{{ timeLabel(item.updated_at) }}</dd></div>
         </dl>
         <ItemCoordination v-if="!item.read_only" :actor-role="actorRole" :actor-id="actorId" :item="item" @refresh="emit('refresh')" />

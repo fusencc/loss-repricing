@@ -184,7 +184,7 @@ def prepare_online_states(capture,targets,*,sales,platform,local_history,fixed_f
             except (ValueError, TypeError, KeyError):
                 recent = None  # 历史未知保留事实，交由领域规则标识并告警，不剔除候选。
             pending=any(VariantKey.model_validate(row['key']).target_identity()==key.target_identity()
-                and row['state'] not in ('failed','verified') for row in local_history['executions'])
+                and row['state'] not in ('failed','verified','uploaded') for row in local_history['executions'])
             pending=pending or any(guard['variant_id']==key.target_identity() and guard.get('execution_id') is not None
                 for guard in local_history['guards'])
 

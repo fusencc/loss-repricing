@@ -4,11 +4,11 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import select
 
-from app.adapters.base import LookupResult, SourceUnavailable
+from app.adapters.base import LookupResult, SourceUnavailable, SubmitResult
 from app.config import Settings
 from app.db import Base, create_database, transaction
 from app.domain.engine import evaluate
-from app.models import Batch, Execution, Item, Job
+from app.models import Batch, Execution, Item, Job, VariantGuard
 from app.services import erp_roster_pricing as roster
 from app.services.erp_capture_store import write_verified
 from app.services.execution import PricingService
@@ -44,13 +44,10 @@ def priced_roster(tmp_path, monkeypatch):
         def read_single(self, *args):
             if not self.readback_ready:
                 return LookupResult('unknown')
-            return super().lookup(*args)
+            return LookupResult('accepted', message='绑定的调价任务成功')
 
-    def history_unavailable(*args):
-        raise ValueError('测试中不访问调价历史')
-
-    monkeypatch.setattr('app.services.execution.capture_recent_price_changes', lambda *args, **kw: {'source_id': 'test'})
-    monkeypatch.setattr('app.services.execution.recent_price_log_for', history_unavailable)
+    monkeypatch.setattr('app.services.execution.capture_recent_price_changes',
+                        lambda *args, **kw: {'source_id': 'test', 'records': {}})
     engine, factory = create_database(f'sqlite:///{tmp_path / "live.db"}')
     Base.metadata.create_all(engine)
     day = datetime.now(timezone.utc).astimezone(BEIJING).date()
@@ -129,9 +126,37 @@ def test_roster_passes_verified_archive_to_existing_submit_and_recovers_readback
     PricingService(factory, adapter, service.config).reconcile()
     roster.run_roster_pricing(service, 'day-job', day, cleaned)
     with factory() as session:
-        assert session.scalars(select(Execution)).one().state == 'verified'
-        assert session.scalars(select(Item)).one().status == '已核验'
+        assert session.scalars(select(Execution)).one().state == 'uploaded'
+        assert session.scalars(select(Item)).one().status == '已提价'
     assert adapter.submits == 1
+
+
+@pytest.mark.parametrize('outcome, state, status', [('accepted', 'uploaded', '已提价'), ('rejected', 'failed', '待处理')])
+def test_roster_receipt_and_task_without_actual_price(priced_roster, monkeypatch, outcome, state, status):
+    factory, service, adapter, day, _, initial, archive = priced_roster
+    calls = []
+    monkeypatch.setattr(adapter, 'accept_single', lambda eid, decision: (calls.append(eid) or SubmitResult('accepted')))
+    scope = archive(initial)
+    roster.run_roster_pricing(service, 'first', day, scope)
+    service.reconcile()  # 未查到任务不覆盖原受理，不释放锁。
+    with factory() as session:
+        execution = session.scalars(select(Execution)).one()
+        assert execution.state == 'accepted' and session.get(Item, execution.item_id).status == '已提价'
+        assert session.get(VariantGuard, execution.variant_id).execution_id == execution.id
+    monkeypatch.setattr(adapter, 'read_single', lambda *a: LookupResult(outcome))
+    service.reconcile()
+    with factory() as session:
+        execution = session.scalars(select(Execution)).one()
+        assert execution.state == state and session.get(Item, execution.item_id).status == status
+        assert not {'actual_price', 'effective_at'}.intersection(execution.evidence)
+        guard = session.get(VariantGuard, execution.variant_id)
+        assert guard.execution_id is None and guard.last_effective_at is None
+    if outcome == 'accepted':
+        roster.run_roster_pricing(service, 'another-job', day, scope)
+        with factory() as session:
+            assert session.scalars(select(Execution)).one().state == 'uploaded'
+            assert session.scalar(select(Item).where(Item.status == '不调价')) is not None
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize('invalid', ['person'])
@@ -233,7 +258,7 @@ def test_enabled_roster_uses_single_upload_and_recovers_without_generic_contract
     after = service.config.model_copy(update={'erp_roster_submit_date': None})
     PricingService(factory, adapter, after).reconcile()
     with factory() as session:
-        assert session.scalars(select(Execution)).one().state == 'verified'
+        assert session.scalars(select(Execution)).one().state == 'uploaded'
     assert result['batch_id'] and adapter.submits == 1
 
 
@@ -288,11 +313,55 @@ def test_stock_resume_requeues_same_daily_job_once(priced_roster):
         assert (job.state, job.payload['resume_roster_workflow']) == ('queued', manifest)
 
 
+def test_roster_mixed_coverage_only_queries_previously_unchecked_child(priced_roster, monkeypatch):
+    from app.adapters.official_price_logs import recent_price_log_for
+    from app.services import erp_workflow
+
+    factory, service, adapter, day, _, _, archive = priced_roster
+    snapshot = DemoAdapter(service.config.runtime_dir).collect(day)
+    zero, unknown, changed, unchecked = snapshot.online[:4]
+    calls = []
+
+    def capture(settings, keys, **kwargs):
+        calls.append([k.item_id for k in keys])
+        return {'source_id': f'official-{len(calls)}', 'window_end': snapshot.as_of,
+                'window_start': snapshot.as_of - timedelta(hours=72),
+                'records': {k.item_id: {'status': 'ok', 'count': int(k in (changed.key, unchecked.key))}
+                            for k in keys if k != unknown.key}}
+
+    monkeypatch.setattr(erp_workflow, 'capture_recent_price_changes', capture)
+    monkeypatch.setattr('app.services.execution.capture_recent_price_changes', capture)
+    source, eligible, history_filter = erp_workflow.filter_candidate_history(service.config, [
+        {'key': row.key.model_dump(mode='json')} for row in (zero, unknown, changed)])
+    assert [r['key']['item_id'] for r in eligible] == [zero.key.item_id, unknown.key.item_id]
+    zero.recent_price_log = recent_price_log_for(source, zero.key)
+    unknown.history_known = False
+    snapshot.online = [zero, unknown, unchecked]
+    snapshot.lines = [row for row in snapshot.lines if row.key in (zero.key, unknown.key, unchecked.key)]
+    scope = dict(archive(snapshot), history_filter=history_filter)
+    result = roster.run_roster_pricing(service, 'mixed', day, scope)
+
+    assert calls == [[zero.key.item_id, unknown.key.item_id, changed.key.item_id], [unchecked.key.item_id]]
+    with factory() as session:
+        items = {row.key['item_id']: row for row in session.scalars(select(Item).where(Item.batch_id == result['batch_id']))}
+        assert items[unchecked.key.item_id].decision['reason_code'] == 'recent_price_change'
+        assert items[zero.key.item_id].decision['trace']['online_rows'][0]['recent_price_log']['source_id'] == 'official-1'
+        assert 'unknown_history' in items[unknown.key.item_id].decision['trace']['warning_codes']
+        assert changed.key.item_id not in items
+    assert adapter.submits == 2
+
+
 @pytest.mark.parametrize('zero_stock_resume', [False, True])
 def test_stock_resume_reuses_archived_erp_inputs_with_fresh_single_sku_preflight(priced_roster, monkeypatch, zero_stock_resume):
+    from app.domain.types import RecentPriceLog
+
     factory, service, adapter, day, _, initial, archive = priced_roster
     online = initial.online[0]
     online.observed_at = initial.as_of - timedelta(minutes=10)
+    online.recent_price_log = RecentPriceLog(count=0, source_id='erp-first', window_end=initial.as_of,
+                                             window_start=initial.as_of - timedelta(hours=72))
+    monkeypatch.setattr('app.services.execution.capture_recent_price_changes',
+                        lambda *a, **k: pytest.fail('首轮已查询，批次及逐条预检不再查询'))
     monkeypatch.setattr(roster, 'run_workflow', lambda *a, **k: pytest.fail('续跑不重新采集 ERP'))
     result = roster.run_roster_pricing(service, 'resume-job', day, archive(initial),
                                       zero_stock_targets={online.key.target_identity()} if zero_stock_resume else None)

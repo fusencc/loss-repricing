@@ -1,4 +1,5 @@
 """按明确订单号读取稳定店铺归属；不按商品提示列推测缺失订单的影响范围。"""
+from collections import defaultdict
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -7,7 +8,7 @@ from uuid import uuid4
 import httpx
 from app.adapters.base import SourceUnavailable
 from app.adapters.erp_bulk_capture import BLOCKED_LIST, _session
-from app.adapters.erp_web import ErpAccountRateLimited
+from app.adapters.erp_web import error_evidence
 from app.adapters.normalization import identity_text
 from app.services.erp_capture_store import write_verified
 
@@ -48,25 +49,37 @@ def capture_order_headers(settings, capture, *, client=None, web_session=None, b
                     write_verified(path,{'request':body,'total':total,'records':projected})
                     raw = path.read_bytes()
                     result['files'].append({'file':str(path.resolve()),'bytes':len(raw),'sha256':sha256(raw).hexdigest()})
-                    if (not isinstance(rows,list) or len(rows)!=len(projected) or type(total) is not int
-                            or total!=len(batch) or len(rows)!=len(batch)):
-                        raise ValueError('order_header_coverage_mismatch')
-                    ids = [identity_text(row['orderid']) for row in projected]
-                    if len(set(ids))!=len(ids) or set(ids)!=set(batch):
-                        raise ValueError('order_header_scope_mismatch')
+                    if not isinstance(rows, list):
+                        result['issues'].append({'code': 'order_header_response_invalid', 'order_ids': batch})
+                        continue
+                    requested_orders = set(batch)
+                    by_order = defaultdict(list)
                     for row in projected:
-                        identity_text(row['shopid']); identity_text(row['shopname'])
-                        if str(row['platform']).casefold()!='tiktok':
-                            raise ValueError('order_header_platform_mismatch')
-                    result['orders'].update({row['orderid']:{**row,'ref':f'{source_id}/{row["orderid"]}'} for row in projected})
+                        order = row['orderid']
+                        if isinstance(order, str) and order in requested_orders:
+                            by_order[order].append(row)
+                    verified = {}
+                    for order, matches in by_order.items():
+                        if len(matches) != 1:
+                            continue
+                        row = matches[0]
+                        try:
+                            identity_text(row['shopid']); identity_text(row['shopname'])
+                        except ValueError:
+                            continue
+                        if str(row['platform']).casefold() == 'tiktok':
+                            verified[order] = {**row, 'ref': f'{source_id}/{order}'}
+                    result['orders'].update(verified)
+                    if missing := requested_orders - verified.keys():
+                        result['issues'].append({'code': 'order_header_unverified', 'order_ids': sorted(missing)})
                 except (SourceUnavailable,httpx.HTTPError,ValueError,TypeError,KeyError) as error:
                     result['issues'].append({'code':'order_header_batch_unverified','order_ids':batch,
-                        'error_kind':type(error).__name__})
-                    if isinstance(error,ErpAccountRateLimited) or (isinstance(error,httpx.HTTPStatusError)
-                            and error.response.status_code in (401,403)):
+                        **error_evidence(error)})
+                    if isinstance(error,httpx.HTTPStatusError) and error.response.status_code in (401,403):
                         break
-    except (SourceUnavailable,httpx.HTTPError):
-        result['issues'].append({'code':'order_header_source_unavailable','order_ids':requested})
+    except (SourceUnavailable,httpx.HTTPError) as error:
+        result['issues'].append({'code':'order_header_source_unavailable','order_ids':requested, **error_evidence(error)})
+    result['rate_limit_observed'] = any(i.get('error_kind') == 'rate_limited' for i in result['issues'])
     result['acquisition_complete'] = set(result['orders'])==set(requested) and not result['issues']
     result['completed_at'] = datetime.now(timezone.utc).isoformat()
     write_verified(result['artifact_file'],result)

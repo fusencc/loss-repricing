@@ -3,7 +3,7 @@ import axios from 'axios'
 
 export const api = axios.create({ baseURL: '/api', withCredentials: true, timeout: 20000 })
 
-export const statuses = ['不调价', '待处理', '待核验', '已核验'] as const
+export const statuses = ['不调价', '待处理', '待核验', '已提价', '已核验'] as const
 export type ItemStatus = typeof statuses[number]
 export type Identifier = string | number
 
@@ -137,6 +137,7 @@ export function statusType(status: ItemStatus) {
     不调价: 'info',
     待处理: 'warning',
     待核验: 'primary',
+    已提价: 'success',
     已核验: 'success',
   }[status] as 'info' | 'warning' | 'primary' | 'success'
 }
@@ -151,7 +152,7 @@ export function stateLabel(state: string) {
     succeeded: '已完成', success: '已完成', failed: '失败', error: '失败',
     cancelled: '已取消', done: '已完成',
     proposed: '等待提交', blocked: '等待处理', excluded: '不调价',
-    submitting: '正在提交', accepted: '已受理，待核验', unknown: '结果未知，继续核验',
+    submitting: '正在提交', accepted: '上传已受理', uploaded: '上传完成', unknown: '结果未知，继续核验',
     verified: '已核验', mismatch: '实际售价超差',
   }[state.toLowerCase()] ?? state
 }

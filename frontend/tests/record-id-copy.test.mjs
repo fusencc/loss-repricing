@@ -28,12 +28,12 @@ function copyDocument(result = true) {
   return { document, events, written }
 }
 
-test('HTTP page copies raw SKU and long or leading-zero IDs without Clipboard API or prefixes', async () => {
+test('HTTP page copies visible shop values, raw SKU and long or leading-zero IDs without Clipboard API or prefixes', async () => {
   const { document, written } = copyDocument()
-  for (const [value, label] of [['YWAC442-RG', 'SKU'], ['1731919633741415702', '商品ID'], ['000123', '商品ID']]) {
+  for (const [value, label] of [['合成测试店铺', '店铺'], ['1912442718471573506', '店铺'], ['YWAC442-RG', 'SKU'], ['1731919633741415702', '商品ID'], ['000123', '商品ID']]) {
     assert.deepEqual(await copyRecordId(value, label, document), { type: 'success', message: `${label}已复制。`, duration: 2000 })
   }
-  assert.deepEqual(written, ['YWAC442-RG', '1731919633741415702', '000123'])
+  assert.deepEqual(written, ['合成测试店铺', '1912442718471573506', 'YWAC442-RG', '1731919633741415702', '000123'])
 })
 
 test('copy confirms the browser result, cleans temporary text and restores dialog focus and selection', async () => {

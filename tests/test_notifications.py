@@ -680,7 +680,7 @@ def test_result_template_historical_activity_is_pending_and_verified_is_increase
 
 def test_result_template_empty_manual_list_and_markdown_escape():
     from app.services.notifications import _card_text,_summary
-    done=SimpleNamespace(status='已核验',decision={},key={},reason='done',updated_at='2026-11-19T02:30:00+00:00')
+    done=SimpleNamespace(status='已提价',decision={},key={},reason='done',updated_at='2026-11-19T02:30:00+00:00')
     assert '待处理的明细：\n\n无' in _card_text(_summary([done]),[done])
     pending=SimpleNamespace(status='待处理',decision={},key={'sku':'[bad](https://wrong.test)','shop_id':'s','site':'PH'},reason='*reason*\nnext',updated_at=done.updated_at)
     text=_card_text(_summary([pending]),[pending])

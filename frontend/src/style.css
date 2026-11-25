@@ -109,7 +109,7 @@ button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px soli
 .hero-actions .el-button.is-disabled { opacity: .75; }
 .hero-badge { padding: 4px 8px; font-size: 12px; color: #ddf1ef; background: #e7ffff16; border-radius: 5px; }
 .hero-badge.warning { background: #e8a23e35; color: #ffe4ae; }
-.stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+.stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 14px; }
 .stat-card {
   background: #fff; color: #17313d; border: 1px solid #dfe7e8; border-radius: 12px; padding: 15px;
   text-align: left; display: grid; gap: 8px; cursor: pointer; min-width: 0;

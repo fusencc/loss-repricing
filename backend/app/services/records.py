@@ -6,12 +6,13 @@ from app.config import get_settings
 from app.services.erp_capture_store import load_capture
 
 logger = logging.getLogger(__name__)
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from app.models import Batch, Item, Execution, Ownership, UserAccount
 from app.services.coordination import ownership_scopes
+from app.services.decimal_display import format_decimal
 
 KEY_FIELDS = ('platform', 'shop_id', 'site', 'product_id', 'item_id', 'sku', 'warehouse')
 
@@ -90,8 +91,6 @@ STAGE_LABELS = (
     ('loss', '② 补亏损'),
     ('break_even', '③ 利润校验'),
 )
-DISPLAY_QUANT = Decimal('0.0001')
-PERCENT_QUANT = Decimal('0.01')
 
 
 def _decimal(value):
@@ -102,11 +101,6 @@ def _decimal(value):
         return Decimal(value)
     except InvalidOperation:
         return None
-
-
-def _display(value, quantum=DISPLAY_QUANT):
-    # 展示层固定小数位；业务判定仍使用保存的原始精确值。
-    return str(value.quantize(quantum, rounding=ROUND_HALF_UP))
 
 
 def price_stages(decision, trace, snapshot, item_key):
@@ -166,27 +160,26 @@ def price_stages(decision, trace, snapshot, item_key):
                           else (amount - previous) / previous * Decimal(100))
         row = {
             'key': key, 'label': label,
-            'price': None if amount is None else _display(amount),
-            'cny': None if cny is None else _display(cny),
-            'change_cny': None if change_cny is None else _display(change_cny),
-            'change_percent': None if change_percent is None else _display(change_percent, PERCENT_QUANT),
+            'price': format_decimal(amount),
+            'cny': format_decimal(cny),
+            'change_cny': format_decimal(change_cny),
+            'change_percent': format_decimal(change_percent),
             # ③ 行展示在线利润校正额折合人民币；缺证据为 null，显示层不推断为 0。
-            'profit_change_cny': None if key != 'break_even' or profit_change_cny is None
-                                 else _display(profit_change_cny),
+            'profit_change_cny': format_decimal(profit_change_cny) if key == 'break_even' else None,
         }
         if key == 'loss' and initial is not None:
             # ② 的价格是 BD 公式的首次试算输入。只展示该次判定保存的结果。
             initial_profit = _decimal(online_profit.get('initial_profit'))
             initial_margin = _decimal(online_profit.get('initial_margin'))
             if initial_profit is not None and initial_margin is not None:
-                row['trial_profit'] = _display(initial_profit)
-                row['trial_margin_percent'] = _display(initial_margin * 100, PERCENT_QUANT)
+                row['trial_profit'] = format_decimal(initial_profit)
+                row['trial_margin_percent'] = format_decimal(initial_margin * 100)
         rows.append(row)
         previous = amount
 
     return {
         'currency': currency,
-        'fx_rate': None if rate is None else str(rate),
+        'fx_rate': format_decimal(rate),
         'fx_date': display_text(snapshot.get('fx_date')),
         'rows': rows,
     }
@@ -217,6 +210,23 @@ def selected_order_first_margin(decision):
     return {'amount': rows[0]['loss_amount'], 'currency': rows[0]['currency']}
 
 
+def roster_outcome(item, execution):
+    """名单以本条上传受理为准；价格回读保留为证据，不作为再次上传的依据。"""
+    if execution is not None:
+        submit = (execution.response or {}).get('status')
+        if execution.state == 'failed' or submit == 'rejected' or (execution.evidence or {}).get('row_status') == 'rejected':
+            return '待处理', item.reason
+        if execution.state in {'submitting', 'unknown'}:
+            return '待核验', '上传结果待确认，请勿重复上传'
+        if execution.state in {'accepted', 'uploaded', 'verified'} or submit == 'accepted':
+            return '已提价', '提价上传完成'
+        if execution.state == 'mismatch':
+            return '待核验', '上传结果待确认，请勿重复上传'
+    elif (item.decision or {}).get('reason_code') == 'pending_submission':
+        return '待核验', '已有未完成的提交，请勿重复上传'
+    return item.status, item.reason
+
+
 def public_record(item, batch, execution, department, seller):
     # 已执行记录的算价依据属于提交时保存的不可变请求，不属于后来重评的当前候选。
     # 只有完整商品键一致才使用该执行档案；回读金额仍独立取 execution.evidence。
@@ -234,6 +244,10 @@ def public_record(item, batch, execution, department, seller):
     first_margin = selected_order_first_margin(decision)
     evidence = execution.evidence or {} if execution else {}
     archive = evidence.get('price_record') or {}
+    shop_name = display_text(archive.get('shop_name'))
+    if not shop_name and decision is request:
+        authorization = (trace.get('erp_roster_upload') or {}).get('authorization') or {}
+        shop_name = display_text(authorization.get('shop_name'))
     # 用户要求记录页不展示四价存档（税前价、平台回读含税价、营销价观察等）；
     # 这些证据仍完整保存在 Execution.evidence.price_record，只从页面投影移除，不删原始证据。
     # 价格变动 = 目标实际价 - 调整前实际价，与 decision 两价同币种（站点币）；
@@ -246,13 +260,14 @@ def public_record(item, batch, execution, department, seller):
         except InvalidOperation:
             price_change = None
     reconciliation = (batch.snapshot or {}).get('erp_reconciliation') or {}
+    status, reason = roster_outcome(item, execution) if roster_record_source(batch) else (item.status, item.reason)
     return {
         'id': item.id, 'batch_id': item.batch_id,
         'key': {field: item.key.get(field, '') for field in KEY_FIELDS},
-        'seller': seller, 'department': department, 'shop_name': display_text(archive.get('shop_name')),
+        'seller': seller, 'department': department, 'shop_name': shop_name,
         'first_margin': first_margin,
         # 仅投影本条持久阶段与结果类型；原因仍用本条商品记录，不读取其他尝试或推断查询异常。
-        'status': item.status, 'phase': item.phase, 'reason': item.reason, 'updated_at': item.updated_at,
+        'status': status, 'phase': item.phase, 'reason': reason, 'updated_at': item.updated_at,
         'display_time': record_display_time(item, evidence),
         'decision': {field: display_text(decision.get(field))
                      for field in ('current_actual', 'target_actual', 'upload_price')} | {
@@ -291,9 +306,11 @@ def combine_pricing_process(items):
     hidden = set()
     for group in groups.values():
         successes = [i for i in group if i.get('execution') and (
-            i['execution']['state'] in {'accepted', 'verified'}
-            or (i['execution']['state'] not in {'failed', 'mismatch', 'unknown', 'submitting'}
-                and i['execution'].get('submit_status') == 'accepted'))]
+            i['execution']['state'] not in {'failed', 'unknown', 'submitting'}
+            and i['execution'].get('row_status') != 'rejected'
+            and i['execution'].get('submit_status') != 'rejected'
+            and (i.get('status') == '已提价' or i['execution']['state'] in {'accepted', 'uploaded', 'verified'}
+                 or (i['execution']['state'] != 'mismatch' and i['execution'].get('submit_status') == 'accepted')))]
         if len(successes) != 1:
             continue
         final = successes[0]
