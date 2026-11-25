@@ -95,6 +95,10 @@ class RosterPriceTransport:
                 or tuple(variant.get(field) for field in ('shopName', 'shopId', 'productId', 'sellerSku')) !=
                     (shop_name, key.shop_id, key.product_id, key.sku)
                 or sku['seller_sku'] != key.sku
+                or parent.get('productStatus') != 4
+                or data.get('product_status') != 'ACTIVATE' or data.get('status') != 'ACTIVATE'
+                or data.get('is_not_for_sale') is not False
+                or sku.get('status_info', {}).get('status') != 'NORMAL'
                 or variant['currency'] != online.currency or sku['price']['currency'] != online.currency
                 or (online.profit_check.overseas_stock == 0 and stock != 0)
                 or current_fulfillment != online.profit_check.mode

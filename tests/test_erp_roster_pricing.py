@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -65,7 +65,8 @@ def priced_roster(tmp_path, monkeypatch):
         def prepare(self, execution_id, batch_id, business_date, shop_name, decision):
             assert business_date == day and shop_name == 'ERP测试店'
             return {'scope': decision.trace['source_versions']['erp_roster_salesperson'],
-                    'business_date': business_date.isoformat()}
+                    'business_date': business_date.isoformat(),
+                    'observed_at': datetime.now(timezone.utc).isoformat()}
 
         def submit(self, execution_id, decision):
             return adapter.accept_single(execution_id, decision)
@@ -286,3 +287,16 @@ def test_stock_resume_requeues_same_daily_job_once(priced_roster):
     with factory() as session:
         job = session.scalars(select(Job)).one()
         assert (job.state, job.payload['resume_roster_workflow']) == ('queued', manifest)
+
+
+def test_stock_resume_reuses_archived_erp_inputs_with_fresh_single_sku_preflight(priced_roster, monkeypatch):
+    factory, service, adapter, day, _, initial, archive = priced_roster
+    online = initial.online[0]
+    online.observed_at = initial.as_of - timedelta(minutes=10)
+    monkeypatch.setattr(roster, 'run_workflow', lambda *a, **k: pytest.fail('续跑不重新采集 ERP'))
+    result = roster.run_roster_pricing(service, 'resume-job', day, archive(initial),
+                                      zero_stock_targets={online.key.target_identity()})
+    assert result['state'] == 'evaluated'
+    with factory() as session:
+        assert session.scalars(select(Execution)).one().state == 'unknown'
+    assert adapter.submits == 1

@@ -41,7 +41,7 @@ def test_single_roster_upload_and_readback_use_proven_endpoints(tmp_path, monkey
             'records': [{
                 'observed_at': datetime.now(timezone.utc).isoformat(), 'company_activity_locked': bool(discount),
                 'company_parent': {'shopName': shop, 'shopId': key.shop_id, 'productId': key.product_id,
-                                   'localMainSku': online.main_sku, 'taxVatRate': '0'},
+                                   'localMainSku': online.main_sku, 'taxVatRate': '0', 'productStatus': 4},
                 'current_variants': [{
                     'shopName': shop, 'shopId': key.shop_id, 'productId': key.product_id,
                     'sellerSkuId': key.item_id, 'sellerSku': key.sku, 'currency': online.currency,
@@ -49,8 +49,9 @@ def test_single_roster_upload_and_readback_use_proven_endpoints(tmp_path, monkey
                     'priceIncludeVat': str(retail), 'marketPrice': str(actual) if discount else None,
                     'discount': str(discount) if discount else None, 'logisticsCost': '0', 'promotionId': 'promotion',
                 }],
-                'data': {'id': key.product_id, 'skus': [{
-                    'id': key.item_id, 'seller_sku': key.sku,
+                'data': {'id': key.product_id, 'product_status': 'ACTIVATE', 'status': 'ACTIVATE',
+                         'is_not_for_sale': False, 'skus': [{
+                    'id': key.item_id, 'seller_sku': key.sku, 'status_info': {'status': 'NORMAL'},
                     'price': {'currency': online.currency, 'sale_price': str(retail),
                               'tax_exclusive_price': str(retail)},
                 }]},

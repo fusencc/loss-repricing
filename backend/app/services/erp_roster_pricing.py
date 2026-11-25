@@ -51,6 +51,7 @@ class RosterBatch:
     salesperson: str
     collect: Callable[[date], tuple[Snapshot, dict[str, ApprovedRosterPrice]]]
     prices: dict[str, ApprovedRosterPrice]
+    reuse_archived_inputs: bool = False
 
 
 def _snapshot(runtime_dir, day, scope):
@@ -145,7 +146,14 @@ def run_roster_pricing(service, run_key, day, scope, *, zero_stock_targets=None)
 
     # 当前销售员的真实来源、网页归属和稳定商品锁随执行再次核对。
     scoped_run_key = f'erp-roster:{run_key}:{name}'
-    batch = RosterBatch(day, name, _scoped_collect(config, name, (snapshot, prices)), allowed)
+    reuse_archive = zero_stock_targets is not None
+    if reuse_archive:
+        def collect(_day):
+            # 原 ERP 输入已归档。实际提交时每个在线 SKU 仍须通过独立的实时预检。
+            return snapshot, allowed
+    else:
+        collect = _scoped_collect(config, name, (snapshot, prices))
+    batch = RosterBatch(day, name, collect, allowed, reuse_archived_inputs=reuse_archive)
     try:
         batch_id = service.run_batch(scoped_run_key, roster=batch)
     except SourceUnavailable as exc:

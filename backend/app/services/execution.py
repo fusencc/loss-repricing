@@ -302,7 +302,7 @@ class PricingService:
                     or fresh_approved.get(decision.key.identity()) != price):
                 self._hold(item_id, "提交前重算结果已变化，原批次价格或商品归属待重新核对")
                 continue
-            if self.adapter.mode == "live":
+            if self.adapter.mode == "live" and not (roster is not None and roster.reuse_archived_inputs):
                 online = next((o for o in refreshed.online if o.key.identity() == decision.key.identity()), None)
                 if online is None or (utcnow() - online.observed_at).total_seconds() > 300:
                     self._hold(item_id, "当前在线价格快照超过5分钟，等待新的有效价数据")
@@ -498,9 +498,12 @@ class PricingService:
             now = utcnow()
             crossed_day = business_date is not None and now.astimezone(BEIJING).date() != business_date
             if allowed and not crossed_day and self.adapter.mode == "live":
-                # 使用本次判定的在线观测时间，避免等待授权后仍发送过期拟价。
-                online_rows = decision.trace["online_rows"]
-                observed_at = parse_stamp(online_rows[0].get("observed_at"))
+                # 归档续跑的实时价格证据由单品预检独立提供，归档本身不冒充现态。
+                if roster is not None and roster.reuse_archived_inputs:
+                    observation = decision.trace[ROSTER_UPLOAD_TRACE]
+                else:
+                    observation = decision.trace["online_rows"][0]
+                observed_at = parse_stamp(observation.get("observed_at"))
                 if observed_at is None or not timedelta(0) <= now - observed_at <= timedelta(minutes=5):
                     allowed, reason = False, "当前在线价格快照无效或超过5分钟，等待新的有效价数据"
             if crossed_day or not allowed:
