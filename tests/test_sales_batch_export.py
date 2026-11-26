@@ -81,6 +81,7 @@ def test_partial_export_keeps_variants_and_reports_only_missing_shop_product_pai
     book = Workbook()
     sheet = book.active
     sheet.append(sales.COLUMNS)
+    sheet.append(['集团二部' if col == '集团' else None for col in sales.COLUMNS])
     for sku in ('A', 'B'):
         row = {'集团': '集团二部', '店铺名称': 'SHOPPH', '站点': 'PH', '产品ID': found,
                '本地主sku': 'MAIN', '本地子sku': sku, '平台子sku': sku, '商品ID': 'I' + sku}

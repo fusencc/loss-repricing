@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from email import policy
 from email.parser import BytesParser
@@ -296,13 +296,69 @@ def test_candidate_field_failure_holds_only_locatable_targets(contract, make_ada
 
 
 @pytest.mark.parametrize("missing", ["order", "product"])
-def test_cannot_isolate_a_row_without_its_verified_scope(contract, make_adapter, missing):
+def test_bad_candidate_does_not_stop_independent_target(contract, make_adapter, missing, caplog):
+    from app.domain.engine import evaluate
+
     row = {**ROW, "loss": None}
     del row[missing]
-    handler = with_source_rows(loss_allocatable=[row])
+    good_key = {**PRODUCT, "item": "009", "sku": "OK"}
+    handler = with_source_rows(
+        loss_allocatable=[row, {**ROW, "order": "0008", "product": good_key, "loss": "-3.00"}],
+        online=[ONLINE, {**ONLINE, "product": good_key}],
+    )
+    snapshot = make_adapter(contract, handler).collect(DAY)
+    results = {d.key.item_id: d for d in evaluate(with_official_history(snapshot), datetime.fromisoformat(OBSERVED))}
 
-    with pytest.raises(SourceUnavailable, match="身份"):
-        make_adapter(contract, handler).collect(DAY)
+    assert results["009"].ready
+    if missing == "order":
+        assert results["003"].reason_code == "source_record_invalid"
+        assert not snapshot.unlocated_candidate_rows
+    else:
+        assert "003" not in results and snapshot.unlocated_candidate_rows
+        assert "第 1 条记录身份无法核实" in caplog.text
+
+
+def test_presubmit_refresh_with_unlocated_row_still_processes_independent_target(contract, make_adapter, tmp_path, monkeypatch):
+    from sqlalchemy import select
+
+    from app.db import Base, create_database
+    from app.models import Item
+    from app.services.execution import PricingService
+    from app.services.store import update_settings
+    from test_user_pricing_policy import mock_official_zero
+
+    good = {**PRODUCT, "item": "009", "sku": "OK"}
+    losing = {**ROW, "product": good, "order": "0009", "loss": "-3.00"}
+    first = with_source_rows(loss_allocatable=[ROW, losing], online=[ONLINE, {**ONLINE, "product": good}])
+    refresh = with_source_rows(loss_allocatable=[{**ROW, "product": None}, losing],
+                               online=[ONLINE, {**ONLINE, "product": good}])
+    collections = 0
+
+    def respond(request):
+        nonlocal collections
+        if request.url.path == "/candidates/loss_allocatable":
+            collections += 1
+        return (first if collections == 1 else refresh)(request)
+
+    now = datetime.fromisoformat(OBSERVED)
+    monkeypatch.setattr("app.services.execution.utcnow", lambda: now)
+    mock_official_zero(monkeypatch, [now])
+    adapter = make_adapter(contract, respond)
+    settings = Settings(_env_file=None, runtime_dir=tmp_path, coordination_required=False, live_submit_enabled=True)
+    engine, factory = create_database(f"sqlite:///{tmp_path / 'partial-refresh.db'}")
+    try:
+        Base.metadata.create_all(engine)
+        update_settings(factory, {"autonomous_enabled": True, "pilot_shops": ["001"], "site_enabled": ["MY"]})
+        service = PricingService(factory, adapter, settings)
+        reached_submit = []
+        monkeypatch.setattr(service, "_submit", lambda _, decision, day: reached_submit.append(decision.key.item_id))
+        batch_id = service.run_batch("partial-refresh")
+        assert collections == 2 and reached_submit == ["009"]
+        with factory() as session:
+            items = {item.key['item_id']: item for item in session.scalars(select(Item).where(Item.batch_id == batch_id))}
+            assert items["003"].phase == "blocked" and items["003"].status == "待处理"
+    finally:
+        engine.dispose()
 
 
 def test_invalid_candidate_still_counts_as_a_separate_order_line(contract, make_adapter):
@@ -490,7 +546,7 @@ def test_well_formed_sales_conflict_cannot_price_affected_main_skus(contract, ma
 
 
 
-def test_missing_online_warehouse_cannot_prove_paginated_group_identity(contract, make_adapter):
+def test_missing_online_warehouse_only_holds_its_target(contract, make_adapter):
     contract["collections"]["online"] = {
         **contract["collections"]["online"],
         "pagination": {
@@ -507,8 +563,13 @@ def test_missing_online_warehouse_cannot_prove_paginated_group_identity(contract
             "rows": [{**ONLINE, "product": product}],
         }})
 
-    with pytest.raises(SourceUnavailable, match="分页.*仓配"):
-        make_adapter(contract, respond).collect(DAY)
+    snapshot = make_adapter(contract, respond).collect(DAY)
+    from app.domain.engine import evaluate
+
+    assert snapshot.online == []
+    assert snapshot.source_issues[0].key.warehouse is None
+    [result] = evaluate(snapshot, datetime.fromisoformat(OBSERVED))
+    assert result.reason_code == "source_record_invalid"
 
 
 def test_missing_candidate_warehouse_retains_scope_without_guessing(contract, make_adapter):
@@ -573,20 +634,20 @@ def test_paginated_detail_ids_are_scoped_to_orders(contract, make_adapter, secon
         if not request.url.path.endswith("/loss_allocatable"):
             return collection_response(request)
         page = json.loads(request.content)["page"]
-        row = ROW if page == 1 else {**ROW, "order": second_order, "loss": "-0.6"}
+        row = ROW if page == 1 or second_order == ROW["order"] else {**ROW, "order": second_order, "loss": "-0.6"}
         return httpx.Response(200, json={"payload": {
             "timestamp": OBSERVED, "date": DAY.isoformat(), "total": 2, "rows": [row],
         }})
 
-    adapter = make_adapter(contract, handler)
-    if second_order == ROW["order"]:
-        with pytest.raises(SourceUnavailable, match="分页"):
-            adapter.collect(DAY)
-        return
-    snapshot = adapter.collect(DAY)
+    snapshot = make_adapter(contract, handler).collect(DAY)
     result = evaluate(with_official_history(snapshot), datetime.fromisoformat(OBSERVED))[0]
-    assert result.unit_loss == Decimal("0.2")
-    assert json.loads(result.selected_row_id) == [second_order, ROW["detail"]]
+    assert result.ready
+    if second_order == ROW["order"]:
+        assert len(snapshot.lines) == 1
+    else:
+        assert len(snapshot.lines) == 2
+        assert result.unit_loss == Decimal("0.2")
+        assert json.loads(result.selected_row_id) == [second_order, ROW["detail"]]
 
 
 def test_paginated_source_cannot_count_one_detail_twice_under_different_products(contract, make_adapter):
@@ -603,8 +664,63 @@ def test_paginated_source_cannot_count_one_detail_twice_under_different_products
             "timestamp": OBSERVED, "date": DAY.isoformat(), "total": 2, "rows": [row],
         }})
 
-    with pytest.raises(SourceUnavailable, match="分页"):
-        make_adapter(contract, handler).collect(DAY)
+    from app.domain.engine import evaluate
+
+    snapshot = make_adapter(contract, handler).collect(DAY)
+    results = evaluate(snapshot, datetime.fromisoformat(OBSERVED))
+    assert len(results) == 2
+    assert {result.reason_code for result in results} == {"conflicting_detail_mapping"}
+
+
+@pytest.mark.parametrize("price_changed", [False, True])
+def test_paginated_online_repeats_only_hold_the_conflicting_target(contract, make_adapter, price_changed):
+    from app.domain.engine import evaluate
+
+    contract["collections"]["online"]["pagination"] = {
+        "page_key": "page", "limit_key": "limit", "limit": 2, "total_path": "payload.total", "max_pages": 2,
+    }
+    good = {**PRODUCT, "item": "009", "sku": "OK"}
+    candidates = with_source_rows(loss_allocatable=[ROW, {**ROW, "order": "0009", "product": good}])
+
+    def respond(request):
+        if request.url.path != "/online":
+            return candidates(request)
+        page = request.url.params["page"]
+        rows = ([ONLINE, {**ONLINE, "product": good}] if page == "1" else
+                [{**ONLINE, "r": "23"} if price_changed else ONLINE])
+        return httpx.Response(200, json={"payload": {
+            "timestamp": OBSERVED, "date": DAY.isoformat(), "total": 3, "rows": rows,
+        }})
+
+    snapshot = make_adapter(contract, respond).collect(DAY)
+    results = {d.key.item_id: d for d in evaluate(with_official_history(snapshot), datetime.fromisoformat(OBSERVED))}
+    assert results["009"].ready
+    if price_changed:
+        assert {state.key.item_id for state in snapshot.online} == {"009"}
+        assert results["003"].reason_code == "source_record_invalid"
+    else:
+        assert len(snapshot.online) == 2 and not snapshot.source_issues
+        assert results["003"].ready
+
+
+def test_pagination_keeps_valid_rows_when_total_and_observation_time_change(contract, make_adapter):
+    contract['collections']['loss_allocatable']['pagination'] = {
+        'page_key': 'page', 'limit': 1, 'total_path': 'payload.total', 'max_pages': 2,
+    }
+
+    def handler(request):
+        if not request.url.path.endswith('/loss_allocatable'):
+            return collection_response(request)
+        page = json.loads(request.content)['page']
+        row = ROW if page == 1 else {**ROW, 'order': '0009'}
+        timestamp = datetime.fromisoformat(OBSERVED) + timedelta(seconds=page - 1)
+        return httpx.Response(200, json={'payload': {
+            'timestamp': timestamp.isoformat(), 'date': DAY.isoformat(), 'total': 4 - page, 'rows': [row],
+        }})
+
+    snapshot = make_adapter(contract, handler).collect(DAY)
+    assert {row.order_id for row in snapshot.lines} == {ROW['order'], '0009'}
+    assert snapshot.as_of == datetime.fromisoformat(OBSERVED)
 
 
 def test_pagination_cannot_silently_truncate(contract, make_adapter):

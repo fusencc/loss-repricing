@@ -118,7 +118,8 @@ def _workbook(content, fields, excluded_rows=None):
         raise SourceUnavailable('ERP下载文件损坏或XLSX结构无效') from None
 
 
-def _scope(records, bloc, *, expected_status=None, department=None, salesperson=None, excluded_rows=None):
+def _scope(records, bloc, *, expected_status=None, department=None, salesperson=None, order_owners=None,
+           excluded_rows=None):
     valid = []
     for row in records:
         checks = (
@@ -127,7 +128,8 @@ def _scope(records, bloc, *, expected_status=None, department=None, salesperson=
             ('bloc_mismatch', row.get('集团') != bloc),
             ('department_mismatch', department is not None and (not isinstance(row.get('部门'), str)
                                       or row['部门'].casefold() != department.casefold())),
-            ('salesperson_mismatch', salesperson is not None and row.get('销售员') != salesperson),
+            ('salesperson_mismatch', (salesperson is not None and row.get('销售员') != salesperson)
+             or (order_owners is not None and row.get('销售员') != order_owners[row['订单编号']])),
         )
         reason = next((name for name, invalid in checks if invalid), None)
         if reason:
@@ -136,7 +138,7 @@ def _scope(records, bloc, *, expected_status=None, department=None, salesperson=
                                       'reason': 'ERP导出行范围与筛选不一致'})
         else:
             valid.append(row)
-    if records and not valid:
+    if records and not valid and order_owners is None:
         raise SourceUnavailable('ERP导出全部有效订单的范围与筛选不一致')
     records[:] = valid
 
@@ -239,7 +241,10 @@ def _session(settings, client=None):
 def _save_xlsx(folder, name, content):
     path = folder / name
     path.write_bytes(content)
-    return {'file': str(path), 'bytes': len(content), 'sha256': sha256(content).hexdigest()}
+    restored = path.read_bytes()
+    if restored != content:
+        raise OSError('ERP原始下载文件回读不一致')
+    return {'file': str(path), 'bytes': len(content), 'sha256': sha256(restored).hexdigest()}
 
 
 def _all_export_rows(path):
@@ -300,7 +305,13 @@ def write_comparison_workbook(folder, financial_paths, loss_path, *, filename='�
     return result
 
 
-def _blocked_ids(post, group, *, salesperson=None, evidence_dir=None):
+def _record_roster_owner(group, order, name):
+    owners = group['order_owners']
+    if owners.setdefault(order, name) != name:
+        owners[order] = None
+
+
+def _blocked_ids(post, group, *, salesperson=None, roster_salespeople=None, evidence_dir=None):
     """按实际返回订单采集；动态总数及短页不报异常，身份与范围仍逐页核对。"""
     if salesperson is not None:
         seller_id = group['filters'].get('shopUsernameid')
@@ -325,6 +336,9 @@ def _blocked_ids(post, group, *, salesperson=None, evidence_dir=None):
             duplicate_rows = 0
             invalid_rows = []
             for row_number, row in enumerate(records, start=1):
+                owner = row.get('shopUsername') if isinstance(row, dict) else None
+                if roster_salespeople is not None and (not isinstance(owner, str) or owner not in roster_salespeople):
+                    continue
                 order = row.get('orderid') if isinstance(row, dict) else None
                 checks = (
                     ('invalid_order_id', not isinstance(order, str) or not order.strip(), '订单编号无效'),
@@ -348,6 +362,8 @@ def _blocked_ids(post, group, *, salesperson=None, evidence_dir=None):
                         issue['order_id'] = order
                     invalid_rows.append(issue)
                     continue
+                if roster_salespeople is not None:
+                    _record_roster_owner(group, order, owner)
                 # 实时名单插入/移出会使页边界移动。先核对身份与范围，再对已观察的
                 # 有效订单去重；不能把重复观察当成名单失败，也不能跳过归属检查。
                 if order in seen or order in verified:
@@ -405,8 +421,27 @@ def _finance_batches(group, ids, batch_size):
     return batches
 
 
+def _prune_roster_conflicts(groups):
+    owners, conflicts = {}, set()
+    for group in groups:
+        for order, name in group['order_owners'].items():
+            if name is None or owners.setdefault(order, name) != name:
+                conflicts.add(order)
+    for group in groups:
+        group['excluded_rows'] = group.get('excluded_rows', []) + [
+            {'order_id': order, 'validation_reason': 'salesperson_conflict',
+             'reason': '同一订单观察到多个销售员'} for order in group['candidate_order_ids'] if order in conflicts]
+        group['candidate_order_ids'] = [order for order in group['candidate_order_ids'] if order not in conflicts]
+        for order in conflicts:
+            group['order_owners'].pop(order, None)
+            group.get('blocked_shops', {}).pop(order, None)
+        group['loss_rows'] = [row for row in group['loss_rows'] if row['订单编号'] not in conflicts]
+        group['total'] = len(group['candidate_order_ids'])
+
+
 def capture_erp_bulk(settings, *, source=None, client=None, web_session=None, max_polls=EXPORT_POLL_LIMIT, export_batch_size=1000,
-                     max_orders=None, progress=None, salesperson=None, department=None, event_callback=None):
+                     max_orders=None, progress=None, salesperson=None, department=None, event_callback=None,
+                     roster_salespeople=None):
     """默认核对四类候选。显式试抓按每组限额，保留完整候选名单。"""
     if client is not None and web_session is not None:
         raise ValueError('ERP客户端与网页会话不能同时指定')
@@ -426,6 +461,8 @@ def capture_erp_bulk(settings, *, source=None, client=None, web_session=None, ma
     if salesperson is not None and (not isinstance(salesperson, str) or not salesperson.strip()):
         raise ValueError('销售员姓名不能为空')
     salesperson = salesperson.strip() if salesperson is not None else None
+    if roster_salespeople is not None:
+        roster_salespeople = frozenset(roster_salespeople)
     emit = progress or (lambda message: None)
     # 与桌面独立构建共享核心：日志只经注入回调传递静态阶段和计数，
     # 不把销售员、订单、任务名、下载地址或进度文案作为日志字段。
@@ -481,6 +518,9 @@ def capture_erp_bulk(settings, *, source=None, client=None, web_session=None, ma
               'finance_calculation':{'status':'not_recomputed','reason':'本轮保存ERP导出费用及毛利；文件不包含全部前端公式输入，不逐单补查或补零'}}
     if department is not None:
         result['department'] = department
+    if roster_salespeople is not None:
+        for group in groups:
+            group['order_owners'] = {}
 
     def collect_candidates(post, group):
         name = group['source']
@@ -488,15 +528,24 @@ def capture_erp_bulk(settings, *, source=None, client=None, web_session=None, ma
         log_event('erp.stage', stage='pool')
         if group['kind'] == 'loss':
             raw = post(LOSS_EXPORT, group['filters'], binary=True)
-            group['files'].append(_save_xlsx(folder, f'{name}-loss-orders.xlsx', raw))
+            if roster_salespeople is None:
+                group['files'].append(_save_xlsx(folder, f'{name}-loss-orders.xlsx', raw))
             excluded = group.setdefault('loss_excluded_rows', [])
-            losses, count = _workbook(raw, LOSS_FIELDS, excluded)
+            losses, count = _workbook(raw, LOSS_FIELDS, excluded if roster_salespeople is None else None)
+            if roster_salespeople is not None:
+                # 部门原表可能含非名单订单；只保留名单内的行，不落盘原表。
+                losses = [row for row in losses if isinstance(row.get('销售员'), str)
+                          and row['销售员'] in roster_salespeople]
             _scope(losses, settings.erp_capture_bloc, expected_status=STATUS_LABELS[group['status']],
                    department=department, salesperson=salesperson, excluded_rows=excluded)
+            if roster_salespeople is not None:
+                for row in losses:
+                    _record_roster_owner(group, row['订单编号'], row['销售员'])
             group.update(loss_rows=losses, total=len(losses), loss_column_count=count)
             ids = list(dict.fromkeys(r['订单编号'] for r in losses))
         else:
-            ids = _blocked_ids(post, group, salesperson=salesperson, evidence_dir=folder)
+            ids = _blocked_ids(post, group, salesperson=salesperson, roster_salespeople=roster_salespeople,
+                               evidence_dir=folder)
         group.update(candidate_order_ids=ids, list_complete=True)
 
     def download_finance(post, download, group, batch):
@@ -520,9 +569,9 @@ def capture_erp_bulk(settings, *, source=None, client=None, web_session=None, ma
             log_event('erp.stage', stage='poll', count=attempt + 1, total=max_polls)
             data = post(TASKS, {'pageNum':1,'pageSize':100,'source':'orderList'})
             tasks = data.get('records') if isinstance(data, dict) else data
-            if not isinstance(tasks, list) or any(not isinstance(task, dict) for task in tasks):
+            if not isinstance(tasks, list):
                 raise SourceUnavailable('ERP下载任务列表格式无效')
-            tasks = [t for t in tasks if t.get('source') == 'orderList' and t.get('fileName') == batch['task_name']]
+            tasks = [t for t in tasks if isinstance(t, dict) and t.get('source') == 'orderList' and t.get('fileName') == batch['task_name']]
             if len(tasks) > 1:
                 raise SourceUnavailable('ERP下载任务名存在多条匹配')
             task = tasks[0] if tasks else None
@@ -543,13 +592,13 @@ def capture_erp_bulk(settings, *, source=None, client=None, web_session=None, ma
                     group['files'].append(_save_xlsx(folder, f"{name}-order-finance-{batch['number']:03d}.xlsx", raw))
                     excluded = batch.setdefault('excluded_rows', [])
                     orders, count = _workbook(raw, BUSINESS_FIELDS, excluded)
-                    # 未请求订单属于批次身份冲突，即使该行同时范围不符也不能被筛选掩盖。
-                    raw_scope = finance_batch_scope(batch['order_ids'], [row['订单编号'] for row in orders])
-                    if raw_scope['unexpected']:
-                        batch['scope_check'] = raw_scope
-                        raise SourceUnavailable('ERP批量订单导出包含未请求的订单号')
+                    requested = set(batch['order_ids'])
+                    unexpected = [row for row in orders if row['订单编号'] not in requested]
+                    excluded.extend({'order_id':row['订单编号'], 'validation_reason':'unrequested_order',
+                                     'reason':'财务订单号不在本批请求范围'} for row in unexpected)
+                    orders = [row for row in orders if row['订单编号'] in requested]
                     _scope(orders, settings.erp_capture_bloc, department=department, salesperson=salesperson,
-                           excluded_rows=excluded)
+                           order_owners=group.get('order_owners'), excluded_rows=excluded)
                     scope = finance_batch_scope(batch['order_ids'], [row['订单编号'] for row in orders])
                     batch['scope_check'] = scope
                     missing = scope['missing']
@@ -566,7 +615,7 @@ def capture_erp_bulk(settings, *, source=None, client=None, web_session=None, ma
                         'source_status':group['status'],'current_status_matches_source':r.get('订单状态') == STATUS_LABELS[group['status']],
                         'fields':r} for r in orders)
                     group['order_column_count'] = count
-                    batch['status'] = 'partial' if missing or duplicates else 'complete'
+                    batch['status'] = 'partial' if missing or duplicates or excluded else 'complete'
                     if duplicates:
                         batch.update(error='ERP订单财务导出包含同订单重复行',
                                      error_kind='duplicate_finance_rows')
@@ -596,11 +645,14 @@ def capture_erp_bulk(settings, *, source=None, client=None, web_session=None, ma
             group.update(stage='complete_with_missing',
                          error=f'完整订单批量导出未返回{len(missing)}笔候选订单，已保留缺失清单',
                          error_kind='not_returned_by_bulk_export')
+        elif any(batch.get('excluded_rows') for batch in group['batches']):
+            group.update(stage='complete_with_exclusions', error='财务导出已排除范围外或身份无效的行',
+                         error_kind='excluded_finance_rows')
         else:
             group['stage'] = 'complete'
         finance_paths = [Path(item['file']) for item in group['files']
                          if '-order-finance-' in Path(item['file']).name]
-        if finance_paths and group['kind'] == 'loss':
+        if finance_paths and group['kind'] == 'loss' and roster_salespeople is None:
             group['comparison_file'] = write_comparison_workbook(
                 folder, finance_paths, folder / f'{name}-loss-orders.xlsx',
                 filename=f'{name}-订单核对表.xlsx')
@@ -654,7 +706,7 @@ def capture_erp_bulk(settings, *, source=None, client=None, web_session=None, ma
                 if group.get('list_error'):
                     group['stage'] = 'candidate_list_incomplete'
 
-            if department is None:
+            if department is None and roster_salespeople is None:
                 for group in groups:
                     read_list(group)
                     read_finance(group)
@@ -663,6 +715,8 @@ def capture_erp_bulk(settings, *, source=None, client=None, web_session=None, ma
             else:
                 for group in groups:
                     read_list(group)
+                if roster_salespeople is not None:
+                    _prune_roster_conflicts(groups)
                 for group in groups:
                     read_finance(group)
     except (SourceUnavailable, httpx.HTTPError, ValueError, TypeError, KeyError, OSError) as error:
@@ -698,5 +752,5 @@ def capture_erp_bulk(settings, *, source=None, client=None, web_session=None, ma
     result['result_file'] = str(folder / 'result.json')
     log_event('erp.stage', stage='save', count=len(rows), complete=result['capture_complete'],
               limited=result['rate_limit_observed'], duration_ms=round((monotonic()-started)*1000))
-    emit('采集结果和原始Excel已保存。')
+    emit('采集结果和原始Excel已保存并回读。')
     return result

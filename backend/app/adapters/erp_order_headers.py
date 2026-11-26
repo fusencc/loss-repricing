@@ -14,12 +14,23 @@ from app.services.erp_capture_store import write_verified
 FIELDS = ('orderid','shopid','shopname','platform','status','orderNum','sellNum')
 
 
+def candidate_order_request(capture):
+    requested, issues = set(), []
+    for group in capture['groups']:
+        for number, value in enumerate(group['candidate_order_ids'], 1):
+            try:
+                requested.add(identity_text(value))
+            except ValueError:
+                issues.append({'code':'invalid_candidate_order_id', 'source':group.get('source'), 'row_number':number})
+    return sorted(requested), issues
+
+
 def capture_order_headers(settings, capture, *, client=None, web_session=None, batch_size=1000, progress=None):
     if type(batch_size) is not int or not 1 <= batch_size <= 1000:
         raise ValueError('订单归属每批须为1至1000')
     if client is not None and web_session is not None:
         raise ValueError('共享会话不能与独立客户端混用')
-    requested = sorted({identity_text(order) for group in capture['groups'] for order in group['candidate_order_ids']})
+    requested, issues = candidate_order_request(capture)
     source_id = 'erp-order-headers-' + uuid4().hex
     directory = Path(settings.runtime_dir) / 'erp-order-headers' / source_id
     directory.mkdir(mode=0o700, parents=True)
@@ -27,7 +38,7 @@ def capture_order_headers(settings, capture, *, client=None, web_session=None, b
         'erp_capture_id':capture['capture_id'],'synthetic':bool(capture.get('synthetic',False)),
         'sample_only':bool(capture.get('sample_only',False)),
         'queried_at':datetime.now(timezone.utc).isoformat(),'requested_order_ids':requested,
-        'orders':{},'files':[],'issues':[],'artifact_file':str((directory/'result.json').resolve())}
+        'orders':{},'files':[],'issues':issues,'artifact_file':str((directory/'result.json').resolve())}
     try:
         with (nullcontext(web_session) if web_session is not None else _session(settings,client)) as session:
             post, _ = session
@@ -73,8 +84,6 @@ def capture_order_headers(settings, capture, *, client=None, web_session=None, b
                 except (SourceUnavailable,httpx.HTTPError,ValueError,TypeError,KeyError) as error:
                     result['issues'].append({'code':'order_header_batch_unverified','order_ids':batch,
                         **error_evidence(error)})
-                    if isinstance(error,httpx.HTTPStatusError) and error.response.status_code in (401,403):
-                        break
     except (SourceUnavailable,httpx.HTTPError) as error:
         result['issues'].append({'code':'order_header_source_unavailable','order_ids':requested, **error_evidence(error)})
     result['rate_limit_observed'] = any(i.get('error_kind') == 'rate_limited' for i in result['issues'])

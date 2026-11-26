@@ -94,22 +94,27 @@ class Worker:
         service_config = getattr(self.service, "config", None)
         if config["schedule_enabled"] and local.hour >= 5:
             enqueue(self.factory, "run", {"date": local.date().isoformat()}, f"daily:{local.date().isoformat()}")
-        if now - self.last_reconcile >= 60:
-            track_logs = service_config and (service_config.ding_tk_morning_log_folder
-                                            or service_config.ding_cancellation_log_folder)
-            self.service.reconcile()
-            self.last_reconcile = now
-            # 只重试整轮结束后写入失败的日志，不随逐条核验生成或刷新日志。
-            if track_logs:
-                for marker in sorted((service_config.runtime_dir / 'morning-logs').glob('*/refresh-pending.json')):
-                    self._morning_log(service_config, date.fromisoformat(marker.parent.name))
+        reconcile_due = now - self.last_reconcile >= 60
+        markers = []
+        if reconcile_due and service_config and (service_config.ding_tk_morning_log_folder
+                                                or service_config.ding_cancellation_log_folder):
+            markers = sorted((service_config.runtime_dir / 'morning-logs').glob('*/refresh-pending.json'))
         job = claim_job(self.factory, self.owner, time.time() if use_wall_clock else now)
-        if job is None:
-            return
-        metadata = job.payload.get('_log_context', {})
-        metadata = metadata if isinstance(metadata, dict) else {}
-        with bind_context(job_id=job.id, **{k: metadata[k] for k in ('request_id', 'operation_id') if k in metadata}):
-            self._run_job(job, now, tick_started)
+        if job is not None:
+            metadata = job.payload.get('_log_context', {})
+            metadata = metadata if isinstance(metadata, dict) else {}
+            with bind_context(job_id=job.id, **{k: metadata[k] for k in ('request_id', 'operation_id') if k in metadata}):
+                self._run_job(job, now, tick_started)
+        if reconcile_due:
+            try:
+                if job is None or job.kind != 'reconcile':
+                    self.service.reconcile()
+                # 本轮新产生的归档补写标记留给下次轮询。
+                for marker in markers:
+                    if marker.exists():
+                        self._morning_log(service_config, date.fromisoformat(marker.parent.name))
+            finally:
+                self.last_reconcile = now + (time.monotonic() - tick_started)
 
     def _run_job(self, job, now, tick_started):
         self.current_job = job.id

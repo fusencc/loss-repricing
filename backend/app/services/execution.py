@@ -113,9 +113,9 @@ class PricingService:
                 return automation_gate(session, key)
         return True, ""
 
-    def _save_decisions(self, batch_id, decisions):
+    def _save_decisions(self, batch_id, decisions, *, unlocated_candidate_rows=False):
         with transaction(self.factory) as session:
-            write_decisions(session, batch_id, decisions)
+            write_decisions(session, batch_id, decisions, unlocated_candidate_rows=unlocated_candidate_rows)
 
     def run_batch(self, run_key, item_id=None):
         with bind_sink(get_sink(self.config)), bind_context(operation_id=uuid4().hex):
@@ -183,7 +183,7 @@ class PricingService:
                     raise ValueError("原始批次模式与当前适配器不一致，禁止跨模式运行")
                 batch.status, batch.error = "running", None
             batch_id = batch.id
-        self._save_decisions(batch_id, decisions)
+        self._save_decisions(batch_id, decisions, unlocated_candidate_rows=snapshot.unlocated_candidate_rows)
         event('batch.saved', batch_id=batch_id, count=len(decisions),
               source=self.adapter.mode, synthetic=getattr(self.adapter, 'synthetic', False))
         if utcnow().astimezone(BEIJING).date() != business_date:

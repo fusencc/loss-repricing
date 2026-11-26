@@ -26,13 +26,13 @@ BLOCKED_LIST_RETRY_DELAYS = (16, 32)
 
 
 def retry_erp_read(call, *, delays=(0, 0), wait=sleep):
-    """Retry an idempotent read after a read timeout or HTTP 5xx."""
+    """Retry an idempotent read after a connection/read timeout or HTTP 5xx."""
     for attempt, delay in enumerate((0, *delays)):
         if delay:
             wait(delay)
         try:
             return call()
-        except httpx.ReadTimeout:
+        except (httpx.ConnectTimeout, httpx.ReadTimeout):
             if attempt == len(delays):
                 raise
         except httpx.HTTPStatusError as exc:

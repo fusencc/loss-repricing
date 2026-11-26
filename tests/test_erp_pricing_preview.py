@@ -463,6 +463,26 @@ def test_live_missing_native_order_only_skips_that_order(source_files, has_shop_
     assert [(row['order_id'], row['code']) for row in report['issues']] == [('000003', 'missing_order_details')]
 
 
+@pytest.mark.parametrize('bad_shop', [None, 123, ' '])
+def test_bad_shop_is_local_and_never_coerced_into_an_identity(source_files, bad_shop):
+    capture, evidence = source_files
+    row = next(r for r in capture['groups'][1]['rows'] if r['orderid'] == '000003')
+    row['fields']['店铺'] = bad_shop
+    report = preview_pricing(capture, evidence)
+    assert {d['key']['item_id'] for d in report['decisions'] if d['ready']} == {'0001001', '0001002'}
+    assert any(i['order_id'] == '000003' and i['code'] == 'missing_order_shop' for i in report['issues'])
+
+
+def test_live_bad_finance_only_excludes_the_conflicting_order(source_files):
+    from app.adapters.erp_pricing import prepare_pricing
+    capture, evidence = source_files
+    prep = live_scoped_preparation(capture, evidence)
+    prep['orders'][0]['lines'][0]['loss']['amount'] = '-9999'
+    report = prepare_pricing(capture, order_preparation=prep).report
+    assert [report['references']['lines'][rid]['order_id'] for rid in report['references']['retained_row_ids']] == ['000002']
+    assert any(i['code'] == 'conflicting_order_finance' and i['order_id'] == '000001' for i in report['issues'])
+
+
 def test_live_conflicting_shop_scope_does_not_invalidate_other_orders(source_files):
     from app.adapters.erp_pricing import prepare_pricing
     capture,evidence=source_files;prep=live_scoped_preparation(capture,evidence)

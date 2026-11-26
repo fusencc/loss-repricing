@@ -69,7 +69,8 @@ def test_no_activity_comes_from_explicit_company_filter_not_missing_variant_fiel
     assert result['records'][0]['company_activity_locked'] is False
 
 
-@pytest.mark.parametrize('case', ['valid', 'conflict', 'duplicate', 'truncated', 'second_page', 'limited', 'variant_limited'])
+@pytest.mark.parametrize('case', ['valid', 'conflict', 'duplicate', 'truncated', 'second_page', 'limited', 'variant_limited',
+                                  'bad_row', 'active_failed', 'inactive_failed', 'late_page_failed'])
 def test_batch_activity_scope_and_pacing(tmp_path, monkeypatch, case):
     from app.adapters import sales_auth
     from app.adapters.sales_platform_capture import capture_platform_controls
@@ -94,14 +95,24 @@ def test_batch_activity_scope_and_pacing(tmp_path, monkeypatch, case):
             if body['isPromotion'] == '0':
                 if case == 'limited':
                     return httpx.Response(429)
+                if case == 'inactive_failed':
+                    return httpx.Response(503)
                 rows = [second, first] if case == 'conflict' else [second]
                 count = len(rows)
             else:
                 assert type(body['isPromotion']) is int and body['isPromotion'] == 1
                 rows = [first, first] if case == 'duplicate' else [first]
                 count = len(rows)
-                if case == 'second_page':
+                if case == 'bad_row':
+                    rows.append({'bloc': 'GROUP', 'productId': 'P1', 'shopName': None})
+                    count = len(rows)
+                if case == 'active_failed' or (case == 'late_page_failed' and body['page'] == 2):
+                    return httpx.Response(503)
+                if case == 'late_page_failed':
+                    rows += [parent(f'OTHER{i}PH', 'P1') for i in range(99)]
                     count = 101
+                if case == 'second_page':
+                    count = 102 if body['page'] == 1 else 101
                     rows = ([parent(f'OTHER{i}PH', 'P1') for i in range(100)]
                             if body['page'] == 1 else [first])
                 if case == 'truncated':
@@ -121,16 +132,20 @@ def test_batch_activity_scope_and_pacing(tmp_path, monkeypatch, case):
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         result = capture_platform_controls(settings, {'capture_id':'C'}, targets, client=client)
     records = {r['product_id']:r['company_activity_locked'] for r in result['records']}
-    assert records == ({'P1':True,'P2':False} if case in ('valid','second_page') else
-                       {'P2':False} if case in ('duplicate','conflict') else {})
-    assert len(requests) == {'valid':6,'second_page':7,'duplicate':4,'conflict':4,'truncated':2,'limited':1,'variant_limited':4}[case]
+    assert records == ({'P1':True,'P2':False} if case in ('valid','second_page','truncated','bad_row','late_page_failed') else
+                       {'P2':False} if case in ('duplicate','conflict','active_failed') else
+                       {'P1':True} if case == 'inactive_failed' else {})
+    if case in ('bad_row', 'active_failed', 'inactive_failed', 'late_page_failed'):
+        assert result['issues'] and not result['acquisition_complete']
+    assert len(requests) == {'valid':6,'second_page':7,'duplicate':4,'conflict':4,'truncated':6,'limited':1,'variant_limited':4,
+                             'bad_row':6,'active_failed':4,'inactive_failed':4,'late_page_failed':7}[case]
     assert [time for _, time in requests] == list(range(0, 2 * len(requests), 2))
     if case in ('limited','variant_limited'):
         assert result['stopped_http_status'] == 429
 
 
 @pytest.mark.parametrize('interval, count, first_size', [(0,9,8),(30,4,3)])
-def test_invalid_activity_page_does_not_stop_next_product_batch(tmp_path, monkeypatch, interval, count, first_size):
+def test_empty_activity_pages_do_not_stop_next_product_batch(tmp_path, monkeypatch, interval, count, first_size):
     from app.adapters import sales_auth
     from app.adapters.sales_platform_capture import capture_platform_controls
     clock = [0]
@@ -154,7 +169,8 @@ def test_invalid_activity_page_does_not_stop_next_product_batch(tmp_path, monkey
     targets = [dict(erp_shop='SHOPPH',product_id=product,item_id='ITEM') for product in products]
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         result = capture_platform_controls(settings, {'capture_id':'C'}, targets, client=client)
-    assert activity_requests == [(products[:first_size],'0'),(products[first_size:],'0'),(products[first_size:],1)]
+    assert activity_requests == [(batch, side) for batch in (products[:first_size], products[first_size:])
+                                 for side in ('0', 1)]
     assert not result['records']
-    assert [issue['code'] for issue in result['issues']] == [
-        'company_activity_batch_unverified','company_activity_state_conflicting_or_missing']
+    assert [(issue['code'], issue['product_id']) for issue in result['issues']] == [
+        ('company_activity_state_conflicting_or_missing', product) for product in products]

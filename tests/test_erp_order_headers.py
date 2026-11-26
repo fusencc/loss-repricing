@@ -51,7 +51,8 @@ def test_header_total_changes_do_not_drop_verified_orders(tmp_path):
     assert set(result['orders']) == {'O1', 'O2'}
 
 
-def test_header_rate_limit_only_skips_current_batch(tmp_path):
+@pytest.mark.parametrize('failure', ['rate', 'forbidden'])
+def test_header_failed_batch_only_skips_current_orders(tmp_path, failure):
     from app.adapters.erp_order_headers import capture_order_headers
     calls = []
 
@@ -61,7 +62,7 @@ def test_header_rate_limit_only_skips_current_batch(tmp_path):
         order = json.loads(request.content)['filter1value']
         calls.append(order)
         if order == 'O2':
-            return httpx.Response(200, json={'code': 500003})
+            return httpx.Response(403) if failure == 'forbidden' else httpx.Response(200, json={'code': 500003})
         row = {'orderid': order, 'shopid': 'SHOP', 'shopname': 'SHOPPH', 'platform': 'Tiktok'}
         return httpx.Response(200, json={'code': 0, 'data': {'records': [row], 'total': 1}})
 
@@ -70,6 +71,7 @@ def test_header_rate_limit_only_skips_current_batch(tmp_path):
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         result = capture_order_headers(settings, capture, client=client, batch_size=1)
     assert calls == ['O1', 'O2', 'O3']
-    assert result['rate_limit_observed'] and not result['acquisition_complete']
+    assert result['rate_limit_observed'] is (failure == 'rate') and not result['acquisition_complete']
     assert set(result['orders']) == {'O1', 'O3'}
-    assert [(i['order_ids'], i['business_code']) for i in result['issues']] == [(['O2'], 500003)]
+    assert [(i['order_ids'], i['error_kind']) for i in result['issues']] == [
+        (['O2'], 'rate_limited' if failure == 'rate' else 'access_denied')]

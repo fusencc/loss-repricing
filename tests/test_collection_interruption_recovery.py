@@ -192,11 +192,13 @@ def test_unconfirmed_export_creation_is_never_retried(monkeypatch):
     assert evidence[-1]['stage'] == 'submit'
 
 
-def test_persistent_query_failure_is_bounded_and_keeps_bound_task(monkeypatch):
+@pytest.mark.parametrize('failure_at', [0, 85])
+def test_persistent_query_failure_is_bounded_and_keeps_bound_task(monkeypatch, failure_at):
     clock = [0]
     monkeypatch.setattr(sales, 'monotonic', lambda: clock[0])
     monkeypatch.setattr(sales, 'sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
     calls = []
+    query_times = []
     evidence = []
     def route(request):
         calls.append(request.url.path)
@@ -206,6 +208,9 @@ def test_persistent_query_failure_is_bounded_and_keeps_bound_task(monkeypatch):
             return httpx.Response(200, json={'resp_code': 0, 'datas': {'id': 'original-task'}})
         if calls.count(sales.TASKS) == 1:
             return httpx.Response(200, json={'resp_code': 0, 'datas': {'data': []}})
+        query_times.append(clock[0])
+        if clock[0] < failure_at:
+            return httpx.Response(200, json={'resp_code': 0, 'datas': {'data': []}})
         return httpx.Response(400, json={'resp_code': 500})
     with httpx.Client(transport=httpx.MockTransport(route)) as client:
         auth = SalesAuth(Settings(_env_file=None, vendor_username='u', vendor_password='p',
@@ -214,8 +219,8 @@ def test_persistent_query_failure_is_bounded_and_keeps_bound_task(monkeypatch):
             sales._export_file(client, auth, ['P1'], '集团二部',
                                checkpoint=lambda d: evidence.append(json.loads(json.dumps(d))))
     assert calls.count(sales.EXPORT) == 1
-    assert calls.count(sales.TASKS) == 20
-    assert clock[0] == 90
+    assert query_times == list(range(0, 90, 5))
+    assert len(evidence[-1]['read_failures']) == (90 - failure_at) // 5
     assert evidence[-1]['state'] == 'read_failed'
     assert evidence[-1]['task_id'] == 'original-task'
 

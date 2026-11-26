@@ -83,10 +83,10 @@ def test_current_real_capture_contract_provides_real_flag():
     assert prepare_order_losses(c,n,s)['synthetic'] is False
 
 
-def test_source_observation_cannot_end_before_it_started():
+def test_source_clock_skew_within_the_business_day_keeps_verified_orders():
     from app.adapters.erp_order_loss import prepare_order_losses
     c,n,s=inputs();n['completed_at']='2026-11-11T01:30:00+00:00'
-    with pytest.raises(ValueError):prepare_order_losses(c,n,s)
+    assert [order['order_id'] for order in prepare_order_losses(c,n,s)['orders']] == ['O1']
 
 
 def test_null_parent_site_is_not_a_missing_site_when_shop_suffix_is_known():

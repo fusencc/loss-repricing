@@ -25,10 +25,8 @@ ACTIVITY_PRODUCTS_PER_BATCH = 8
 
 def _archive(directory, result, response, filename, path, request):
     file = directory / filename
-    file.write_bytes(response.content)
-    raw = file.read_bytes()
-    if raw != response.content:
-        raise OSError('平台采集原件回读不一致')
+    raw = response.content
+    file.write_bytes(raw)
     received_at = datetime.now(timezone.utc).isoformat()
     result['files'].append({'file':str(file.resolve()), 'bytes':len(raw), 'sha256':sha256(raw).hexdigest(),
         'path':path, 'request':request, 'http_status':response.status_code, 'received_at':received_at})
@@ -36,50 +34,37 @@ def _archive(directory, result, response, filename, path, request):
     return received_at
 
 
-def _activity_batch(client, auth, directory, result, batch_number, products_by_activity, bloc):
-    """按所需的活动状态批查父商品，各侧独立翻页。"""
-    matches = defaultdict(list)
-    observed_at = None
-    for active, products in products_by_activity.items():
-        if not products:
-            continue
-        total, fetched, page = None, 0, 1
-        previous_pages = set()
-        while True:
-            body = {'page':page, 'limit':BATCH_SIZE, 'blocNames':[bloc],
-                    'productIdStr':' '.join(products), 'isPromotion':'0' if active == 0 else 1}
-            response = client.post(ORIGIN + ACTIVITY_PATH, json=body, headers=auth.collection_headers(),
-                                   timeout=60, follow_redirects=False)
-            auth.observe_collection_response(response)
-            received = _archive(directory, result, response,
-                                f'activity-{batch_number:05d}-{active}-{page:04d}.json', ACTIVITY_PATH, body)
-            if observed_at is None:
-                observed_at = received
-            value = response.json(parse_float=Decimal)
-            if not isinstance(value, dict) or type(value.get('code')) is not int or value['code'] != 0:
-                raise ValueError('company_activity_business_failed')
-            count, rows = value.get('count'), value.get('data')
-            if (type(count) is not int or count < 0 or (total is not None and count != total)
-                    or not isinstance(rows, list) or len(rows) != min(BATCH_SIZE, count - fetched)):
-                raise ValueError('company_activity_coverage_unverified')
-            total = count
-            page_identities = set()
-            for row in rows:
-                if (not isinstance(row, dict) or row.get('bloc') != bloc
-                        or row.get('productId') not in products):
-                    raise ValueError('company_activity_scope_mismatch')
-                shop = identity_text(row.get('shopName'))
-                identity = shop, row['productId']
-                if identity in previous_pages:
-                    raise ValueError('company_activity_coverage_unverified')
-                page_identities.add(identity)
-                matches[identity].append((active, row))
-            previous_pages.update(page_identities)
-            fetched += len(rows)
-            if fetched == total:
-                break
-            page += 1
-    return matches, observed_at
+def _activity_pages(client, auth, directory, result, batch_number, active, products, bloc):
+    page = 1
+    while True:
+        body = {'page': page, 'limit': BATCH_SIZE, 'blocNames': [bloc],
+                'productIdStr': ' '.join(products), 'isPromotion': '0' if active == 0 else 1}
+        response = client.post(ORIGIN + ACTIVITY_PATH, json=body, headers=auth.collection_headers(),
+                               timeout=60, follow_redirects=False)
+        auth.observe_collection_response(response)
+        received = _archive(directory, result, response,
+                            f'activity-{batch_number:05d}-{active}-{page:04d}.json', ACTIVITY_PATH, body)
+        value = response.json(parse_float=Decimal)
+        if not isinstance(value, dict) or type(value.get('code')) is not int or value['code'] != 0:
+            raise ValueError('company_activity_business_failed')
+        count, rows = value.get('count'), value.get('data')
+        if type(count) is not int or count < 0 or not isinstance(rows, list):
+            raise ValueError('company_activity_coverage_unverified')
+        accepted = []
+        for row in rows:
+            if isinstance(row, dict) and row.get('bloc') == bloc and row.get('productId') in products:
+                try:
+                    shop = identity_text(row.get('shopName'))
+                except ValueError:
+                    continue
+                accepted.append(((shop, row['productId']), row))
+        if len(accepted) != len(rows):
+            result['issues'].append({'code':'company_activity_scope_mismatch', 'batch':batch_number,
+                                    'active':active, 'page':page, 'excluded_rows':len(rows) - len(accepted)})
+        yield received, accepted
+        if len(rows) < BATCH_SIZE or page * BATCH_SIZE >= count:
+            break
+        page += 1
 
 
 def _activity_product_batches(shops_by_product, interval):
@@ -109,26 +94,30 @@ def _confirmed_activity(settings, plans, client, auth, directory, result, activi
         shops_by_product[product].append(shop)
     batches = _activity_product_batches(shops_by_product, settings.sales_request_interval_seconds)
     for batch_number, batch in enumerate(batches, 1):
-        try:
-            products_by_activity = {
-                active: [product for product in batch if any(
-                    activity_hints.get((shop, product)) in (active, None) for shop in shops_by_product[product]
-                )]
-                for active in (0, 1)
-            }
-            matches, observed_at = _activity_batch(client, auth, directory, result, batch_number,
-                                                   products_by_activity, settings.erp_capture_bloc)
-        except (SourceUnavailable, httpx.HTTPError, ValueError, TypeError, KeyError) as error:
-            issue = {'code':'company_activity_batch_unverified', 'product_ids':batch,
-                     'error_kind':type(error).__name__}
-            if isinstance(error, ValueError) and str(error).startswith('company_activity_'):
-                issue['reason'] = str(error)
-            if isinstance(error, httpx.HTTPStatusError):
-                issue['http_status'] = error.response.status_code
-            result['issues'].append(issue)
-            if isinstance(error, SourceUnavailable) or auth.stopped_http_status is not None:
-                return
-            continue
+        matches = defaultdict(list)
+        observed_at = None
+        for active in (0, 1):
+            products = [product for product in batch if any(
+                activity_hints.get((shop, product)) in (active, None) for shop in shops_by_product[product]
+            )]
+            if not products:
+                continue
+            try:
+                for received, rows in _activity_pages(client, auth, directory, result, batch_number,
+                                                      active, products, settings.erp_capture_bloc):
+                    observed_at = observed_at or received
+                    for identity, row in rows:
+                        matches[identity].append((active, row))
+            except (SourceUnavailable, httpx.HTTPError, ValueError, TypeError, KeyError) as error:
+                issue = {'code':'company_activity_batch_unverified', 'product_ids':products,
+                         'active':active, 'error_kind':type(error).__name__}
+                if isinstance(error, ValueError) and str(error).startswith('company_activity_'):
+                    issue['reason'] = str(error)
+                if isinstance(error, httpx.HTTPStatusError):
+                    issue['http_status'] = error.response.status_code
+                result['issues'].append(issue)
+                if isinstance(error, SourceUnavailable) or auth.stopped_http_status is not None:
+                    return
         for product in batch:
             for shop in shops_by_product[product]:
                 rows = matches.get((shop, product), [])

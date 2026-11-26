@@ -265,6 +265,7 @@ class Snapshot(BaseModel):
     candidate_scope: Literal['complete_sources', 'observed_erp_orders'] = 'complete_sources'
     source_versions: dict[str, str] = Field(default_factory=dict)
     source_issues: list[SourceIssue] = Field(default_factory=list)
+    unlocated_candidate_rows: bool = False
 
 
 class Decision(BaseModel):

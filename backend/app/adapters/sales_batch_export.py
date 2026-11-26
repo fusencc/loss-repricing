@@ -5,6 +5,7 @@ from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
 import json
+import logging
 from time import monotonic, sleep
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -68,13 +69,22 @@ def export_activity_hints(sales):
 
 
 def _parse_export(content, ids, bloc):
-    rows = list(_xlsx_rows(content, COLUMNS, '销售子SKU导出'))
+    rows = []
+    skipped = 0
+    for line, row in _xlsx_rows(content, COLUMNS, '销售子SKU导出'):
+        product = row['产品ID']
+        if row['集团'] != bloc:
+            raise ValueError('sales_export_outside_request')
+        if not isinstance(product, str) or not product.strip():
+            skipped += 1
+            continue
+        if product not in ids:
+            raise ValueError('sales_export_outside_request')
+        rows.append((line, row))
+    if skipped:
+        logging.getLogger(__name__).warning('销售导出已跳过 %d 行缺少文本产品ID的数据', skipped)
     if not rows:
         raise ValueError('sales_export_empty')
-    for _, row in rows:
-        product = row['产品ID']
-        if not isinstance(product, str) or product not in ids or row['集团'] != bloc:
-            raise ValueError('sales_export_outside_request')
     return rows
 
 
@@ -104,10 +114,10 @@ def _export_file(client, auth, ids, bloc, *, checkpoint=None):
             raise error
         return data.get('datas')
 
-    def read(call, stage):
-        # 查询和下载是幂等读取；HTTP 400/5xx、超时和业务失败不证明源端
-        # 导出任务失败。保留原任务，限时重读；认证/权限/限流立即停止。
-        deadline = monotonic() + 90
+    def read(call, stage, *, deadline=None):
+        # 轮询原任务使用同一等待预算；提交前的列表读取和文件下载独立。
+        if deadline is None:
+            deadline = monotonic() + 90
         for attempt in range(19):
             try:
                 return call()
@@ -118,15 +128,18 @@ def _export_file(client, auth, ids, bloc, *, checkpoint=None):
                 state['read_failures'].append(failure)
                 # 只保留受控类型、状态及业务码，不复制响应正文、凭据或下载地址。
                 save(state='poll_retry' if stage != 'download' else 'download_retry', stage=stage)
-                if (status in COLLECTION_STOP_STATUSES or attempt == 18 or monotonic() >= deadline
-                        or (isinstance(error, ValueError) and str(error) == 'sales_export_file_too_large')):
+                retry = (status not in COLLECTION_STOP_STATUSES and attempt < 18
+                         and monotonic() + 5 < deadline
+                         and not (isinstance(error, ValueError) and str(error) == 'sales_export_file_too_large'))
+                if retry:
+                    sleep(5)
+                if not retry or monotonic() >= deadline:
                     save(state='read_failed', stage=stage)
                     raise
-                sleep(5)
 
-    def tasks():
+    def tasks(*, deadline=None):
         # 11/25 真实任务页已验证支持100条；扩大观察窗口，减少并发导出挤出本任务。
-        return read(lambda: post(TASKS, {'page': 1, 'limit': 100})['data'], 'task_query')
+        return read(lambda: post(TASKS, {'page': 1, 'limit': 100})['data'], 'task_query', deadline=deadline)
 
     previous = {str(row['id']) for row in tasks()}
     save(state='submitting', stage='submit')
@@ -144,7 +157,7 @@ def _export_file(client, auth, ids, bloc, *, checkpoint=None):
     deadline = monotonic() + 90
     while monotonic() < deadline:
         candidates = [
-            row for row in tasks()
+            row for row in tasks(deadline=deadline)
             if row.get('taskType') == 1 and (
                 str(row['id']) == str(task_id) if task_id else str(row['id']) not in previous
             )

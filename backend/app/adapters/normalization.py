@@ -145,26 +145,31 @@ def _order_detail_identity(order_id, detail_id):
 
 
 def source_record_issue(record, spec, source, record_number):
-    fields = (KEY_FIELDS - {"key.warehouse"}) | ({"main_sku"} if source == "online" else {"order_id", "row_id"})
+    fields = KEY_FIELDS - {"key.warehouse"}
     values = mapped(
         record,
         {name: path for name, path in spec["field_map"].items() if name in fields},
         {name: value for name, value in spec.get("constants", {}).items() if name in fields},
     )
-    # 仓配不参与稳定目标身份。异常证据保留空值，仍可定位商品及订单明细。
-    warehouse_path = spec["field_map"].get("key.warehouse")
-    try:
-        raw = read_path(record, warehouse_path) if warehouse_path else spec.get("constants", {}).get("key.warehouse")
-        warehouse = identity_text(raw)
-    except (KeyError, IndexError, TypeError, ValueError):
-        warehouse = None
-    # 已观察到平台子 SKU 含 #。这里只定位挂起范围，正常算价、提交及回读沿用已确认的键合同。
-    key = VariantReference.model_validate({**_variant_values(values["key"], sku_text), "warehouse": warehouse})
+
+    def optional_identity(field):
+        path = spec["field_map"].get(field)
+        try:
+            raw = read_path(record, path) if path else spec.get("constants", {}).get(field)
+            return identity_text(raw)
+        except (KeyError, IndexError, TypeError, ValueError):
+            return None
+
+    # 缺少辅助字段仍可按已确认的商品身份挂起；不从异常行补造身份。
+    key = VariantReference.model_validate({**_variant_values(values["key"], sku_text),
+                                          "warehouse": optional_identity("key.warehouse")})
     if source == "online":
         return OnlineSourceIssue(source=source, record_number=record_number, key=key,
-                                 main_sku=identity_text(values["main_sku"]))
-    order_id, row_id = _order_detail_identity(values["order_id"], values["row_id"])
-    return CandidateSourceIssue(source=source, record_number=record_number, key=key, order_id=order_id, row_id=row_id)
+                                 main_sku=optional_identity("main_sku") or "")
+    order_id, detail_id = optional_identity("order_id"), optional_identity("row_id")
+    row_id = _order_detail_identity(order_id, detail_id)[1] if order_id and detail_id else ""
+    return CandidateSourceIssue(source=source, record_number=record_number, key=key,
+                                order_id=order_id or "", row_id=row_id)
 
 
 def source_line(record, spec, source):

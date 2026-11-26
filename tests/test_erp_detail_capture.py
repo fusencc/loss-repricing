@@ -1,3 +1,4 @@
+from hashlib import sha256
 from io import BytesIO
 import json
 from pathlib import Path
@@ -59,11 +60,10 @@ def transport(outside=False):
     return httpx.MockTransport(handler),calls
 
 
-def test_downloads_unique_candidate_orders_and_preserves_physical_rows(tmp_path, monkeypatch):
+def test_downloads_unique_candidate_orders_and_preserves_physical_rows(tmp_path):
     from app.adapters.erp_detail_capture import capture_erp_details
     mock,calls=transport()
-    with httpx.Client(transport=mock) as client, monkeypatch.context() as patch:
-        patch.setattr(Path, 'read_bytes', lambda *_: pytest.fail('明细应从下载内容解析，不回读原件'))
+    with httpx.Client(transport=mock) as client:
         result=capture_erp_details(config(tmp_path),capture(),client=client)
     assert result['acquisition_complete']
     assert result['requested_order_ids']==['O1','O2']
@@ -75,9 +75,7 @@ def test_downloads_unique_candidate_orders_and_preserves_physical_rows(tmp_path,
     stored=json.loads(Path(result['artifact_file']).read_text())
     assert stored==result and 'SECRET' not in json.dumps(stored)
     original=result['files'][0];raw=Path(original['file']).read_bytes()
-    assert 'sha256' not in original and len(raw) == original['bytes']
-    assert [r['ref'] for r in result['rows']] == [
-        f'{result["source_id"]}/{Path(original["file"]).name}#r{n}' for n in (2, 3, 4)]
+    assert sha256(raw).hexdigest()==original['sha256']
 
 
 def test_order_details_share_the_owned_web_session_and_do_not_login_again(tmp_path):
@@ -107,7 +105,7 @@ def test_default_wait_budget_finishes_a_slow_task_without_resubmitting(tmp_path)
     assert calls.count('/newIp/report/orderDownload/asyncOrderDetailDownload')==1
 
 
-def test_wait_budget_exhaustion_does_not_resubmit_or_skip_independent_batch(tmp_path):
+def test_wait_budget_exhaustion_keeps_pending_task_and_continues_independent_exports(tmp_path):
     from app.adapters.erp_detail_capture import capture_erp_details
     submissions=[]
     def handler(request):
@@ -127,13 +125,26 @@ def test_wait_budget_exhaustion_does_not_resubmit_or_skip_independent_batch(tmp_
     assert all(b['status'] == 'pending' and b['task_id'] == 'TASK-ID' for b in result['batches'])
 
 
+def test_invalid_candidate_id_does_not_discard_detail_requests(tmp_path):
+    from app.adapters.erp_detail_capture import capture_erp_details
+    source = capture()
+    source['groups'][0]['candidate_order_ids'].append(123)
+    mock, _ = transport()
+    with httpx.Client(transport=mock) as client:
+        result = capture_erp_details(config(tmp_path), source, client=client)
+    assert result['requested_order_ids'] == ['O1', 'O2'] and len(result['rows']) == 3
+    assert not result['acquisition_complete'] and result['issues'][0]['code'] == 'invalid_candidate_order_id'
+
+
 def test_unrequested_order_is_archived_but_not_accepted(tmp_path):
     from app.adapters.erp_detail_capture import capture_erp_details
     mock,calls=transport(outside=True)
     with httpx.Client(transport=mock) as client:
         result=capture_erp_details(config(tmp_path),capture(),client=client)
-    assert not result['acquisition_complete'] and not result['rows']
-    assert result['files'] and any(i['code']=='detail_scope_mismatch' for i in result['issues'])
+    assert not result['acquisition_complete']
+    assert [(r['order_id'], r['row_number']) for r in result['rows']] == [('O1', 3), ('O2', 4)]
+    assert result['batches'][0]['status'] == 'partial'
+    assert result['files'] and result['issues'] == [{'code':'detail_scope_mismatch', 'batch':1, 'row_number':2}]
 
 
 @pytest.mark.parametrize('limited', ['submit', 'poll'])

@@ -27,6 +27,36 @@ def enable(factory):
                                   site_enabled=["MY","PH","SG","TH","VN"]))
 
 
+def test_rerun_keeps_unobserved_candidate_pending_if_a_row_could_not_be_located(context):
+    from app.models import Batch
+
+    factory, cfg, _ = context
+
+    class ChangedSource(DemoAdapter):
+        changed = False
+
+        def collect(self, day):
+            snapshot = super().collect(day)
+            if self.changed:
+                snapshot.unlocated_candidate_rows = True
+                snapshot.lines = [line for line in snapshot.lines if line.key.site != "MY"]
+            return snapshot
+
+    adapter = ChangedSource(cfg.runtime_dir)
+    service = PricingService(factory, adapter, cfg)
+    batch_id = service.run_batch('partial-rerun')
+    adapter.changed = True
+    assert service.run_batch('partial-rerun') == batch_id
+
+    with factory() as session:
+        items = list(session.scalars(select(Item).where(Item.batch_id == batch_id)))
+        missing = [item for item in items if item.key['site'] == 'MY']
+        assert missing and all(item.phase == 'blocked' and item.status == '待处理' for item in missing)
+        assert any(item.key['site'] == 'PH' and item.decision['ready'] for item in items)
+        assert session.get(Batch, batch_id).error is None
+        assert session.scalar(select(Execution.id)) is None
+
+
 @pytest.mark.parametrize('overshoot,expected',[('0','verified'),('.001','mismatch')])
 def test_readback_above_reference_is_not_verified_within_old_amount_tolerance(context,overshoot,expected):
     from test_sku_price_reference import ceiling

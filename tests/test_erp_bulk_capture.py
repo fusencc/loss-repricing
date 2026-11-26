@@ -26,7 +26,7 @@ def xlsx(headers, rows, broken_dimension=False):
     return result.getvalue()
 
 
-def run(tmp_path, *, issue=None, transient_path=None, failures=0, **capture_options):
+def run(tmp_path, *, issue=None, transient_path=None, failures=0, timeout_type=httpx.ReadTimeout, **capture_options):
     calls = []
     loss = xlsx(['订单编号','订单状态','平台','集团','毛利'],
                 [['0001234567890123456789','可配货','Tiktok','集团二部',-1]], True)
@@ -43,7 +43,7 @@ def run(tmp_path, *, issue=None, transient_path=None, failures=0, **capture_opti
         p = r.url.path
         if p == transient_path and calls.count(p) <= failures:
             if calls.count(p) == 1:
-                raise httpx.ReadTimeout('mock timeout', request=r)
+                raise timeout_type('mock timeout', request=r)
             return httpx.Response(503)
         if p.endswith('/login'): return httpx.Response(200,json={'code':200,'success':True,'data':{'token':'SECRET'}})
         if p.endswith('/dowDeficitOrder'):
@@ -93,8 +93,9 @@ def test_bulk_failure_is_explicit_and_partial_source_is_preserved(tmp_path, issu
 
 @pytest.mark.parametrize('path', ['/Api/deficit/dowDeficitOrder', '/newIp/report/download/list', '/right.xlsx'])
 @pytest.mark.parametrize('failures', [2, 3])
-def test_read_attempts_at_most_three_times(tmp_path, path, failures):
-    result, calls = run(tmp_path, transient_path=path, failures=failures)
+@pytest.mark.parametrize('timeout_type', [httpx.ReadTimeout, httpx.ConnectTimeout])
+def test_read_attempts_at_most_three_times(tmp_path, path, failures, timeout_type):
+    result, calls = run(tmp_path, transient_path=path, failures=failures, timeout_type=timeout_type)
     assert calls.count(path) == 3
     assert result['capture_complete'] is (failures == 2)
     assert calls.count('/newIp/report/orderDownload/asyncOrderListDownload') <= 1
@@ -702,12 +703,14 @@ def test_unrequested_finance_order_cannot_be_hidden_by_scope_filter(tmp_path):
             return xlsx(headers, [row('A', 'Tiktok')])
         if path.endswith('/asyncOrderListDownload'):
             return '下载任务【task】后台执行中'
-        return [{'id': '1', 'source': 'orderList', 'fileName': 'task',
+        return [None, {'id': '1', 'source': 'orderList', 'fileName': 'task',
                  'status': 'success', 'downloadUrl': '/finance.xlsx'}]
     finance = xlsx(headers, [row('A', 'Tiktok'), row('X', 'Shopee')])
     result = capture_erp_bulk(Settings(_env_file=None, runtime_dir=tmp_path),
                               source='loss_allocatable', web_session=(post, lambda _: finance))
     group = result['groups'][0]
-    assert group['batches'][0]['scope_check']['unexpected'] == ['X']
-    assert '未请求' in group['error']
-    assert not group['rows'] and not result['capture_complete']
+    assert group['batches'][0]['excluded_row_counts'] == {'unrequested_order': 1}
+    assert group['batches'][0]['excluded_rows'][0]['order_id'] == 'X'
+    assert [r['orderid'] for r in group['rows']] == ['A'] and not result['capture_complete']
+    from app.adapters.erp_pricing import CaptureGroup
+    assert CaptureGroup.model_validate(group).finance_coverage('集团二部') == (False, True)

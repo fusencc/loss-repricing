@@ -8,7 +8,7 @@ import json
 import re
 from typing import Annotated, Any, Literal
 
-from pydantic import AfterValidator, AwareDatetime, BaseModel, BeforeValidator, ConfigDict, Field, StrictBool, StrictInt, StrictStr, model_validator
+from pydantic import AfterValidator, AwareDatetime, BaseModel, BeforeValidator, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator, model_validator
 
 from app.adapters.erp_bulk_capture import ERP_DEPARTMENTS, SOURCES, STATUS_LABELS, finance_batch_scope
 from app.adapters.normalization import identity_text, sku_text, source_date, source_time
@@ -49,6 +49,11 @@ class FinanceFields(BaseModel):
     # 只有完整同SKU明细、总件数与RMB来源合同另经核对后，才可按整单粒度准备输入。
     corrected_first_margin: Any = Field(default=None, alias="修正一次毛利")
 
+    @field_validator('order_status', 'shop', 'salesperson', 'department', mode='before')
+    @classmethod
+    def optional_source_text(cls, value):
+        return value if isinstance(value, str) else None
+
 
 class FinanceRow(BaseModel):
     orderid: Identifier
@@ -73,6 +78,7 @@ class ExportScope(BaseModel):
 class ExportBatch(BaseModel):
     number: StrictInt | None = None
     parent_number: StrictInt | None = None
+    excluded_rows: list[dict] = Field(default_factory=list)
     scope_check: ExportScope | None = None
     order_ids: list[Identifier] = Field(default_factory=list)
     status: StrictStr | None = None
@@ -146,15 +152,10 @@ class CaptureGroup(BaseModel):
         ids = set(self.candidate_order_ids)
         row_ids = {row.orderid for row in self.rows}
         list_known = self.list_complete and self.total == len(ids) == len(self.candidate_order_ids)
-        rows_in_scope = (
-            bloc is not None and row_ids <= ids
-            and all(row.fields.order_id == row.orderid and row.fields.bloc == bloc
-                    and row.fields.platform.casefold() == "tiktok"
-                    and (salesperson is None or row.fields.salesperson == salesperson.name)
-                    and (department is None or (row.fields.department or "").casefold() == department.casefold())
-                    for row in self.rows)
-        )
-        if not rows_in_scope:
+        if bloc is None or not row_ids <= ids:
+            return False, False
+        outside = {row.orderid for row in self.rows if not self.row_in_scope(row, bloc, department, salesperson)}
+        if outside and not row_ids - outside:
             return False, False
         # 2026-11-25 用户授权“抓到多少处理多少”：名单后页或财务后批失败，
         # 不否定此前已绑定任务、成功下载且逐批核对的财务行。完整性仍如实报告，
@@ -166,6 +167,8 @@ class CaptureGroup(BaseModel):
             return False, True
         if not list_known or not self._batches_cover_orders(ids):
             return False, False
+        if outside:
+            return False, True
         # 最终导出中已知订单的缺行或重复可按目标挂起。未完成导出无法证明这类缺口已定位。
         has_duplicates = len(row_ids) != len(self.rows)
         complete = row_ids == ids and not has_duplicates and self.stage == "complete" and self.error is None
@@ -196,10 +199,9 @@ class CaptureGroup(BaseModel):
                 return False
             end = offset + batch.scope_check.downloaded_rows
             scope = finance_batch_scope(batch.order_ids, [row.orderid for row in self.rows[offset:end]])
-            expected_status = "partial" if scope["missing"] or scope["duplicate_rows"] else "complete"
-            # 集团子批可能部分返回，但部门视图内的已下载订单仍能逐批对齐。
+            expected_status = 'partial' if scope['missing'] or scope['duplicate_rows'] or batch.excluded_rows else 'complete'
             partial_parent = allow_partial and batch.parent_number is not None and batch.status == 'partial'
-            if scope["unexpected"] or scope != batch.scope_check.model_dump() or (batch.status != expected_status and not partial_parent):
+            if scope['unexpected'] or scope != batch.scope_check.model_dump() or (batch.status != expected_status and not partial_parent):
                 return False
             offset = end
         return (allow_partial or requested == candidate_ids) and offset == len(self.rows)
@@ -440,6 +442,8 @@ class LiveOrderPreparation(EvidenceModel):
 
 
 ISSUE_REASONS = {
+    'finance_scope_mismatch': '本单财务行的订单标识、平台或归属与采集范围不一致',
+    'conflicting_order_finance': '本单准备金额与采集财务观察不一致',
     "missing_order_details": "缺少该订单的商品明细证据",
     "incomplete_order_details": "商品明细未声明取全、为空或明细标识重复",
     "missing_order_finance": "至少一个候选来源缺少对应订单财务行",
@@ -499,7 +503,6 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
 
     # 派生个人档案的请求范围仍是部门；财务行归属在下游按个人核对。
     request_salesperson = None if capture.roster_parent_capture_id else capture.salesperson
-    # 集团请求未使用部门筛选；派生档的部门只约束实际下载的财务行。
     request_department = None if capture.department_parent_capture_id else capture.department
     scope_by_source = {
         source: group.scope_bloc(request_department, request_salesperson) for source, group in groups.items()
@@ -521,11 +524,12 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
                 "order_status": row.fields.order_status,
                 "status_matches_source": row.current_status_matches_source,
                 "erp_shop": row.fields.shop,
-                "corrected_first_margin": margin if isinstance(margin, str) else None,
+                "corrected_first_margin": str(margin) if type(margin) in (str, int) else None,
             })
         for order_id in group.candidate_order_ids:
             memberships[order_id][source] = finance.get(order_id, [])
 
+    conflicting_amounts = set()
     orders = {}
     contracts = {}
     sales_conflicts = set()
@@ -547,15 +551,15 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
                 except (InvalidOperation, TypeError):
                     valid = False
                 if not valid:
-                    raise ValueError('实时订单金额与本轮财务观察不一致')
+                    conflicting_amounts.add(order.order_id)
+                    orders.pop(order.order_id)
+                    break
         source_versions.update(details=live.version, mapping=live.version)
         evidence_refs['live_order_sources'] = live.references
     if live_online is not None:
         if (live_online.erp_capture_id != capture.capture_id or live_online.synthetic != capture.synthetic
                 or live_online.sample_only != capture.sample_only
                 or live_online.observed_at.astimezone(BEIJING).date() != business_date
-                or live_online.evaluated_at < live.observed_at
-                or live_online.evaluated_at > live_online.observed_at
                 or live_online.evaluated_at.astimezone(BEIJING).date() != business_date):
             raise ValueError('实时在线准备与采集范围、样本或观察时点不一致')
         contracts = {entry.contract.site:entry.contract for entry in live_online.contracts}
@@ -564,8 +568,6 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
         identities = [entry.state.key.identity() for entry in live_online.online]
         if len(identities)!=len(set(identities)):
             raise ValueError('实时在线准备存在重复在线身份')
-        if any(entry.state.observed_at > live_online.evaluated_at for entry in live_online.online):
-            raise ValueError('在线记录观察时间晚于准备完成时间')
         evaluated_at = live_online.evaluated_at
         sales_conflicts = conflicting_main_sku_scopes((entry.state for entry in live_online.online),evaluated_at)
         source_versions['online'] = live_online.version
@@ -618,6 +620,9 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
                 shop_ids_by_name[line.mapping.erp_shop].add(line.mapping.key.shop_id)
     ambiguous_shop_ids = {shop_id for ids in shop_ids_by_name.values() if len(ids) > 1 for shop_id in ids}
     for order_id, source_rows in memberships.items():
+        if order_id in conflicting_amounts:
+            _add_issue(issues, order_id, list(source_rows), 'conflicting_order_finance')
+            continue
         # 财务范围核对失败的来源不能贡献候选，也不牵连其他已核对来源。
         available_rows = {source: rows for source, rows in source_rows.items() if source in complete_sources}
         if not available_rows:
@@ -627,6 +632,10 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
                 _add_issue(issues, order_id, list(source_rows), problem)
             if order_id not in orders:
                 _add_issue(issues, order_id, list(source_rows), 'missing_order_details')
+            continue
+        if any(not groups[source].row_in_scope(row, scope_by_source[source], capture.department, capture.salesperson)
+               for source, rows in available_rows.items() for row in rows):
+            _add_issue(issues, order_id, list(available_rows), 'finance_scope_mismatch')
             continue
         source_rows = available_rows
         order = orders.get(order_id)
@@ -742,7 +751,7 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
     if not scope_matches:
         global_issues.append("采集来源的筛选范围不一致或无法确认")
     if not valid_observation_window:
-        global_issues.append("财务导出跨业务日")
+        global_issues.append("财务导出跨业务日或时点次序异常")
     for source, group in groups.items():
         if (
             not capture.sample_only and scope_by_source[source] is not None
@@ -812,7 +821,7 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
 def _order_problem(source_rows, groups, shops):
     if len(shops) > 1:
         return "order_shop_conflict"
-    if any(source_rows.values()) and not shops:
+    if any(not row.fields.shop or not row.fields.shop.strip() for rows in source_rows.values() for row in rows):
         return "missing_order_shop"
     if any(not rows for rows in source_rows.values()):
         return "missing_order_finance"

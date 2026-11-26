@@ -105,7 +105,10 @@ def test_split_actual_group_download_and_replay(tmp_path, partial):
     assert load_capture(tmp_path, parent['capture_id'])['groups'] == prior['groups']
     # 派生档使用集团请求字段，却仍逐行核对财务部门；直接采集的历史档语义不变。
     replay['groups'][0]['rows'][0]['fields']['部门'] = B
-    assert 'loss_allocatable' not in preview_pricing(replay)['evaluation_complete_sources']
+    report = preview_pricing(replay)
+    assert 'loss_allocatable' in report['evaluation_complete_sources']
+    assert not report['source_coverage'][0]['finance_complete']
+    assert any(i['code'] == 'finance_scope_mismatch' and i['order_id'] == 'shared' for i in report['issues'])
     replay['groups'][0]['filters']['department'] = A
     assert not preview_pricing(replay)['consistent_capture_scope']
 

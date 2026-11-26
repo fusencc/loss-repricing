@@ -129,6 +129,30 @@ def test_slow_source_failure_waits_five_minutes_from_failure(tmp_path, monkeypat
     engine.dispose()
 
 
+def test_ready_job_runs_before_slow_reconciliation_and_rounds_do_not_repeat_immediately(tmp_path, monkeypatch):
+    engine, factory, service = setup(tmp_path)
+    clock = [100]
+    timeline = []
+    monkeypatch.setattr('app.worker.time.monotonic', lambda: clock[0])
+
+    def reconcile():
+        timeline.append(('reconcile', clock[0]))
+        clock[0] += 70
+
+    monkeypatch.setattr(service, 'reconcile', reconcile)
+    monkeypatch.setattr(service, 'run_batch', lambda _: timeline.append(('run', clock[0])))
+    try:
+        worker = Worker(factory, service)
+        for now in (100, 175, 230):
+            clock[0] = now
+            enqueue(factory, 'run', {})
+            worker.tick(now)
+        assert timeline == [('run', 100), ('reconcile', 100), ('run', 175),
+                            ('run', 230), ('reconcile', 230)]
+    finally:
+        engine.dispose()
+
+
 def test_expired_daily_retry_does_not_process_the_new_business_day(tmp_path):
     engine, factory, service = setup(tmp_path)
     yesterday = enqueue(factory, "run", {"date": "2026-11-05"}, "daily:2026-11-05")

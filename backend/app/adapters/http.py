@@ -9,6 +9,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import json
+import logging
 import re
 from urllib.parse import urlsplit
 
@@ -390,7 +391,7 @@ class HttpAdapter:
 
     def _list_source(self, spec, variables, business_date):
         paging = spec.get("pagination")
-        as_of = total = None
+        as_of = None
         rows = []
         for page in range(1, (paging["max_pages"] if paging else 1) + 1):
             payload = self._fetch(spec, variables, page=page if paging else None)
@@ -407,15 +408,11 @@ class HttpAdapter:
                 page_total = read_path(payload, paging["total_path"])
                 if type(page_total) is not int or page_total < 0 or len(records) > paging["limit"]:
                     raise ValueError("分页计数无效")
-                if page == 1:
-                    as_of, total = stamp, page_total
-                if stamp != as_of or page_total != total:
-                    raise ValueError("分页快照变化")
+                as_of = stamp if as_of is None else min(as_of, stamp)
                 rows.extend(records)
-                if len(rows) == total:
+                # 总数是当前页的观察值，不是整轮固定快照。
+                if not records or page * paging["limit"] >= page_total:
                     return as_of, rows
-                if not records or len(rows) > total:
-                    raise ValueError("分页不完整")
             except BAD_DATA:
                 raise SourceUnavailable("列表记录格式或分页完整性检查失败") from None
         raise SourceUnavailable("来源分页达到合同页数上限，仍有未获取记录")
@@ -423,28 +420,31 @@ class HttpAdapter:
     def _normalize_records(self, name, spec, records):
         online = name == "online"
         paginated = spec.get("pagination") is not None
-        normalized, issues, seen = [], [], set()
+        normalized, issues, seen = [], [], {}
+        unlocated = False
         for number, record in enumerate(records, start=1):
             try:
                 row = online_state(record, spec, self._profit_versions) if online else source_line(record, spec, name)
-                normalized.append(row)
             except BAD_DATA:
                 try:
-                    row = source_record_issue(record, spec, name, number)
+                    issues.append(source_record_issue(record, spec, name, number))
                 except BAD_DATA:
-                    # 候选行须能同时定位到订单明细和在线目标，在线行还须能定位共享销量的主 SKU。
-                    raise SourceUnavailable(f"来源 {name} 第 {number} 条记录的商品或订单明细身份无法核实") from None
-                issues.append(row)
+                    logging.getLogger(__name__).warning("来源 %s 第 %d 条记录身份无法核实，已跳过", name, number)
+                    unlocated = True
+                continue
             if paginated:
-                # 在线分页的记录键包含仓配。缺该字段无法证明不同页是不同在线记录。
-                if online and row.key.warehouse is None:
-                    raise SourceUnavailable(f"来源 {name} 的分页记录缺少可核实仓配")
-                # 字段坏行也不能用来填满重复页的计数。
                 identity = row.key.grouping() if online else (row.key.platform, row.key.shop_id, row.row_id)
-                if identity in seen:
-                    raise SourceUnavailable(f"来源 {name} 的分页记录重复")
-                seen.add(identity)
-        return normalized, issues
+                previous = seen.setdefault(identity, row)
+                if previous is not row:
+                    if previous == row:
+                        continue
+                    if online:
+                        # 冲突现价不能作为调价或接管基线。
+                        issues.append(source_record_issue(record, spec, name, number))
+                        continue
+                    # 候选证据不一致时，保留两行供领域层按订单明细定位冲突。
+            normalized.append(row)
+        return normalized, issues, unlocated
 
     def collect(self, business_date: date) -> Snapshot:
         if self._collection_missing:
@@ -453,10 +453,11 @@ class HttpAdapter:
             "business_date": business_date.isoformat(),
         }
         lines, online, issues, stamps = [], [], [], []
+        unlocated_candidate_rows = False
         for name in (*SOURCES, "online"):
             spec = self._collections[name]
             stamp, records = self._list_source(spec, variables, business_date)
-            normalized, row_issues = self._normalize_records(name, spec, records)
+            normalized, row_issues, unlocated = self._normalize_records(name, spec, records)
             if name == "online":
                 # 同一上传对象存在无法解释的在线记录时，不可让另一份在线记录建立接管/修正基线。
                 held_targets = {}
@@ -475,6 +476,7 @@ class HttpAdapter:
                     issue.related_main_skus = sorted(main_skus - {issue.main_sku})
             else:
                 lines.extend(normalized)
+                unlocated_candidate_rows |= unlocated
             issues.extend(row_issues)
             stamps.append(stamp)
 
@@ -489,7 +491,7 @@ class HttpAdapter:
         return Snapshot(
             as_of=min(stamps), business_date=business_date, fx_date=fx_date, fx_rates=rates,
             lines=lines, online=online, contracts=self._sites, complete_sources=list(SOURCES),
-            source_versions=self._versions, source_issues=issues,
+            source_versions=self._versions, source_issues=issues, unlocated_candidate_rows=unlocated_candidate_rows,
         )
 
     def submit(self, execution_id: str, decision: Decision) -> SubmitResult:

@@ -116,7 +116,7 @@ def claim_job(factory, owner, now):
         return session.get(Job, job.id) if result.rowcount == 1 else None
 
 
-def write_decisions(session, batch_id, decisions, *, ready_hold=None):
+def write_decisions(session, batch_id, decisions, *, ready_hold=None, unlocated_candidate_rows=False):
     existing = {row.variant_id: row for row in session.scalars(select(Item).where(Item.batch_id == batch_id))}
     # 发送前取消的意图也属于执行历史，其商品阶段可能是 blocked。
     executed = set(session.scalars(
@@ -143,7 +143,10 @@ def write_decisions(session, batch_id, decisions, *, ready_hold=None):
         item.updated_at = stamp()
     for identity, item in existing.items():
         if identity not in seen and item.id not in executed and item.phase in {"proposed", "blocked", "excluded"}:
-            item.status, item.phase, item.reason = "不调价", "excluded", "重新取数后已不在当前亏损候选中"
+            if unlocated_candidate_rows:
+                item.status, item.phase, item.reason = "待处理", "blocked", "重取时有无法定位的候选记录，不能确认本商品已离开候选"
+            else:
+                item.status, item.phase, item.reason = "不调价", "excluded", "重新取数后已不在当前亏损候选中"
             item.updated_at = stamp()
 
 

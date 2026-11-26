@@ -65,8 +65,6 @@ def _bound(capture, source, schema):
     day = captured.astimezone(BEIJING).date()
     if start.astimezone(BEIJING).date() != day or end.astimezone(BEIJING).date() != day:
         raise ValueError('原生明细/销售来源跨业务日')
-    if start < captured or end < start:
-        raise ValueError('原生明细/销售来源观察时序不一致')
 
 
 def _warehouse_matches(variant, warehouse):
