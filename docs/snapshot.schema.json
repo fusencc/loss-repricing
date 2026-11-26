@@ -886,6 +886,11 @@
       },
       "title": "Source Issues",
       "type": "array"
+    },
+    "unlocated_candidate_rows": {
+      "default": false,
+      "title": "Unlocated Candidate Rows",
+      "type": "boolean"
     }
   },
   "required": [
