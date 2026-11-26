@@ -2,6 +2,7 @@
 from collections import Counter
 import logging
 from functools import lru_cache
+from types import SimpleNamespace
 from app.config import get_settings
 from app.services.erp_capture_store import load_capture
 
@@ -328,14 +329,26 @@ def combine_pricing_process(items):
 
 def department_records(session, department=None, *, mode=None, runtime_dir=None):
     """全部已保存批次，不按 SKU 去重，不截断；未知部门有独立选项。"""
-    query = (select(Item, Batch, Execution).join(Batch, Item.batch_id == Batch.id)
-        .outerjoin(Execution, Execution.item_id == Item.id)
-        .order_by(Item.updated_at.desc(), Batch.business_date.desc(), Item.id.desc()))
+    # A batch snapshot can contain thousands of products. Read its display fields
+    # once per batch instead of decoding the whole snapshot once per item.
+    fields = ('source_versions', 'erp_roster_filter_log', 'erp_reconciliation',
+              'fx_rates', 'fx_date', 'fx_rate_unit')
+    query = select(Batch.id, Batch.run_key, Batch.business_date, Batch.mode,
+                   *(Batch.snapshot[key].label(key) for key in fields))
     if mode is not None:
         query = query.where(Batch.mode == mode)
-    rows = [(item, batch, execution, record_department(item, batch))
-            for item, batch, execution in session.execute(query)]
-    counts = Counter(row[3] for row in rows)
+    batches = {
+        row.id: SimpleNamespace(id=row.id, run_key=row.run_key, business_date=row.business_date,
+                                mode=row.mode, snapshot={key: row._mapping[key] for key in fields})
+        for row in session.execute(query)
+    }
+    item_query = (select(Item, Batch.id).join(Batch, Item.batch_id == Batch.id)
+                  .order_by(Item.updated_at.desc(), Batch.business_date.desc(), Item.id.desc()))
+    if mode is not None:
+        item_query = item_query.where(Batch.mode == mode)
+    rows = [(item, batches[batch_id], record_department(item, batches[batch_id]))
+            for item, batch_id in session.execute(item_query) if batch_id in batches]
+    counts = Counter(row[2] for row in rows)
     fixed_names = ['Tiktok一部', 'Tiktok五部', 'Tiktok十二部', 'Tiktok二十二部']
     names_in_records = sorted(name for name in counts if name is not None and name not in fixed_names)
     departments = [{'id': 'department:' + name, 'name': name, 'total': counts[name]}
@@ -345,12 +358,12 @@ def department_records(session, department=None, *, mode=None, runtime_dir=None)
     if department is not None and department not in {d['id'] for d in departments}:
         raise ValueError('所选部门不存在或已没有记录，请重新打开页面选择部门')
     selected = department if department is not None else departments[0]['id'] if departments else None
-    chosen = [row for row in rows if ('department:' + row[3] if row[3] is not None else 'unassigned') == selected]
+    chosen = [row for row in rows if ('department:' + row[2] if row[2] is not None else 'unassigned') == selected]
     ownerships = {row.scope_key: row for row in session.scalars(select(Ownership))}
     names = dict(session.execute(select(UserAccount.id, UserAccount.display_name)).all())
     @lru_cache(maxsize=None)
     def capture_time(batch_id):
-        batch = next(batch for _, batch, _, _ in chosen if batch.id == batch_id)
+        batch = batches[batch_id]
         source = (batch.snapshot or {}).get('erp_roster_filter_log') or {}
         versions = roster_record_source(batch)
         capture_id = source.get('capture_id')
@@ -373,7 +386,13 @@ def department_records(session, department=None, *, mode=None, runtime_dir=None)
         return None
 
     projected = []
-    for item, batch, execution, dept in chosen:
+    executions = {}
+    for offset in range(0, len(chosen), 500):
+        ids = [row[0].id for row in chosen[offset:offset + 500]]
+        executions.update((e.item_id, e) for e in session.scalars(
+            select(Execution).where(Execution.item_id.in_(ids))))
+    for item, batch, dept in chosen:
+        execution = executions.get(item.id)
         record = public_record(item, batch, execution, dept, record_seller(item, batch, ownerships, names))
         # 名单保护记录仅关联其本人同部门采集归档的 queried_at；不使用入库时间冒充采集时间。
         if record['display_time'] is None and item.status == '不调价':
@@ -384,11 +403,10 @@ def department_records(session, department=None, *, mode=None, runtime_dir=None)
         if entry['id'] == selected:
             entry['total'] = len(items)
     # 无法完成采集的人员没有可信商品键，单独显示范围异常，不伪造商品或零保护数量。
-    scope_query = select(Batch).where(Batch.run_key.like('erp-roster:%:history:%'))
-    if mode is not None:
-        scope_query = scope_query.where(Batch.mode == mode)
     scope_issues = []
-    for saved in session.scalars(scope_query):
+    for saved in batches.values():
+        if not saved.run_key.startswith('erp-roster:') or ':history:' not in saved.run_key:
+            continue
         source = (saved.snapshot or {}).get('erp_roster_filter_log') or {}
         if (source and source.get('capture_complete') is False
                 and 'department:' + source['department'] == selected):
@@ -399,6 +417,6 @@ def department_records(session, department=None, *, mode=None, runtime_dir=None)
         'scope_issues': scope_issues,
         'departments': departments, 'department': selected, 'total': len(items),
         'counts': dict(Counter(item['status'] for item in items)),
-        'shops': len({(item.key.get('platform'), item.key.get('shop_id')) for item, _, _, _ in chosen}),
+        'shops': len({(item.key.get('platform'), item.key.get('shop_id')) for item, _, _ in chosen}),
         'items': items,
     }
