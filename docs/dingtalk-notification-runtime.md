@@ -1,6 +1,6 @@
 # 钉钉机器人真实通知
 
-2026-11-19 按用户要求接通运行。当前只接入已确认归属，不能将人员目录当作全量商品归属。
+生产由四部门定时任务生成销售员业务通知，机器人按本批 ERP 姓名私聊。网页查阅与商品操作沿用网站的归属权限。
 
 ## 当前通道
 
@@ -12,7 +12,7 @@
 - https://open.dingtalk.com/document/development/chatbots-send-one-on-one-chat-messages-in-batches
 - https://open.dingtalk.com/document/development/chatbot-batch-query-the-read-status-of-messages
 
-## 常驻进程
+## 本机常驻进程
 
 WSL `/home/developer/projects/loss-repricing` 内运行 `.venv/bin/python -m app.notification_worker`，PYTHONPATH 指向 backend。该进程只打开配置指定的真实档案、为 live 批次生成去重通知和处理 outbox，不加载价格上传适配器、不领取价格任务。现有只读网页继续独立运行。
 
@@ -38,7 +38,9 @@ Windows 任务计划注册被系统拒绝访问，实际使用当前用户 HKCU 
 
 固定七人名单、名单日期调度及专用提交／零库存续跑入口已删除，不再维护七人的姓名与部门限制。普通任务按原有定时开关运行，历史记录查询、下载和已提交／结果未知的独立核验保留。
 
-后续业务通知按 ERP 销售员姓名查询本项目 `LR_RUNTIME_DIR/dingtalk_users.json` 的钉钉人员目录，取得唯一的字符串 User ID 后定向发送，不再配置 `LR_DING_ROSTER_USERIDS`。普通批次没有留存 ERP 姓名时，使用当前已授权且启用账号的确认姓名查询；网页归属权限不变，管理员告警仍使用独立告警 ID。发送时读取已有目录文件，本次没有调用钉钉通讯录接口或刷新真实目录。同名或未查到的销售员只记录该收件人的通知问题，不改发其他人，不影响取数、算价或价格核验。人员目录用于收件人解析，不赋予网页权限或商品归属。
+四部门正式批次按商品记录里的 ERP 销售员姓名分组，每人一张卡片。投递用该姓名查询 `LR_RUNTIME_DIR/dingtalk_users.json` 的唯一启用 User ID。缺姓名或目录无法唯一匹配时，该组留在待发队列并记录原因。通用网页归属通知、主管升级和管理员告警各用原有收件人规则。
+
+生产用 `deploy/dingtalk-notifications.conf` 同时配置 `loss-repricing-worker` 和 `loss-repricing-api`。将其安装到两个服务的 `.service.d` 目录，替换已有的通知配置片段，然后重新加载 systemd 并重启这两个服务。两者共用 `/opt/loss-repricing/roster-notifications.env` 内的应用凭据，开关为 `LR_DING_ENABLED=true`。
 
 ## 两处钉盘提价日志（2026-11-25 用户确认）
 
@@ -54,7 +56,7 @@ Windows 任务计划注册被系统拒绝访问，实际使用当前用户 HKCU 
 
 ## 人员与验收范围
 
-用户已确认吴娟负责的商品 1732512893083550998，目标级归属已绑定吴娟的独立钉钉 userId，不赋予自动调价或修正权限。人员目录 `runtime/dingtalk_users.json` 中其余人员仅为候选绑定依据，尚不等于所有店铺/商品已确认归属。未来已绑定归属的 live 批次自动通知；其他负责人未绑定时须补充准确归属。
+用户已确认吴娟负责的商品 1732512893083550998，目标级归属已绑定吴娟的独立钉钉 userId，不赋予自动调价或修正权限。人员目录 `runtime/dingtalk_users.json` 中其余人员仅为候选绑定依据，尚不等于所有店铺/商品已确认归属。该归属用于通用批次及网页权限，四部门批次的私聊收件人直接取 ERP 姓名。
 
 给常福生的联通测试已查到真实 READ 回执，证据存于 `runtime/dingtalk-connection-check.json`。业务推送回执存于真实档案 notices.delivery_evidence；不要把送达或已读当成业务处理完成或价格生效。
 

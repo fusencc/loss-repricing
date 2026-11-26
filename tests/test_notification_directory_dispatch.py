@@ -165,3 +165,62 @@ def test_escalation_resolves_authorized_supervisor_not_erp_seller(notices_contex
     monkeypatch.setattr(DingTalkClient, 'send_notice', send)
     dispatch_notices(factory, config)
     assert set(sent) == {'ding-seller', 'ding-manager'}
+
+
+def test_department_sends_each_erp_seller_their_own_items_without_web_ownership(notices_context, monkeypatch):
+    factory, config = notices_context
+    enable(config)
+    directory = {'users': [
+        {'name': '石乔', 'user_id': 'staff-stone', 'active': True},
+        {'name': '田雨', 'user_id': 'staff-rain', 'active': True},
+    ]}
+    (config.runtime_dir / 'dingtalk_users.json').write_text(json.dumps(directory), encoding='utf-8')
+    with factory.begin() as session:
+        session.get(Batch, 'b').run_key = 'erp-department:2026-11-05:Tiktok一部'
+        original = session.get(Item, 'i')
+        # 首个商品在网页上属于其他人，其余商品没有网页归属。
+        original.reason = '证据甲'
+        original.decision = {'trace': {'erp_department': {'salesperson': ' 石乔 '}}}
+        for ident, name in [('乙', '田雨'), ('丙', '石乔'), ('丁', '查无此人')]:
+            session.add(Item(id=ident, batch_id='b', variant_id='v'+ident,
+                key={**original.key, 'shop_id': '未绑定', 'sku': ident}, status='待处理',
+                phase='failed', reason='证据'+ident, updated_at=original.updated_at,
+                decision={'trace': {'erp_department': {'salesperson': name}}}))
+    sent = []
+    def send(client, userid, title, message, url):
+        sent.append((userid, message))
+        return {'state': 'accepted', 'task_id': 'task-' + userid}
+    monkeypatch.setattr(DingTalkClient, 'send_notice', send)
+    monkeypatch.setattr(DingTalkClient, 'query_notice', lambda *args: {'state': 'read'})
+    enqueue_batch_notices(factory, 'b')
+    dispatch_notices(factory, config)
+    enqueue_batch_notices(factory, 'b')
+    dispatch_notices(factory, config)
+    assert sorted(uid for uid, _ in sent) == ['staff-rain', 'staff-stone']
+    cards = dict(sent)
+    assert '共处理**2**条' in cards['staff-stone']
+    assert '证据甲' in cards['staff-stone'] and '证据丙' in cards['staff-stone']
+    assert '证据乙' not in cards['staff-stone'] and '证据丁' not in cards['staff-stone']
+    assert '共处理**1**条' in cards['staff-rain'] and '证据乙' in cards['staff-rain']
+    assert '证据甲' not in cards['staff-rain']
+    with factory() as session:
+        rows = list(session.scalars(select(Notice)))
+        assert len(rows) == 3
+        assert sorted(row.recipient_userid for row in rows if row.delivery_state == 'read') == ['staff-rain', 'staff-stone']
+        missing = next(row for row in rows if row.delivery_state == 'pending')
+        assert missing.item_ids == ['丁'] and '唯一' in missing.last_error
+
+
+def test_department_notice_still_requires_item_access_in_the_web_inbox(notices_context):
+    from app.services.coordination import Principal
+    from app.services.notifications import notice_visible
+
+    factory, _ = notices_context
+    with factory.begin() as session:
+        session.get(Batch, 'b').run_key = 'erp-department:2026-11-05:Tiktok一部'
+        session.get(Item, 'i').decision = {'trace': {'erp_department': {'salesperson': 'seller'}}}
+    enqueue_batch_notices(factory, 'b')
+    with factory() as session:
+        notice = session.scalars(select(Notice)).one()
+        assert notice_visible(session, Principal('seller', 'seller', 'seller', 'sales'), notice)
+        assert not notice_visible(session, Principal('other', 'other', 'seller', 'sales'), notice)

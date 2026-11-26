@@ -1,7 +1,7 @@
 """Persistent notices. Unknown sends never become retryable; only explicit failure can retry."""
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 import time
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -171,7 +171,7 @@ def enqueue_batch_notices(factory, batch_id, *, existing_only=False):
         return write_batch_notices(session, batch_id, existing_only=existing_only)
 
 
-def write_batch_notices(session, batch_id, *, existing_only=False):
+def _account_notice_groups(session, batch_id):
     from app.models.coordination import Ownership
     from app.services.coordination import ownership_scopes
 
@@ -198,14 +198,52 @@ def write_batch_notices(session, batch_id, *, existing_only=False):
         if owner_id is None:
             unassigned.add(recipient)
 
-    added = 0
     for recipient, items in groups.items():
-        key = f"batch:{batch_id}:{recipient}"
-        summary = _summary(items)
-        summary["unassigned"] = recipient in unassigned
+        yield f'batch:{batch_id}:{recipient}', recipient, items, {'unassigned': recipient in unassigned}
+
+
+_ERP_SELLER = Item.decision['trace']['erp_department']['salesperson'].as_string().label('salesperson')
+
+
+def _department_notice_groups(session, batch_id):
+    from app.models.coordination import UserAccount
+
+    # 网页收件箱仍受商品访问权限控制。钉钉业务收件人只取本批 ERP 姓名。
+    accounts = defaultdict(list)
+    for ident, name in session.execute(select(UserAccount.id, UserAccount.display_name).where(UserAccount.active)):
+        accounts[name.strip()].append(ident)
+    groups = defaultdict(list)
+    for row in session.execute(select(Item.id, Item.status, _ERP_SELLER).where(Item.batch_id == batch_id)):
+        name = row.salesperson.strip() if isinstance(row.salesperson, str) else ''
+        groups[name].append(row)
+    for name, items in groups.items():
+        viewers = accounts.get(name, ())
+        inbox = viewers[0] if name and len(viewers) == 1 else 'admin'
+        key = f'erp-salesperson:{batch_id}:{uuid5(NAMESPACE_URL, name).hex}'
+        yield key, inbox, items, {'erp_salesperson': name, 'unassigned': not name}
+
+
+def _department_notice_items(session, notice, name):
+    current = []
+    query = select(Item.id, Item.key, Item.status, Item.reason, Item.updated_at, _ERP_SELLER).where(
+        Item.batch_id == notice.batch_id)
+    for start in range(0, len(notice.item_ids), 500):
+        rows = session.execute(query.where(Item.id.in_(notice.item_ids[start:start + 500])))
+        current.extend(row for row in rows if isinstance(row.salesperson, str) and row.salesperson.strip() == name)
+    return current
+
+
+def write_batch_notices(session, batch_id, *, existing_only=False):
+    run_key = session.scalar(select(Batch.run_key).where(Batch.id == batch_id, Batch.mode == 'live'))
+    groups = (_department_notice_groups(session, batch_id) if run_key and run_key.startswith('erp-department:')
+              else _account_notice_groups(session, batch_id))
+    added = 0
+    for key, recipient, items, routing in groups:
+        summary = dict(_summary(items), **routing)
         existing=session.scalar(select(Notice).where(Notice.dedupe_key==key).with_for_update())
         if existing:
             # Refresh web business state only. Delivery, receipt time, ack and evidence are immutable here.
+            existing.recipient_id=recipient
             existing.item_ids=[i.id for i in items]
             existing.summary=summary
             continue
@@ -376,7 +414,23 @@ def _dispatch_notices(factory,config,owner):
                     send=None
                 else:
                     operation = _operation_notice(notice)
-                    if not operation:
+                    may_send = client is not None and utcnow().astimezone(BEIJING).hour >= 8
+                    name = notice.summary.get('erp_salesperson')
+                    if 'erp_salesperson' in notice.summary:
+                        if not name:
+                            notice.last_error = '本批 ERP 记录没有销售员姓名，未发送'
+                            continue
+                        if not may_send:
+                            continue
+                        current = _department_notice_items(session, notice, name)
+                        if not current:
+                            notice.delivery_state = 'cancelled'
+                            notice.last_error = '本批已无此销售员的记录'
+                            notice.updated_at = stamp()
+                            continue
+                        notice.item_ids = [item.id for item in current]
+                        notice.summary = dict(_summary(current), erp_salesperson=name)
+                    elif not operation:
                         current = _recipient_items(session,notice)
                         if not current:
                             notice.delivery_state='cancelled'
@@ -385,6 +439,8 @@ def _dispatch_notices(factory,config,owner):
                             continue
                         UserAccount, resolve = _coord()
                         user = session.get(UserAccount, notice.recipient_id) if notice.recipient_id != 'admin' else None
+                        if user and user.active:
+                            name = user.display_name.strip()
                         if not _warning_notice(notice):
                             current = _salesperson_items(session, notice, current, user)
                             if not current:
@@ -394,15 +450,14 @@ def _dispatch_notices(factory,config,owner):
                         notice.summary=(dict(_summary(current),kind='warning',title='亏损提价告警',exceptions=0)
                                         if _warning_notice(notice) else _summary(current,bool(notice.parent_id)))
                         notice.summary=dict(notice.summary, unassigned=any(resolve(session,i.key) is None for i in current))
-                    if client is None or utcnow().astimezone(BEIJING).hour < 8:
+                    if not may_send:
                         # 早间通知留在持久队列，回执查询照常进行。
                         continue
                     if _admin_alert(notice):
                         userid = getattr(config, 'ding_alert_userid', '')
                         error = '管理员告警未配置钉钉userid，未发送'
-                    elif user and user.active:
-                        # ERP 姓名已逐条与负责人确认一致；主管升级通知仍发给授权主管本人。
-                        recipient = resolve_salesperson_userid(config, user.display_name.strip())
+                    elif name:
+                        recipient = resolve_salesperson_userid(config, name)
                         userid, error = recipient.get('userid'), recipient.get('error')
                     else:
                         userid, error = None, '负责人缺少已确认的启用账号姓名，未发送'
@@ -439,4 +494,3 @@ def _dispatch_notices(factory,config,owner):
         if client:
             client.close()
     return notification_status(factory,config)
-
