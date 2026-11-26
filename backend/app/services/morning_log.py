@@ -1,4 +1,4 @@
-"""上午任务的 Excel 日志，独立于价格提交和机器人私聊。"""
+"""早上任务的 Excel 日志，独立于价格提交和机器人私聊。"""
 import base64
 from datetime import date, datetime
 from hashlib import sha256
@@ -57,7 +57,7 @@ def _records(factory, day):
             if record['synthetic']:
                 continue
             projected.append(record)
-            # 交易号必须追溯到本次执行的原请求，不借后来的重算结果补成功订单。
+            # 成功订单取本次执行的来源，不借后来的重算结果补行。
             request = execution.request if execution else None
             if request and all((request.get('key') or {}).get(k) == item.key.get(k) for k in KEY_FIELDS):
                 sources[item.id] = request.get('trace') or {}
@@ -116,7 +116,7 @@ def save_morning_log(config, day, *, factory):
     return _save_book(config, day, 'morning-logs', [('明细', DETAIL_HEADERS, details)])
 
 
-def _trade_catalog(config, capture_id):
+def _order_owners(config, capture_id):
     from app.services.erp_capture_store import load_capture
     capture = load_capture(config.runtime_dir, capture_id)
     catalog = {}
@@ -124,62 +124,67 @@ def _trade_catalog(config, capture_id):
         for file in group.get('files', []):
             if '-order-finance-' not in Path(file['file']).name:
                 continue
-            # 交易号来自原始订单列表导出的同名列；ERP订单编号可能拼接店铺编码，禁止截断猜测。
             book = load_workbook(file['file'], read_only=True, data_only=True)
             try:
                 for sheet in book:
                     rows = sheet.iter_rows(values_only=True)
                     headers = next(rows, ())
-                    columns = ('订单编号', '交易号', '店铺', '销售员')
+                    columns = ('订单编号', '店铺', '销售员')
                     if not all(column in headers for column in columns):
                         continue
                     indexes = [headers.index(column) for column in columns]
                     for row in rows:
-                        order, trade, shop, seller = (row[index] for index in indexes)
-                        # 长交易号只有源端文本可保证精度；缺失或数值类型不冒充可过滤的编号。
-                        if all(isinstance(value, str) and value.strip() for value in (order, trade, shop, seller)):
-                            catalog.setdefault(order, set()).add((trade, shop, seller))
+                        order, shop, seller = (row[index] for index in indexes)
+                        if all(isinstance(value, str) and value.strip() for value in (order, shop, seller)):
+                            catalog.setdefault(order, set()).add((shop, seller))
             finally:
                 book.close()
     return catalog
 
 
 def save_success_log(config, day, *, factory):
-    from app.services.records import KEY_FIELDS
+    from app.services.records import KEY_FIELDS, display_text
     records, sources = _records(factory, day)
     catalogs, orders, times = {}, set(), []
     for record in records:
         execution = record.get('execution') or {}
         if record['status'] != '已提价' and not (record['status'] == '已核验' and execution.get('state') == 'verified'):
             continue
+        item_id = display_text(record['key']['item_id'])
+        if not item_id:
+            logger.warning('本条提价记录缺少 itemID，未导出：%s', record['id'])
+            continue
         trace = sources.get(record['id']) or {}
         capture_id = (trace.get('source_versions') or {}).get('erp_capture_id')
         if not capture_id or not trace.get('source_rows'):
-            logger.warning('本条提价记录缺少原执行订单来源，未导出交易号：%s', record['id'])
+            logger.warning('本条提价记录缺少原执行订单来源，未导出：%s', record['id'])
             continue
         if capture_id not in catalogs:
-            catalogs[capture_id] = _trade_catalog(config, capture_id)
+            catalogs[capture_id] = _order_owners(config, capture_id)
         for row in trace['source_rows']:
             if row.get('row_id') in (trace.get('excluded_source_rows') or {}):
                 continue
             if row.get('key') and any(row['key'].get(k) != record['key'].get(k) for k in KEY_FIELDS):
-                logger.warning('本条订单商品键不一致，未导出交易号：%s', record['id'])
+                logger.warning('本条订单商品键不一致，未导出：%s', record['id'])
                 continue
-            matches = catalogs[capture_id].get(row.get('order_id'), set())
+            order_id = row.get('order_id')
+            matches = catalogs[capture_id].get(order_id, ())
             if len(matches) != 1:
-                logger.warning('本条订单交易号缺失或不唯一，未导出：%s', record['id'])
+                logger.warning('本条订单归属缺失或不唯一，未导出：%s', record['id'])
                 continue
-            trade, shop, seller = next(iter(matches))
+            shop, seller = next(iter(matches))
             if seller != record['seller']['name'] or (record['shop_name'] and shop != record['shop_name']):
-                logger.warning('本条订单店铺或销售员不符，未导出交易号：%s', record['id'])
+                logger.warning('本条订单店铺或销售员不符，未导出：%s', record['id'])
                 continue
-            orders.add((trade, shop, seller, '提价成功'))
+            # 同一订单商品的重复来源只算一次，不合并不同订单里的同一商品。
+            orders.add((order_id, shop, seller, item_id))
         times.append(record['updated_at'])
     when = (datetime.fromisoformat(max(times)).astimezone(BEIJING).strftime('%Y-%m-%d %H:%M:%S')
             if times else None)
+    rows = [(item_id, shop, seller, '提价成功') for _, shop, seller, item_id in sorted(orders)]
     return _save_book(config, day, 'success-logs', [
-        ('成功清单', ('交易号', '店铺', '销售', '状态'), sorted(orders)),
-        ('失败清单', ('交易号', '店铺', '销售', '失败原因'), []),
+        ('成功清单', ('itemID', '店铺', '销售', '状态'), rows),
+        ('失败清单', ('itemID', '店铺', '销售', '失败原因'), []),
         ('汇总', ('运行时间', '总条数', '成功/处理中', '明确失败', '已剔除'),
          [(when, len(orders), len(orders), 0, 0)]),
     ])

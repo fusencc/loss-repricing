@@ -58,7 +58,7 @@ def find_drive_workbook(space, parent, name, request, inspect):
         cursors.add(cursor)
         params['nextToken'] = cursor
     if len(matches) > 1:
-        raise RuntimeError('钉盘存在多份同名上午日志')
+        raise RuntimeError('钉盘存在多份同名早上日志')
     if matches:
         row = matches[0]
         if not (row.get('uuid') and row.get('type')):
