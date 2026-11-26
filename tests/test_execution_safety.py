@@ -835,6 +835,51 @@ def test_verification_uses_exact_target_instead_of_saved_repeating_decimal(safet
         assert session.get(VariantGuard, original.variant_id).execution_id == original.id
 
 
+@pytest.mark.parametrize('recheck', ['zero', 'missing', 'query_error', 'wrong_window'])
+def test_live_auto_checks_history_only_at_screening_and_before_upload(safety_context, monkeypatch, recheck):
+    factory, cfg, adapter, clock = safety_context
+    adapter.mode = 'live'
+    cfg.live_submit_enabled = True
+    adapter.readiness = lambda: {'contract_ready': True, 'verified_sites': ['MY']}
+    calls = []
+
+    def official(settings, keys, *, now):
+        ids = [key.item_id for key in keys]
+        calls.append(ids)
+        records = {item: {'status': 'ok', 'count': int(item == ('I0' if len(ids) > 1 else 'I1'))}
+                   for item in ids}
+        hours = 72
+        if ids == ['I2']:
+            if recheck == 'missing':
+                records = {}
+            elif recheck == 'query_error':
+                records['I2'] = {'status': 'business_error', 'count': None}
+            elif recheck == 'wrong_window':
+                records['I2']['count'] = 1
+                hours = 48
+        return {'source_id': f'official-{len(calls)}', 'window_start': (now - timedelta(hours=hours)).isoformat(),
+                'window_end': now.isoformat(), 'records': records}
+
+    monkeypatch.setattr('app.services.execution.capture_recent_price_changes', official)
+    batch_id = PricingService(factory, adapter, cfg).run_batch('double-check-history')
+
+    assert len(adapter.collections) == 2  # 刷新现价不重复查历史
+    assert calls[0] == ['I0', 'I1', 'I2']
+    assert sorted(calls[1:]) == [['I1'], ['I2']]
+    assert [decision.key.item_id for _, decision in adapter.submissions] == ['I2']
+    with factory() as session:
+        items = {row.key['item_id']: row for row in session.scalars(select(Item).where(Item.batch_id == batch_id))}
+        assert items['I0'].status == items['I1'].status == '不调价'
+        assert '提交前查到' in items['I1'].reason
+        execution = session.scalars(select(Execution)).one()
+        assert execution.item_id == items['I2'].id
+        trace = execution.request['trace']
+        assert trace['online_rows'][0]['recent_price_log']['source_id'] == 'official-1'
+        assert trace['online_rows'][0]['recent_price_log']['count'] == 0
+        assert 'official_price_history_before_submit' in trace
+        assert ('unknown_history' in trace.get('warning_codes', [])) == (recheck != 'zero')
+
+
 def test_unknown_history_before_submit_warns_and_reaches_claim(safety_context, monkeypatch):
     from unittest.mock import Mock
     factory, cfg, adapter, clock = safety_context

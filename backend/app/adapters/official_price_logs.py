@@ -7,6 +7,7 @@ latest接口只有金额，没有币种、任务ID和时间；只有和对应明
 from datetime import date, datetime, timezone, timedelta
 from decimal import Decimal
 from hashlib import sha256
+import logging
 from pathlib import Path
 from uuid import uuid4
 import httpx
@@ -18,7 +19,7 @@ from app.adapters.transport_privacy import private_request
 from app.domain.engine import BEIJING, SITE_CURRENCIES
 from app.domain.money import MoneyRatio
 from app.domain.types import VariantKey, RecentPriceLog
-from app.services.erp_capture_store import write_verified
+from app.services.erp_capture_store import write_json, write_verified
 
 VERSION = 'official-price-log-20261117-v1'
 COUNT_PATH = '/Api/tiktok-schedule-server/aibp/getOperationLogCountBySellerSkuIdsAndTypeAndCompleteTime'
@@ -218,7 +219,10 @@ def capture_recent_price_changes(settings, keys, *, now=None, client=None, auth=
         if owned:client.close()
     result['completed_at'] = _now()
     result['acquisition_complete'] = all(r['status']=='ok' for r in result['records'].values())
-    write_verified(path,result)
+    try:
+        write_json(path, result)
+    except OSError:
+        logging.getLogger(__name__).warning('近72小时调价日志归档写入失败，仍使用接口结果')
     return result
 
 

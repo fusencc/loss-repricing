@@ -3,13 +3,14 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 import time
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from app.models import Batch, Item, WorkerLease
 from app.models.notifications import Notice
 from app.adapters.dingtalk import DingTalkClient
 from app.adapters.dingtalk_directory import resolve_salesperson_userid
 from app.services.store import stamp, utcnow, BEIJING
+from app.services.operation_alerts import operation_card, watch_operations
 
 
 NOTICE_ITEM_STATES = ('待处理', '待核验', '已提价', '已核验', '不调价')
@@ -50,6 +51,14 @@ def _warnings(item):
 
 def _warning_notice(notice):
     return notice.summary.get('kind') == 'warning'
+
+
+def _operation_notice(notice):
+    return notice.batch_id is None and notice.summary.get('kind') == 'operation'
+
+
+def _admin_alert(notice):
+    return _warning_notice(notice) or _operation_notice(notice)
 
 
 def _recipient_items(session, notice):
@@ -240,7 +249,7 @@ def _escalate(factory):
         originals=session.scalars(select(Notice).where(Notice.parent_id.is_(None),Notice.ack_at.is_(None),
                                                        Notice.escalated_at.is_(None))).all()
         for notice in originals:
-            if _warning_notice(notice):
+            if _admin_alert(notice):
                 continue
             if now-datetime.fromisoformat(notice.created_at)<timedelta(hours=24):
                 continue
@@ -324,14 +333,21 @@ def _dispatch_notices(factory,config,owner):
     with factory.begin() as session:
         session.execute(update(Notice).where(Notice.delivery_state=='sending').values(
             delivery_state='unknown',last_error='发送过程中断，结果未知，禁止自动重发',updated_at=stamp(utcnow())))
+    live_operations = getattr(config, 'adapter_mode', 'live') == 'live'
+    if live_operations:
+        watch_operations(factory, utcnow())
     _escalate(factory)
     state=notification_status(factory,config)
     # 关闭钉钉投递时仍要清理已失去归属的待发通知，避免旧负责人积压。
     client = DingTalkClient(config) if state['enabled'] and state['configured'] else None
     try:
         with factory() as session:
-            ids=list(session.scalars(select(Notice.id).join(Batch, Batch.id == Notice.batch_id).where(
-                Batch.mode == 'live', Notice.synthetic.is_(False), Notice.delivery_state.in_(['pending','accepted','delivered']))
+            eligible = Batch.mode == 'live'
+            if live_operations:
+                eligible = or_(eligible, and_(Notice.batch_id.is_(None), Notice.recipient_id == 'admin',
+                                              Notice.summary['kind'].as_string() == 'operation'))
+            ids=list(session.scalars(select(Notice.id).outerjoin(Batch, Batch.id == Notice.batch_id).where(
+                eligible, Notice.synthetic.is_(False), Notice.delivery_state.in_(['pending','accepted','delivered']))
                 .order_by(Notice.created_at, Notice.id)))
         for notice_id in ids:
             if not _renew_dispatch(factory,owner):
@@ -353,29 +369,29 @@ def _dispatch_notices(factory,config,owner):
                     query=(notice.task_id,notice.recipient_userid)
                     send=None
                 else:
-                    current=_recipient_items(session,notice)
-                    if not current:
-                        notice.delivery_state='cancelled'
-                        notice.last_error='已无当前有权查看的条目，通知已取消'
-                        notice.updated_at=stamp()
-                        continue
-                    UserAccount,_=_coord()
-                    user=session.get(UserAccount,notice.recipient_id) if notice.recipient_id!='admin' else None
-                    if not _warning_notice(notice):
-                        current = _salesperson_items(session, notice, current, user)
+                    operation = _operation_notice(notice)
+                    if not operation:
+                        current = _recipient_items(session,notice)
                         if not current:
-                            notice.last_error = 'ERP销售员与当前负责人姓名不一致，未发送'
+                            notice.delivery_state='cancelled'
+                            notice.last_error='已无当前有权查看的条目，通知已取消'
+                            notice.updated_at=stamp()
                             continue
-                    notice.item_ids=[i.id for i in current]
-                    notice.summary=(dict(_summary(current),kind='warning',title='亏损提价告警',exceptions=0)
-                                    if _warning_notice(notice) else _summary(current,bool(notice.parent_id)))
-                    _,resolve=_coord()
-                    unassigned=any(resolve(session,i.key) is None for i in current)
-                    notice.summary=dict(notice.summary,unassigned=unassigned)
+                        UserAccount, resolve = _coord()
+                        user = session.get(UserAccount, notice.recipient_id) if notice.recipient_id != 'admin' else None
+                        if not _warning_notice(notice):
+                            current = _salesperson_items(session, notice, current, user)
+                            if not current:
+                                notice.last_error = 'ERP销售员与当前负责人姓名不一致，未发送'
+                                continue
+                        notice.item_ids=[i.id for i in current]
+                        notice.summary=(dict(_summary(current),kind='warning',title='亏损提价告警',exceptions=0)
+                                        if _warning_notice(notice) else _summary(current,bool(notice.parent_id)))
+                        notice.summary=dict(notice.summary, unassigned=any(resolve(session,i.key) is None for i in current))
                     if client is None or utcnow().astimezone(BEIJING).hour < 8:
-                        # 早间通知留在持久队列，8 点后按原入队顺序发送；回执查询照常进行。
+                        # 早间通知留在持久队列，回执查询照常进行。
                         continue
-                    if _warning_notice(notice):
+                    if _admin_alert(notice):
                         userid = getattr(config, 'ding_alert_userid', '')
                         error = '管理员告警未配置钉钉userid，未发送'
                     elif user and user.active:
@@ -398,7 +414,7 @@ def _dispatch_notices(factory,config,owner):
                         continue
                     notice.recipient_userid=userid
                     summary=notice.summary
-                    text = _card_text(summary, current)
+                    text = operation_card(summary) if operation else _card_text(summary, current)
                     notice.delivery_evidence=list(notice.delivery_evidence or []) + [{
                         'operation':'send_intent','summary':dict(summary),'item_ids':list(notice.item_ids),
                         'title':summary['title'],'markdown':text,'at':stamp(utcnow())}]

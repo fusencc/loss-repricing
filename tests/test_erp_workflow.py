@@ -118,7 +118,8 @@ def test_fresh_collection_runs_download_clean_evaluate_and_archive(tmp_path, mon
         connections['bulk'] = (kwargs['web_session'],)
         capture, _ = run(settings.runtime_dir)
         capture['synthetic'] = True
-        capture['department'] = kwargs['department']
+        assert 'department' not in kwargs
+        capture['groups'][0]['rows'][0]['fields']['部门'] = 'Tiktok一部'
         collected.update(capture)
         return capture
     monkeypatch.setattr(erp_workflow, 'capture_erp_bulk', collect)
@@ -146,7 +147,9 @@ def test_fresh_collection_runs_download_clean_evaluate_and_archive(tmp_path, mon
     assert result['cleaning_status'] == 'saved'
     assert len(list((tmp_path / 'source-captures').rglob('*.xlsx'))) == 3
     with sqlite3.connect(tmp_path / 'erp-clean.sqlite3') as db:
-        assert db.execute('select count(*) from observations').fetchone()[0] == 1
+        # 集团原件和部门结果各有独立编号，只核对本部门的观察数。
+        assert db.execute('select count(*) from observations where capture_id=?',
+                          (result['capture_id'],)).fetchone()[0] == 1
     assert (Path(result['artifact_dir']) / 'pending-prices.json').is_file()
     candidates = json.loads(Path(result['seller_candidates_file']).read_text())
     assert candidates['capture_id'] == result['capture_id']

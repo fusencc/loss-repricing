@@ -74,7 +74,7 @@ def main():
         )
         saved = save_capture(settings.runtime_dir, result)
         path = settings.runtime_dir / 'source-captures' / (saved['capture_id'] + '.json')
-        print('capture_id=', saved['capture_id'], 'storage_verified=True')
+        print('capture_id=', saved['capture_id'], 'storage_saved=True')
         if 'cleaning_status' in saved:
             print('cleaning_status=', saved['cleaning_status'])
         print(path)

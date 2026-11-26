@@ -16,7 +16,7 @@ from app.db import transaction
 from app.domain.engine import evaluate
 from app.domain.types import Decision, Snapshot
 from app.models import Batch
-from app.services.erp_capture_store import CAPTURE_ID, load_capture, write_verified
+from app.services.erp_capture_store import CAPTURE_ID, load_capture, write_json
 from app.services.store import ERP_RECONCILIATION_PREFIX, stamp, write_decisions
 
 
@@ -85,44 +85,21 @@ def _public_preview(artifact):
     return report
 
 
-def save_pricing_preview(runtime_dir, capture_id, evidence=None, *, exports=None, current_fx=None, sales_source=None, native_source=None, order_preparation=None, order_headers_source=None, local_history_source=None, platform_source=None, online_preparation=None, fixed_fees_source=None):
-    capture = load_capture(runtime_dir, capture_id)
-    if sales_source is not None and (
-        sales_source['erp_capture_id'] != capture_id
-        or sales_source['synthetic'] != bool(capture.get('synthetic', False))
-        or sales_source['sample_only'] != bool(capture.get('sample_only', False))
-    ):
-        raise ValueError('销售来源与采集编号或样例属性不一致')
+def save_pricing_preview(runtime_dir, capture_id, evidence=None, **options):
+    report, _ = save_capture_preview(runtime_dir, load_capture(runtime_dir, capture_id), evidence, **options)
+    return report
+
+
+def save_capture_preview(runtime_dir, capture, evidence=None, *, exports=None, current_fx=None,
+                         sales_source=None, native_source=None, order_preparation=None, order_headers_source=None,
+                         local_history_source=None, platform_source=None, online_preparation=None, fixed_fees_source=None):
+    capture_id = capture['capture_id']
     if order_preparation is not None and (evidence is not None or exports is not None):
         raise ValueError('实时订单准备不能与文件对账输入混用')
-    if (order_preparation is not None and sales_source is not None
-            and order_preparation['references']['sales_source'] != sales_source['source_id']):
-        raise ValueError('实时订单准备与销售来源引用不一致')
-    if native_source is not None and (
-        native_source['erp_capture_id'] != capture_id
-        or native_source['synthetic'] != bool(capture.get('synthetic', False))
-        or native_source['sample_only'] != bool(capture.get('sample_only', False))
-        or (order_preparation is not None and order_preparation['references']['native_source'] != native_source['source_id'])
-    ):
-        raise ValueError('原生明细来源与采集、样本或订单准备引用不一致')
-    for label, source in (('本程序真实提价历史',local_history_source),('平台现态',platform_source),('当前费用',fixed_fees_source)):
-        if source is not None and (source['erp_capture_id'] != capture_id
-                or source['synthetic'] != bool(capture.get('synthetic', False))
-                or source['sample_only'] != bool(capture.get('sample_only', False))):
-            raise ValueError(label+'来源与采集或样本属性不一致')
-    if order_headers_source is not None and (
-        order_headers_source['erp_capture_id'] != capture_id
-        or order_headers_source['synthetic'] != bool(capture.get('synthetic', False))
-        or order_headers_source['sample_only'] != bool(capture.get('sample_only', False))
-        or (order_preparation is not None and order_preparation['references']['order_headers'] != order_headers_source['source_id'])
-    ):
-        raise ValueError('订单归属来源与采集、样本或订单准备引用不一致')
-    if online_preparation is not None:
-        for name, source in (('sales',sales_source),('platform',platform_source),
-                             ('local_history',local_history_source),('fixed_fees',fixed_fees_source)):
-            expected = source['source_id'] if source else None
-            if online_preparation['references'].get(name) != expected:
-                raise ValueError('实时在线准备与'+name+'来源引用不一致')
+    scope = (capture_id, bool(capture.get('synthetic')), bool(capture.get('sample_only')))
+    for source in (sales_source, native_source, order_headers_source, local_history_source, platform_source, fixed_fees_source):
+        if source is not None and (source['erp_capture_id'], source['synthetic'], source['sample_only']) != scope:
+            raise ValueError('来源与采集或样本属性不一致')
     preparation = _prepare_preview(capture, evidence, exports, current_fx=current_fx,
         order_preparation=order_preparation, online_preparation=online_preparation)
     artifact = dict(preparation.report, preview_id=uuid4().hex)
@@ -142,16 +119,16 @@ def save_pricing_preview(runtime_dir, capture_id, evidence=None, *, exports=None
     if order_preparation is not None:
         path = Path(runtime_dir) / 'erp-order-preparations' / (uuid4().hex + '.json')
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        write_verified(path, order_preparation)
+        digest = write_json(path, order_preparation, with_digest=True)
         artifact['references']['order_preparation'] = {'artifact_file':str(path.resolve()),
-            'sha256':sha256(path.read_bytes()).hexdigest(), 'version':order_preparation['version'],
+            'sha256':digest, 'version':order_preparation['version'],
             'summary':order_preparation['summary']}
     if online_preparation is not None:
         path = Path(runtime_dir) / 'erp-online-preparations' / (uuid4().hex + '.json')
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        write_verified(path,online_preparation)
+        digest = write_json(path, online_preparation, with_digest=True)
         artifact['references']['online_preparation'] = {'artifact_file':str(path.resolve()),
-            'sha256':sha256(path.read_bytes()).hexdigest(),'version':online_preparation['version'],
+            'sha256':digest,'version':online_preparation['version'],
             'online_records':len(online_preparation['online']),'issues':len(online_preparation['issues'])}
     snapshot = preparation.snapshot
     if snapshot is not None and snapshot.lines:
@@ -159,8 +136,8 @@ def save_pricing_preview(runtime_dir, capture_id, evidence=None, *, exports=None
         artifact["_snapshot"] = snapshot.model_dump(mode="json")
     directory = Path(runtime_dir) / "erp-pricing-previews"
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    write_verified(directory / (artifact["preview_id"] + ".json"), artifact)
-    return _public_preview(artifact)
+    digest = write_json(directory / (artifact['preview_id'] + '.json'), artifact, with_digest=True)
+    return _public_preview(artifact), digest
 
 
 def _load_pricing_artifact(runtime_dir, capture_id, preview_id):

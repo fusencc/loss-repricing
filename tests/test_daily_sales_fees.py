@@ -199,7 +199,7 @@ def test_workflow_refreshes_daily_fees_before_erp_collection(tmp_path,monkeypatc
         raise RuntimeError('stop after order proof')
     monkeypatch.setattr(erp_workflow,'capture_erp_bulk',stop)
     result = erp_workflow.run_workflow(settings)
-    assert result['departments'][0]['status'] == 'failed'
+    assert result['status'] == 'failed' and result['departments'] == []
     assert events==['fees','erp']
 
 

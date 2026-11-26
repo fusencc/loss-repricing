@@ -40,25 +40,29 @@ class PricingService:
         if self._roster_channel is not None:
             self._roster_channel.close()
 
-    def _enrich(self, snapshot):
+    def _enrich(self, snapshot, *, history_from=None):
         """真实近期调价由开放接口证明；本地档案只补充未知执行锁和人工保护。"""
         result = snapshot.model_copy(deep=True)
         if self.adapter.mode == 'live':
-            history = {}
-            keys = {row.key.item_id: row.key for row in result.online}
-            official = capture_recent_price_changes(self.config, list(keys.values()), now=utcnow())
-            result.source_versions['recent_price_history'] = official['source_id']
-            for item_id, key in keys.items():
-                try:
-                    history[item_id] = recent_price_log_for(official, key)
-                except (ValueError, TypeError, KeyError):
-                    history[item_id] = None
+            if history_from is not None:
+                history = {row.key.item_id: row.recent_price_log for row in history_from.online}
+                result.source_versions['recent_price_history'] = history_from.source_versions['recent_price_history']
+            else:
+                history = {}
+                keys = {row.key.item_id: row.key for row in result.online}
+                official = capture_recent_price_changes(self.config, list(keys.values()), now=utcnow())
+                result.source_versions['recent_price_history'] = official['source_id']
+                for item_id, key in keys.items():
+                    try:
+                        history[item_id] = recent_price_log_for(official, key)
+                    except (ValueError, TypeError, KeyError):
+                        history[item_id] = None
         with self.factory() as session:
             protections = session.scalars(select(Protection).where(Protection.active.is_(True))).all()
             for online in result.online:
                 guard = session.get(VariantGuard, online.key.target_identity())
                 if self.adapter.mode == 'live':
-                    online.recent_price_log = history[online.key.item_id]
+                    online.recent_price_log = history.get(online.key.item_id)
                     online.history_known = online.recent_price_log is not None
                     online.last_increase_at = None
                     pending = session.scalar(select(Execution.id).join(Item,Execution.item_id==Item.id)
@@ -205,7 +209,7 @@ class PricingService:
             if fresh_at is None or (utcnow() - fresh_at).total_seconds() >= 300:
                 try:
                     latest = self.adapter.collect(business_date)
-                    refreshed = self._enrich(latest)
+                    refreshed = self._enrich(latest, history_from=snapshot)
                 except SourceUnavailable:
                     if utcnow().astimezone(BEIJING).date() != business_date:
                         self._rollover(run_key, batch_id, selected_item_id)
@@ -374,19 +378,20 @@ class PricingService:
             self._hold(item_id, reason)
             return
         if self.adapter.mode == 'live' and not manual:
-            official = capture_recent_price_changes(self.config,[decision.key],now=utcnow())
-            decision.trace['official_price_history_before_submit'] = official
             try:
-                recent = recent_price_log_for(official,decision.key)
-            except (ValueError,TypeError,KeyError):
-                recent = None
+                official = capture_recent_price_changes(self.config, [decision.key], now=utcnow())
+                decision.trace['official_price_history_before_submit'] = official
+                recent = recent_price_log_for(official, decision.key)
+            except (SourceUnavailable, ValueError, TypeError, KeyError):
+                # 首查已排除有记录的商品；复查未知不覆盖首查结果。
                 decision.trace.setdefault('warning_codes', []).append('unknown_history')
-                decision.trace.setdefault('warnings', []).append('提交前近72小时调价历史无法确认，仅告警')
-            if recent is not None and recent.count > 0:
-                decision.ready, decision.status = False, '不调价'
-                decision.reason_code, decision.reason = 'recent_price_change', '提交前查到近72小时调价日志，不调价'
-                self._hold(item_id,decision.reason,decision.status,decision=decision)
-                return
+                decision.trace.setdefault('warnings', []).append('提交前近72小时调价日志复查失败，沿用首查结果')
+            else:
+                if recent.count > 0:
+                    decision.ready, decision.status = False, '不调价'
+                    decision.reason_code, decision.reason = 'recent_price_change', '提交前查到近72小时调价日志，不调价'
+                    self._hold(item_id, decision.reason, decision.status, decision=decision)
+                    return
         execution_id = self._claim(item_id, decision)
         if not execution_id:
             return

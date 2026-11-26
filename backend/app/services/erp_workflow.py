@@ -2,7 +2,6 @@
 from collections import Counter
 from pathlib import Path
 from uuid import uuid4
-import json
 from hashlib import sha256
 import httpx
 
@@ -25,8 +24,11 @@ from decimal import Decimal
 from app.adapters.sales_batch_export import capture_sales_batch, export_activity_hints, select_export_candidates
 from app.adapters.sales_platform_capture import capture_platform_controls
 from app.adapters.live_online_preparation import prepare_online_states
-from app.services.erp_capture_store import load_capture, rebuild_clean_capture, save_capture, write_verified
-from app.services.erp_pricing import load_pricing_preview, save_pricing_preview
+from app.services.erp_capture_store import (
+    json_artifact_bytes, load_capture, rebuild_clean_capture, save_capture, write_json, write_verified,
+)
+from app.services.erp_department_capture import department_captures
+from app.services.erp_pricing import save_capture_preview
 from app.services.erp_seller_candidates import summarize_seller_candidates
 
 def filter_candidate_history(settings, targets, *, client=None, auth=None):
@@ -48,7 +50,7 @@ def filter_candidate_history(settings, targets, *, client=None, auth=None):
 
 
 def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, progress=None):
-    """按部门采集和算价；指定采集编号时回放单批。"""
+    """先采一次集团四来源，再按财务表部门批查订单；指定采集编号时回放。"""
     if capture_id is not None:
         rebuild_clean_capture(settings.runtime_dir, capture_id)
         capture = load_capture(settings.runtime_dir, capture_id)
@@ -76,28 +78,53 @@ def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, prog
             daily_fees = None
         current_fx = _capture_round_fx(settings)
         with _session(settings) as web_session:
+            if progress:
+                progress('阶段 1/2：按集团采集四类名单和订单财务表。')
+            try:
+                parent = save_capture(settings.runtime_dir, capture_erp_bulk(settings, progress=progress,
+                                                                            web_session=web_session))
+                summary['group_capture_id'] = parent['capture_id']
+                scoped, unassigned = department_captures(parent, ERP_DEPARTMENTS)
+                summary['unassigned_orders'] = unassigned
+            except Exception as error:
+                summary.update(_workflow_failure(error))
+                write_json(manifest, summary)
+                return summary
+            if progress:
+                progress('阶段 2/2：按财务表部门分组，批量读取订单店铺归属和原生商品明细。')
+            pending = {}
             for department in ERP_DEPARTMENTS:
                 capture = None
-                try:
-                    if progress:
-                        progress(f'开始采集 {department}。')
-                    collected = capture_erp_bulk(settings, department=department, progress=progress,
-                                                 web_session=web_session)
-                    capture = save_capture(settings.runtime_dir, collected)
-                    headers, native = _capture_erp_sources(settings, capture, progress, web_session)
-                    result = _evaluate_capture(settings, capture, replay=False, progress=progress,
-                        headers=headers, native=native, daily_fees=daily_fees, current_fx=current_fx,
-                        client=client, auth=auth)
-                except Exception as error:
-                    result = _workflow_failure(error, capture)
-                result['department'] = department
+                result = {'department': department, 'status': 'collecting', 'ready_prices': 0}
                 departments.append(result)
-                summary['ready_prices'] += result['ready_prices']
-                write_verified(manifest, summary)
-                if progress:
-                    progress(f"{department} 处理结果：{result['status']}。")
+                try:
+                    capture = save_capture(settings.runtime_dir, scoped.pop(department))
+                    if progress:
+                        progress(f'{department}：按本轮已导出的订单号批查。')
+                    headers, native = _capture_erp_sources(settings, capture, progress, web_session)
+                    pending[department] = capture, headers, native
+                    result.update(capture_id=capture['capture_id'], status='collected')
+                except Exception as error:
+                    result.update(_workflow_failure(error, capture))
+                write_json(manifest, summary)
 
-    if len(departments) == len(ERP_DEPARTMENTS) and all(department['status'] == 'completed' for department in departments):
+        for result in departments:
+            department = result['department']
+            if department not in pending:
+                continue
+            capture, headers, native = pending.pop(department)
+            try:
+                result.update(_evaluate_capture(settings, capture, replay=False, progress=progress,
+                    headers=headers, native=native, daily_fees=daily_fees, current_fx=current_fx,
+                    client=client, auth=auth))
+            except Exception as error:
+                result.update(_workflow_failure(error, capture))
+            summary['ready_prices'] += result['ready_prices']
+            write_json(manifest, summary)
+            if progress:
+                progress(f"{department} 处理结果：{result['status']}。")
+
+    if parent['capture_complete'] and not unassigned and all(d['status'] == 'completed' for d in departments):
         summary['status'] = 'completed'
     elif summary['ready_prices'] or any(department['status'] == 'completed' for department in departments):
         summary['status'] = 'needs_attention'
@@ -129,7 +156,7 @@ def _capture_round_fx(settings):
 
 
 def _capture_shortcut(capture):
-    return capture['capture_complete'] and not any(group['candidate_order_ids'] for group in capture['groups'])
+    return not any(group['candidate_order_ids'] for group in capture['groups'])
 
 
 def _capture_erp_sources(settings, capture, progress, web_session):
@@ -149,7 +176,7 @@ def _evaluate_capture(settings, capture, *, replay, evidence=None, exports=None,
     if not replay and _capture_shortcut(capture):
         return {
             'capture_id': capture_id, 'department': capture['department'], 'mode': 'capture',
-            'status': 'completed',
+            'status': 'completed' if capture['capture_complete'] else 'needs_attention',
             'capture_complete': capture['capture_complete'], 'cleaning_status': capture.get('cleaning_status', 'saved'),
             'ready_prices': 0, 'execution_allowed': False,
         }
@@ -174,17 +201,19 @@ def _evaluate_capture(settings, capture, *, replay, evidence=None, exports=None,
     sales_status = 'not_requested'
     fx_status = ('file_evidence' if evidence is not None else 'not_requested') if replay else (
         'saved' if current_fx is not None else 'unavailable')
+
+    def source_ref(source, *extra):
+        fields = ('source_id', 'erp_capture_id', 'synthetic', 'sample_only', 'acquisition_complete',
+                  'artifact_file', *extra)
+        return {**{key: source[key] for key in fields}, 'sha256': sha256(json_artifact_bytes(source)).hexdigest()}
+
     if not replay:
-        headers_ref = {key:headers[key] for key in ('source_id','erp_capture_id','synthetic','sample_only',
-            'acquisition_complete','artifact_file')}
-        headers_ref['sha256'] = sha256(Path(headers['artifact_file']).read_bytes()).hexdigest()
+        headers_ref = source_ref(headers)
         headers_status = 'saved' if headers['acquisition_complete'] else 'partial'
         if native is None:
             native_status = 'unavailable'
         else:
-            native_ref = {key:native[key] for key in ('source_id','erp_capture_id','synthetic','sample_only',
-                          'acquisition_complete','summary','artifact_file')}
-            native_ref['sha256'] = sha256(Path(native['artifact_file']).read_bytes()).hexdigest()
+            native_ref = source_ref(native, 'summary')
             native_status = 'saved' if native['acquisition_complete'] else 'partial'
             # 先核对同订单的财务、明细和店铺，再按负修正一次毛利圈定导出范围。
             erp_only = prepare_order_losses(capture, native, order_headers=headers)
@@ -194,14 +223,11 @@ def _evaluate_capture(settings, capture, *, replay, evidence=None, exports=None,
                                             progress=progress, client=client, auth=auth)
             except SourceUnavailable:
                 sales_status = 'unavailable'
+                order_preparation = erp_only
             else:
-                content = Path(sales['artifact_file']).read_bytes()
-                sales = json.loads(content)
-                sales_ref = {key:sales[key] for key in ('source_id', 'erp_capture_id', 'synthetic', 'sample_only',
-                             'acquisition_complete', 'summary', 'artifact_file')}
-                sales_ref['sha256'] = sha256(content).hexdigest()
+                sales_ref = source_ref(sales, 'summary')
                 sales_status = 'saved' if sales['acquisition_complete'] else 'partial'
-            order_preparation = prepare_order_losses(capture, native, sales, order_headers=headers)
+                order_preparation = prepare_order_losses(capture, native, sales, order_headers=headers)
             # 仅预取已定位的亏损目标；来源覆盖与缺项保留在最终预览中，
             # 预取成功本身不构成算价或提交授权。
             prepared = prepare_pricing(capture, order_preparation=order_preparation).report
@@ -224,23 +250,13 @@ def _evaluate_capture(settings, capture, *, replay, evidence=None, exports=None,
             except SourceUnavailable:
                 platform_status = 'unavailable'
             else:
-                content = Path(platform['artifact_file']).read_bytes()
-                platform = json.loads(content)
-                platform_ref = {key:platform[key] for key in ('source_id','erp_capture_id','synthetic','sample_only',
-                    'acquisition_complete','artifact_file')}
-                platform_ref['sha256'] = sha256(content).hexdigest()
+                platform_ref = source_ref(platform)
                 platform_status = 'saved' if platform['acquisition_complete'] else 'partial'
         if daily_fees is not None:
             fixed_fees = capture_current_fees(settings, capture, daily=daily_fees)
-            fixed_fees_ref = {key:fixed_fees[key] for key in ('source_id','erp_capture_id','synthetic','sample_only',
-                'acquisition_complete','artifact_file')}
-            fixed_fees_ref['sha256'] = sha256(Path(fixed_fees['artifact_file']).read_bytes()).hexdigest()
+            fixed_fees_ref = source_ref(fixed_fees)
         local_history = capture_local_price_history(settings,capture)
-        content = Path(local_history['artifact_file']).read_bytes()
-        local_history = json.loads(content)
-        local_history_ref = {key:local_history[key] for key in ('source_id','erp_capture_id','synthetic','sample_only',
-            'acquisition_complete','artifact_file')}
-        local_history_ref['sha256'] = sha256(content).hexdigest()
+        local_history_ref = source_ref(local_history)
         local_history_status = 'saved' if local_history['acquisition_complete'] else 'partial'
         if pricing_targets and all(source is not None for source in (sales,platform,fixed_fees)):
             # 参考不属于核心来源合同；其issues不合入在线准备或待处理清单。
@@ -249,12 +265,11 @@ def _evaluate_capture(settings, capture, *, replay, evidence=None, exports=None,
             online_preparation = prepare_online_states(capture,pricing_targets,sales=sales,
                 platform=platform,local_history=local_history,fixed_fees=fixed_fees,
                 official_history=official_history,price_references=price_references)
-    report = save_pricing_preview(settings.runtime_dir, capture_id, evidence, exports=exports,
-                                  current_fx=current_fx, sales_source=sales_ref, native_source=native_ref,
-                                  order_preparation=order_preparation, order_headers_source=headers_ref,
-                                  local_history_source=local_history_ref, platform_source=platform_ref, online_preparation=online_preparation,fixed_fees_source=fixed_fees_ref)
-    # 下游只消费已持久化并回读的报告，待提价保留完整 Decimal 文本和明细引用。
-    report, digest = load_pricing_preview(settings.runtime_dir, capture_id, report['preview_id'])
+    report, digest = save_capture_preview(settings.runtime_dir, capture, evidence, exports=exports,
+        current_fx=current_fx, sales_source=sales_ref, native_source=native_ref,
+        order_preparation=order_preparation, order_headers_source=headers_ref,
+        local_history_source=local_history_ref, platform_source=platform_ref,
+        online_preparation=online_preparation, fixed_fees_source=fixed_fees_ref)
     ready = [row for row in report['decisions'] if row['ready']]
     other = [row for row in report['decisions'] if not row['ready']]
     unresolved = bool(report['global_issues'] or report['issues'] or any(
@@ -271,8 +286,8 @@ def _evaluate_capture(settings, capture, *, replay, evidence=None, exports=None,
     }
     if capture.get('department'):
         provenance['department'] = capture['department']
-    write_verified(directory / 'pending-prices.json', {**provenance, 'decisions': ready})
-    write_verified(directory / 'unresolved.json', {
+    write_json(directory / 'pending-prices.json', {**provenance, 'decisions': ready})
+    write_json(directory / 'unresolved.json', {
         **provenance, 'global_issues': report['global_issues'],
         'issues': report['issues'], 'decisions': other,
     })
@@ -298,11 +313,11 @@ def _evaluate_capture(settings, capture, *, replay, evidence=None, exports=None,
     }
     if headers is not None and capture.get('department'):
         candidate_file = directory / 'seller-candidates.json'
-        write_verified(candidate_file, {
+        write_json(candidate_file, {
             'capture_id': capture_id, 'department': capture['department'],
             'order_headers_source': headers_ref,
             **summarize_seller_candidates(capture, headers),
         })
         result['seller_candidates_file'] = str(candidate_file.resolve())
-    write_verified(directory / 'result.json', result)
+    write_json(directory / 'result.json', result)
     return result

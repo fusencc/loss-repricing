@@ -239,10 +239,7 @@ def _session(settings, client=None):
 def _save_xlsx(folder, name, content):
     path = folder / name
     path.write_bytes(content)
-    restored = path.read_bytes()
-    if restored != content:
-        raise OSError('ERP原始下载文件回读不一致')
-    return {'file': str(path), 'bytes': len(content), 'sha256': sha256(restored).hexdigest()}
+    return {'file': str(path), 'bytes': len(content), 'sha256': sha256(content).hexdigest()}
 
 
 def _all_export_rows(path):
@@ -701,5 +698,5 @@ def capture_erp_bulk(settings, *, source=None, client=None, web_session=None, ma
     result['result_file'] = str(folder / 'result.json')
     log_event('erp.stage', stage='save', count=len(rows), complete=result['capture_complete'],
               limited=result['rate_limit_observed'], duration_ms=round((monotonic()-started)*1000))
-    emit('采集结果和原始Excel已保存并回读。')
+    emit('采集结果和原始Excel已保存。')
     return result

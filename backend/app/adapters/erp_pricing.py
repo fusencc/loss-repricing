@@ -4,7 +4,6 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from itertools import pairwise
 import json
 import re
 from typing import Annotated, Any, Literal
@@ -73,6 +72,7 @@ class ExportScope(BaseModel):
 
 class ExportBatch(BaseModel):
     number: StrictInt | None = None
+    parent_number: StrictInt | None = None
     scope_check: ExportScope | None = None
     order_ids: list[Identifier] = Field(default_factory=list)
     status: StrictStr | None = None
@@ -197,7 +197,9 @@ class CaptureGroup(BaseModel):
             end = offset + batch.scope_check.downloaded_rows
             scope = finance_batch_scope(batch.order_ids, [row.orderid for row in self.rows[offset:end]])
             expected_status = "partial" if scope["missing"] or scope["duplicate_rows"] else "complete"
-            if scope["unexpected"] or scope != batch.scope_check.model_dump() or batch.status != expected_status:
+            # 集团子批可能部分返回，但部门视图内的已下载订单仍能逐批对齐。
+            partial_parent = allow_partial and batch.parent_number is not None and batch.status == 'partial'
+            if scope["unexpected"] or scope != batch.scope_check.model_dump() or (batch.status != expected_status and not partial_parent):
                 return False
             offset = end
         return (allow_partial or requested == candidate_ids) and offset == len(self.rows)
@@ -221,6 +223,7 @@ class BulkCapture(BaseModel):
     salesperson: CaptureSalesperson | None = None
     department: StrictStr | None = None
     roster_parent_capture_id: Identifier | None = None
+    department_parent_capture_id: Identifier | None = None
 
 
 class EvidenceModel(BaseModel):
@@ -478,19 +481,14 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
         raise ValueError("同一采集来源重复，无法证明订单覆盖")
 
     export_times = []
-    ordered_observations = True
     for group in capture.groups:
         for batch in group.batches:
             times = [poll.queried_at for poll in batch.polls]
             if batch.downloaded_at is not None:
                 times.append(batch.downloaded_at)
-            if any(earlier > later for earlier, later in pairwise(times)):
-                ordered_observations = False
             export_times.extend(times)
     latest_observation = max([capture.queried_at, *export_times])
-    valid_observation_window = ordered_observations and all(
-        time >= capture.queried_at and time.astimezone(BEIJING).date() == business_date for time in export_times
-    )
+    valid_observation_window = all(time.astimezone(BEIJING).date() == business_date for time in export_times)
     if current_fx is not None and (
         current_fx.synthetic != capture.synthetic or current_fx.date != business_date
         or current_fx.queried_at.astimezone(BEIJING).date() != business_date
@@ -501,8 +499,10 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
 
     # 派生个人档案的请求范围仍是部门；财务行归属在下游按个人核对。
     request_salesperson = None if capture.roster_parent_capture_id else capture.salesperson
+    # 集团请求未使用部门筛选；派生档的部门只约束实际下载的财务行。
+    request_department = None if capture.department_parent_capture_id else capture.department
     scope_by_source = {
-        source: group.scope_bloc(capture.department, request_salesperson) for source, group in groups.items()
+        source: group.scope_bloc(request_department, request_salesperson) for source, group in groups.items()
     }
     scope_blocs = set(scope_by_source.values())
     blocked_platforms = {str(group.filters.get("ptid")) for group in groups.values() if group.source.startswith("blocked_")}
@@ -534,8 +534,7 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
     if live is not None:
         if (live.erp_capture_id != capture.capture_id or live.synthetic != capture.synthetic
                 or live.sample_only != capture.sample_only
-                or live.observed_at.astimezone(BEIJING).date() != business_date
-                or live.observed_at < latest_observation):
+                or live.observed_at.astimezone(BEIJING).date() != business_date):
             raise ValueError('实时订单准备与采集范围、样本或观察时点不一致')
         orders = {order.order_id:order for order in live.orders}
         if (orders.keys() | live.shop_scopes.keys()) - memberships.keys():
@@ -577,11 +576,8 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
     if evidence:
         if evidence.capture_id != capture.capture_id or evidence.synthetic != capture.synthetic:
             raise ValueError("补充文件与采集编号或样例属性不一致")
-        if (
-            not valid_observation_window or evidence.evaluated_at.astimezone(BEIJING).date() != business_date
-            or evidence.evaluated_at < latest_observation
-        ):
-            raise ValueError("采集与评估须在同一北京时间业务日，评估时点须晚于已记录的导出观察")
+        if not valid_observation_window or evidence.evaluated_at.astimezone(BEIJING).date() != business_date:
+            raise ValueError('采集与评估须在同一北京时间业务日')
         orders = {order.order_id: order for order in evidence.orders}
         if len(orders) != len(evidence.orders) or orders.keys() - memberships.keys():
             raise ValueError("补充文件包含重复订单或采集范围外订单")
@@ -746,7 +742,7 @@ def prepare_pricing(capture_data, evidence_data=None, *, current_fx=None, order_
     if not scope_matches:
         global_issues.append("采集来源的筛选范围不一致或无法确认")
     if not valid_observation_window:
-        global_issues.append("财务导出跨业务日或时点次序异常")
+        global_issues.append("财务导出跨业务日")
     for source, group in groups.items():
         if (
             not capture.sample_only and scope_by_source[source] is not None

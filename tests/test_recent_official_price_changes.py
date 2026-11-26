@@ -26,6 +26,23 @@ def test_recent_count_uses_exact_beijing_72_hour_window_and_unique_child_ids(tmp
     assert result['records']['I1']['status']=='ok'
     assert 'secret' not in json.dumps(result)
 
+def test_recent_count_still_available_if_archive_cannot_be_written(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(official_price_logs.SalesAuth, 'get_token', lambda self: 'token')
+
+    def fail_write(*args):
+        raise OSError('write failed')
+
+    monkeypatch.setattr(official_price_logs, 'write_json', fail_write)
+    with httpx.Client(transport=httpx.MockTransport(lambda req: httpx.Response(200, json={
+        'resp_code': 0, 'datas': [{'sellerSkuId': KEY.item_id, 'count': 1}],
+    }))) as client:
+        result = official_price_logs.capture_recent_price_changes(
+            Settings(_env_file=None, runtime_dir=tmp_path), [KEY], now=NOW, client=client,
+        )
+    assert official_price_logs.recent_price_log_for(result, KEY).count == 1
+    assert '归档写入失败' in caplog.text
+
+
 @pytest.mark.parametrize('rows',[
     [],[{'sellerSkuId':'OTHER','count':0}],[{'sellerSkuId':'I1','count':True}],
     [{'sellerSkuId':'I1','count':-1}],[{'sellerSkuId':'I1','count':0}]*2,

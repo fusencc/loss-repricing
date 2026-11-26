@@ -7,7 +7,8 @@ from sqlalchemy import update, or_
 from sqlalchemy.exc import IntegrityError
 from app.db import transaction
 from app.models import Job, WorkerLease
-from app.services.store import claim_job, enqueue, settings_value, stamp, BEIJING
+from app.services.store import claim_job, enqueue, settings_value, stamp, utcnow, BEIJING
+from app.services.operation_alerts import enqueue_operation_alert
 from app.adapters.base import SourceUnavailable
 from app.observability import bind_context, bind_sink, event, get_sink
 
@@ -32,6 +33,24 @@ class Worker:
             self._failures[name] = (now, 0)
         else:
             self._failures[name] = (previous, count + 1)
+
+    def _alert(self, code, reference, *, job_id=None, error_id=None):
+        if getattr(getattr(self.service, 'config', None), 'adapter_mode', None) != 'live':
+            return
+        try:
+            with transaction(self.factory) as session:
+                enqueue_operation_alert(session, code, reference, utcnow(), job_id=job_id, error_id=error_id)
+        except Exception as exc:
+            self._failure('worker.notice_dispatch_failed', exc)
+
+    def _notification_tick(self):
+        from app.services.notifications import dispatch_notices
+        try:
+            dispatch_notices(self.factory, self.service.config)
+        except Exception as exc:
+            self._failure('worker.notice_dispatch_failed', exc)
+        else:
+            self._failures.pop('worker.notice_dispatch_failed', None)
 
     def acquire(self, now):
         try:
@@ -62,22 +81,14 @@ class Worker:
 
     def _tick(self, now=None):
         tick_started = time.monotonic()
-        now = time.time() if now is None else now
+        use_wall_clock = now is None
+        now = time.time() if use_wall_clock else now
         acquired = self.acquire(now)
         if acquired != self._held_lease:
             event('worker.acquired' if acquired else 'worker.lease_lost')
             self._held_lease = acquired
         if not acquired:
             return
-        if getattr(getattr(self.service, "config", None), "coordination_required", False):
-            from app.services.notifications import dispatch_notices
-            try:
-                dispatch_notices(self.factory, self.service.config)
-            except Exception as exc:
-                # 通知投递有自己的持久状态。故障不影响价格核验和已排队的取数任务。
-                self._failure("worker.notice_dispatch_failed", exc)
-            else:
-                self._failures.pop("worker.notice_dispatch_failed", None)
         config = settings_value(self.factory)
         local = datetime.fromtimestamp(now, timezone.utc).astimezone(BEIJING)
         service_config = getattr(self.service, "config", None)
@@ -92,7 +103,7 @@ class Worker:
             if track_logs:
                 for marker in sorted((service_config.runtime_dir / 'morning-logs').glob('*/refresh-pending.json')):
                     self._morning_log(service_config, date.fromisoformat(marker.parent.name))
-        job = claim_job(self.factory, self.owner, now)
+        job = claim_job(self.factory, self.owner, time.time() if use_wall_clock else now)
         if job is None:
             return
         metadata = job.payload.get('_log_context', {})
@@ -105,6 +116,7 @@ class Worker:
         started = time.monotonic()
         event('job.started', kind=job.kind)
         state, error, batch_id, retry = "done", None, None, 0
+        alert, error_id = None, None
         try:
             scheduled_day = job.payload.get("date")
             current_time = now + (time.monotonic() - tick_started)
@@ -121,6 +133,8 @@ class Worker:
                             if job.payload.get("item_id") else self.service.run_batch(job.id))
                 if daily and getattr(service_config, "adapter_mode", None) == "live":
                     error = self._morning_log(service_config, date.fromisoformat(scheduled_day))
+                    if error:
+                        alert = 'archive_failed'
             elif job.kind == "erp_reconciliation":
                 from app.services.erp_pricing import save_preview_reconciliation
                 batch_id = save_preview_reconciliation(
@@ -137,11 +151,13 @@ class Worker:
             # 取数和本轮核验都可能耗时，等待从失败时起算。
             failed_at = now + (time.monotonic() - tick_started)
             state, error, retry = "queued", "当日数据源尚未就绪，5分钟后重新检查", failed_at + 300
+            alert = 'source_waiting'
             error_id = event('job.waiting', exception=exc)
             if error_id:
                 error += f"；排查编号：{error_id}"
         except Exception as exc:
             state = "failed"
+            alert = 'job_failed'
             if job.kind == "erp_reconciliation":
                 error = "文件对账入批失败，请核对报告和运行目录"
             else:
@@ -159,6 +175,8 @@ class Worker:
                 event('job.completed', state=state, batch_id=batch_id, duration_ms=(time.monotonic() - started) * 1000)
             finally:
                 self.current_job = None
+        if alert:
+            self._alert(alert, job.id, job_id=job.id, error_id=error_id)
 
     def _morning_log(self, config, day):
         from app.services.morning_log import publish_morning_log, save_morning_log, save_success_log
@@ -202,8 +220,17 @@ class Worker:
                     except Exception as exc:
                         # 数据库故障不会触发直接外部重传，保留错误位置而非吞掉技术证据。
                         self._failure('worker.heartbeat_failed', exc)
-        thread = Thread(target=renew, daemon=True)
-        thread.start()
+        threads = [Thread(target=renew, daemon=True)]
+        if getattr(getattr(self.service, 'config', None), 'coordination_required', False):
+            # External message delivery must not run on the price loop or the lease heartbeat.
+            def notify():
+                with bind_sink(self.log_sink):
+                    while not stop.is_set():
+                        self._notification_tick()
+                        stop.wait(poll_seconds)
+            threads.append(Thread(target=notify, daemon=True))
+        for thread in threads:
+            thread.start()
         try:
             with bind_sink(self.log_sink):
                 while True:
@@ -211,11 +238,15 @@ class Worker:
                         self.tick()
                         self._failures.pop('worker.tick_failed', None)
                     except Exception as exc:
+                        first_failure = 'worker.tick_failed' not in self._failures
                         self._failure('worker.tick_failed', exc)
+                        if first_failure:
+                            self._alert('worker_error', utcnow().astimezone(BEIJING).date().isoformat())
                     time.sleep(poll_seconds)
         finally:
             stop.set()
-            thread.join(timeout=2)
+            for thread in threads:
+                thread.join(timeout=2)
 
 
 def main():

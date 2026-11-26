@@ -112,7 +112,7 @@ def capture(request: Request, query: Annotated[CaptureQuery, Query()]):
         settings = request.app.state.config
         result = capture_erp_bulk(settings, source=query.source, event_callback=event)
         saved = save_capture(settings.runtime_dir, result)
-        response = {key: saved[key] for key in ('capture_id', 'storage_verified', 'queried_at',
+        response = {key: saved[key] for key in ('capture_id', 'storage_saved', 'queried_at',
                                                 'capture_complete', 'pricing_ready', 'summary')}
         if 'cleaning_status' in saved:
             response['cleaning_status'] = saved['cleaning_status']

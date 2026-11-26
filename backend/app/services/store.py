@@ -107,12 +107,13 @@ def claim_job(factory, owner, now):
     eligible = or_(and_(Job.state == "queued", Job.lease_until <= now),
                    and_(Job.state == "running", Job.lease_until < now))
     with transaction(factory) as session:
-        job_id = session.scalar(select(Job.id).where(eligible).order_by(Job.created_at).limit(1))
-        if not job_id:
+        job = session.execute(select(Job.id, Job.payload).where(eligible).order_by(Job.created_at).limit(1)).first()
+        if not job:
             return None
-        result = session.execute(update(Job).where(Job.id == job_id, eligible).values(
-            state="running", owner=owner, lease_until=now + 120))
-        return session.get(Job, job_id) if result.rowcount == 1 else None
+        payload = dict(job.payload, _attempt_started=stamp(datetime.fromtimestamp(now, timezone.utc)))
+        result = session.execute(update(Job).where(Job.id == job.id, eligible).values(
+            state="running", owner=owner, lease_until=now + 120, payload=payload))
+        return session.get(Job, job.id) if result.rowcount == 1 else None
 
 
 def write_decisions(session, batch_id, decisions, *, ready_hold=None):

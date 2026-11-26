@@ -154,7 +154,9 @@ def test_notice_dispatch_failure_does_not_skip_reconciliation_or_daily_job(tmp_p
     monkeypatch.setattr(service, "reconcile", lambda: reconciles.append(True))
     monkeypatch.setattr("app.worker.event", lambda name, **kwargs: logged.append(name))
     update_settings(factory, {"schedule_enabled": True})
-    Worker(factory, service).tick(datetime(2026, 11, 4, 21, 0, tzinfo=timezone.utc).timestamp())
+    worker = Worker(factory, service)
+    worker._notification_tick()
+    worker.tick(datetime(2026, 11, 4, 21, 0, tzinfo=timezone.utc).timestamp())
     assert reconciles == [True] and service.calls == 1
     assert "worker.notice_dispatch_failed" in logged
     with factory() as session:

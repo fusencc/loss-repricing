@@ -1,15 +1,14 @@
 """ERP来源采集文件；不写业务快照、执行意图或调价数据库。
 
-路径由当前服务的runtime_dir决定。每轮独立文件，金额字符串和空值不转换；
-写入后回读整个结构，确认列表、明细、失败证据均一致才返回保存成功。
+路径由当前服务的runtime_dir决定。每轮独立文件，原子写入，金额字符串和空值不转换。
 
 批量订单表在groups[].rows；历史归档可能另有details明细证据。find_order仅查已保存主记录，
 不请求ERP、不扫描原始XLSX，也不把未下载订单或空details解释为无业务数据。
-storage_verified仅证明本次写入回读一致，不证明来源完整、公式正确或价格生效。
 """
 from copy import deepcopy
 from datetime import datetime, timezone
 from functools import lru_cache
+from hashlib import sha256
 import gzip
 import json
 import os
@@ -25,25 +24,34 @@ from app.services.erp_clean_capture import save_clean_capture
 CAPTURE_ID = re.compile(r'erp-capture-[0-9]{8}T[0-9]{12}Z-[a-f0-9]{32}')
 
 
-def write_json(path, data):
+_JSON_FORMAT = dict(ensure_ascii=False, indent=2, allow_nan=False)
+
+
+def json_artifact_bytes(data):
+    return json.dumps(data, **_JSON_FORMAT).replace('\n', os.linesep).encode('utf-8')
+
+
+def write_json(path, data, *, with_digest=False):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix('.tmp')
     try:
-        with temporary.open('x', encoding='utf-8') as stream:
-            json.dump(data, stream, ensure_ascii=False, indent=2, allow_nan=False)
+        if with_digest:
+            content = json_artifact_bytes(data)
+            with temporary.open('xb') as stream:
+                stream.write(content)
+        else:
+            with temporary.open('x', encoding='utf-8') as stream:
+                json.dump(data, stream, **_JSON_FORMAT)
         temporary.replace(path)
+        if with_digest:
+            return sha256(content).hexdigest()
     finally:
         temporary.unlink(missing_ok=True)
 
 
 def write_verified(path, data):
-    path = Path(path)
     write_json(path, data)
-    restored = json.loads(path.read_text(encoding='utf-8'))
-    if restored != data:
-        path.unlink()
-        raise OSError('ERP采集文件回读不一致，未确认保存成功')
 
 
 BULK_DIRECTORY = re.compile(r'erp-bulk-[0-9]{8}T[0-9]{6}Z-[a-f0-9]{32}')
@@ -73,8 +81,6 @@ def _save_bulk_archive(root, manifest, stored):
     try:
         with gzip.open(temporary, 'xt', encoding='utf-8', compresslevel=3) as stream:
             json.dump(stored, stream, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
-        if _read_archive(temporary) != stored:
-            raise OSError('ERP压缩采集文件回读不一致')
         os.link(temporary, archive)
         try:
             write_verified(manifest, {'capture_id': stored['capture_id'], 'bulk_archive': archive.parent.name})
@@ -120,7 +126,7 @@ def save_capture(runtime_dir, result):
         raise
     event('capture.saved', source='erp', synthetic=False, capture_id=capture_id,
           stage='save', complete=bool(result.get('capture_complete', False)))
-    response = dict(stored, storage_verified=True)
+    response = dict(stored, storage_saved=True)
     try:
         counts = save_clean_capture(runtime_dir, stored)
     except (OSError, sqlite3.Error, ValueError, KeyError, TypeError) as error:

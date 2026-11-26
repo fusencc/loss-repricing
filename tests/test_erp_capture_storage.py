@@ -1,5 +1,4 @@
 import json
-import subprocess
 import sys
 from pathlib import Path
 from uuid import uuid4
@@ -44,14 +43,13 @@ def test_existing_archive_roundtrip_preserves_precision_and_nulls(tmp_path):
         store.find_order(restored, 'absent')
 
 
-def test_save_does_not_report_success_if_readback_changes(tmp_path, monkeypatch):
-    original = Path.read_text
-    def changed(path, *args, **kwargs):
-        content = original(path, *args, **kwargs)
-        return content.replace('bulk_download', 'changed') if path.suffix == '.json' else content
-    monkeypatch.setattr(Path, 'read_text', changed)
-    with pytest.raises(OSError, match='回读'):
-        store.save_capture(tmp_path, {'acquisition_mode': 'bulk_download', 'groups': []})
+def test_failed_json_write_leaves_last_checkpoint_in_place(tmp_path):
+    path = tmp_path / 'result.json'
+    store.write_verified(path, {'status': 'complete'})
+    with pytest.raises(TypeError):
+        store.write_verified(path, {'invalid': object()})
+    assert json.loads(path.read_text(encoding='utf-8')) == {'status': 'complete'}
+    assert list(tmp_path.iterdir()) == [path]
 
 
 @pytest.mark.parametrize('capture_id', ['../outside', '/tmp/file', 'invalid'])
@@ -60,14 +58,16 @@ def test_lookup_rejects_paths_outside_capture_directory(tmp_path, capture_id):
         store.load_capture(tmp_path, capture_id)
 
 
-def test_cli_order_read_uses_saved_file_without_erp_login(tmp_path):
+def test_cli_order_read_uses_saved_file_without_erp_login(tmp_path, monkeypatch, capsys):
+    from app import capture_erp as cli
+    from app.config import Settings
+
     capture_id = saved_historical_archive(tmp_path)
-    import os
-    env = dict(os.environ, PYTHONPATH='backend', LR_RUNTIME_DIR=str(tmp_path), LR_DATABASE_URL='', LR_LIVE_HISTORY_DATABASE_URL='', LR_ERP_USERNAME='', LR_ERP_PASSWORD='')
-    run = subprocess.run([sys.executable, '-m', 'app.capture_erp', '--capture-id', capture_id,
-                          '--order', '001234567890123456789'], env=env, capture_output=True, text=True)
-    assert run.returncode == 0, run.stderr
-    assert json.loads(run.stdout)['detail']['rows'][0]['sku'] == '中文SKU'
+    monkeypatch.setattr(cli, 'get_settings', lambda: Settings(_env_file=None, runtime_dir=tmp_path))
+    monkeypatch.setattr(cli, 'capture_erp_bulk', lambda *_a, **_kw: pytest.fail('读取归档不应请求 ERP'))
+    monkeypatch.setattr(sys, 'argv', ['capture_erp', '--capture-id', capture_id, '--order', '001234567890123456789'])
+    cli.main()
+    assert json.loads(capsys.readouterr().out)['detail']['rows'][0]['sku'] == '中文SKU'
 
 
 def test_api_capture_persists_and_lookup_requires_admin(tmp_path, monkeypatch):
@@ -92,7 +92,8 @@ def test_api_capture_persists_and_lookup_requires_admin(tmp_path, monkeypatch):
         response = client.post('/api/sources/erp/captures', params={'source': 'blocked_pending'})
         assert response.status_code == 200, response.text
         data = response.json()
-        assert data['storage_verified'] and len(calls) == 1 and calls[0]['source'] == 'blocked_pending'
+        assert 'storage_verified' not in data
+        assert data['storage_saved'] and len(calls) == 1 and calls[0]['source'] == 'blocked_pending'
         url = '/api/sources/erp/captures/' + data['capture_id']
         assert client.get(url).json()['details'] == []
         saved_order = client.get(url, params={'orderid': '001234567890123456789'}).json()

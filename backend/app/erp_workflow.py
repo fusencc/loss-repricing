@@ -1,4 +1,4 @@
-"""按部门串行运行 ERP 只读链路，非完整结果返回非零退出码。"""
+"""ERP 只读工作流：集团四类导出完成后，按部门批查订单并算价。"""
 import argparse
 import json
 from pathlib import Path
@@ -25,7 +25,7 @@ def main():
     # 手动测试只读到待提价归档；关闭本进程的提交权限，不改其他进程或数据库中的授权。
     settings = get_settings().model_copy(update={'live_submit_enabled': False})
     configure_logging(settings, role='capture')
-    print('本次为只读测试：只计算并保存待提交价格，不会上传，也不会排队等待提交。', file=sys.stderr, flush=True)
+    print('本次为只读采集和算价：保存待提交价格，不会上传，也不会排队等待提交。', file=sys.stderr, flush=True)
     try:
         evidence = json.loads(args.evidence.read_text(encoding='utf-8')) if args.evidence else None
         exports = (args.erp_details.read_bytes(), args.sales_variants.read_bytes()) if args.erp_details else None

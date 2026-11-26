@@ -99,14 +99,20 @@ def test_workflow_continues_after_incomplete_or_failed_department(tmp_path, monk
     attempted = []
     sessions = []
 
-    def collect(settings, *, department, web_session, **kwargs):
+    def collect(settings, *, web_session, **kwargs):
+        assert 'department' not in kwargs
         sessions.append(web_session)
-        attempted.append(department)
-        if department == 'Tiktok五部':
-            raise RuntimeError('synthetic departmental failure')
-        return {'capture_id': department, 'cleaning_status': 'saved', 'capture_complete': False}
+        return {'capture_id': 'group', 'capture_complete': True}
+
+    def lookup(settings, capture, progress, session):
+        sessions.append(session)
+        attempted.append(('lookup', capture['department']))
+        if capture['department'] == 'Tiktok五部':
+            raise RuntimeError('synthetic departmental lookup failure')
+        return None, None
 
     def evaluate(settings, capture, *, client, auth, **kwargs):
+        attempted.append(('evaluate', capture['department']))
         clients.append((client, auth))
         if capture['capture_id'] == 'Tiktok一部':
             return {'status': 'blocked', 'ready_prices': 0}
@@ -117,10 +123,14 @@ def test_workflow_continues_after_incomplete_or_failed_department(tmp_path, monk
     monkeypatch.setattr(erp_workflow, 'query_current_erp_fx', lambda *a: {'ref': 'test-fx'})
     monkeypatch.setattr(erp_workflow, 'capture_erp_bulk', collect)
     monkeypatch.setattr(erp_workflow, 'save_capture', lambda runtime, result: result)
-    monkeypatch.setattr(erp_workflow, '_capture_erp_sources', lambda *a: (None, None))
+    monkeypatch.setattr(erp_workflow, 'department_captures', lambda parent, depts: (
+        {d: {'department': d, 'capture_id': d, 'capture_complete': True, 'cleaning_status': 'saved'} for d in depts}, {}))
+    monkeypatch.setattr(erp_workflow, '_capture_erp_sources', lookup)
     monkeypatch.setattr(erp_workflow, '_evaluate_capture', evaluate)
     result = erp_workflow.run_workflow(Settings(_env_file=None, runtime_dir=tmp_path))
-    assert attempted == ['Tiktok一部', 'Tiktok五部', 'Tiktok十二部', 'Tiktok二十二部']
+    assert attempted == ([('lookup', d) for d in bulk.ERP_DEPARTMENTS] +
+                         [('evaluate', d) for d in bulk.ERP_DEPARTMENTS if d != 'Tiktok五部'])
+    assert len(sessions) == 5
     assert [dept['status'] for dept in result['departments']] == ['blocked', 'failed', 'completed', 'completed']
     assert result['status'] == 'needs_attention'
     assert result['ready_prices'] == 2
@@ -233,11 +243,13 @@ def test_round_reuses_real_erp_and_sales_authentication_and_clock(tmp_path, monk
     key = VariantKey(platform='TikTok',shop_id='SHOP',site='PH',product_id='PRODUCT',
                      item_id='ITEM',sku='SKU',warehouse='WAREHOUSE')
 
-    def collect(settings, *, department, web_session, **kwargs):
-        capture = {'capture_id': department, 'cleaning_status': 'saved', 'capture_complete': False,
-                   'groups': [{'candidate_order_ids': ['ORDER']}]}
-        assert capture_order_headers(settings, capture, web_session=web_session)['acquisition_complete']
-        return capture
+    def collect(settings, *, web_session, **kwargs):
+        assert 'department' not in kwargs
+        return {'capture_id': 'parent', 'capture_complete': True}
+
+    monkeypatch.setattr(erp_workflow, 'department_captures', lambda parent, depts: ({
+        d: {'capture_id': d, 'department': d, 'capture_complete': True, 'cleaning_status': 'saved',
+            'groups': [{'candidate_order_ids': ['ORDER']}]} for d in depts}, {}))
 
     def evaluate(settings, capture, *, headers, client, auth, **kwargs):
         assert headers['acquisition_complete']
@@ -258,8 +270,8 @@ def test_round_reuses_real_erp_and_sales_authentication_and_clock(tmp_path, monk
                         erp_capture_request_interval_seconds=16,sales_request_interval_seconds=2)
     result = erp_workflow.run_workflow(settings)
     assert result['status'] == 'completed'
-    assert len(erp_calls) == 9 and sum(path.endswith('/login') for path, _ in erp_calls) == 1
-    assert [when for _,when in erp_calls] == list(range(0, 9 * 16, 16))
+    assert len(erp_calls) == 5 and sum(path.endswith('/login') for path, _ in erp_calls) == 1
+    assert [when for _,when in erp_calls] == list(range(0, 5 * 16, 16))
     assert len(sales_calls) == 13 and sum(path.endswith('/token') for path, _ in sales_calls) == 1
     assert [when for _,when in sales_calls[1:]] == list(range(0, 24, 2))
     assert all(client.is_closed for client in clients)

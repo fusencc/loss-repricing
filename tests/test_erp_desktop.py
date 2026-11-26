@@ -35,6 +35,18 @@ def test_independent_file_runs_same_capture_contract(tmp_path,monkeypatch,issue)
     assert 'secret' not in path.read_text().lower().replace('get_secret_value','').replace('secretstr','')
 
 
+def test_desktop_checkpoint_replaces_previous_json_without_readback(tmp_path, monkeypatch):
+    import json
+
+    _, module = load_desktop(tmp_path)
+    path = tmp_path / 'output' / 'result.json'
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, 'read_text', lambda *_a, **_kw: pytest.fail('桌面检查点不应回读'))
+        module.write_verified(path, {'步骤': 1})
+        module.write_verified(path, {'步骤': 2})
+    assert json.loads(path.read_text(encoding='utf-8')) == {'步骤': 2}
+
+
 def test_standalone_help_and_check_do_not_prompt_or_access_project(tmp_path):
     path,module = load_desktop(tmp_path)
     result=subprocess.run([sys.executable,str(path),'--check'],cwd=tmp_path,capture_output=True,text=True)

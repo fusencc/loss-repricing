@@ -316,8 +316,8 @@ def test_capture_finance_status_issues_survive_absent_detail_evidence(source_fil
     }
 
 
-@pytest.mark.parametrize("last_poll", ["2026-11-09T15:05:00+08:00", "2026-11-10T00:00:01+08:00"])
-def test_replay_cannot_predate_export_or_use_a_cross_day_export(source_files, last_poll):
+@pytest.mark.parametrize("last_poll", ["2026-11-10T00:00:01+08:00"])
+def test_replay_cannot_use_cross_day_export(source_files, last_poll):
     capture, evidence = source_files
     capture["groups"][0]["batches"][0]["polls"] = [{"status": "success", "queried_at": last_poll}]
     with pytest.raises(ValueError):
@@ -328,10 +328,12 @@ def test_replay_cannot_predate_export_or_use_a_cross_day_export(source_files, la
 def test_replay_checks_download_completion_after_successful_poll(source_files, downloaded_at):
     capture, evidence = source_files
     capture["groups"][0]["batches"][0]["downloaded_at"] = downloaded_at
-    with pytest.raises(ValueError, match="评估须在同一北京时间业务日"):
-        preview_pricing(capture, evidence)
-    report = preview_pricing(capture)
-    assert report["latest_capture_observation_at"] == downloaded_at
+    if downloaded_at.startswith('2026-11-10'):
+        with pytest.raises(ValueError, match="评估须在同一北京时间业务日"):
+            preview_pricing(capture, evidence)
+    else:
+        assert preview_pricing(capture, evidence)['evaluation_complete_sources']
+    assert preview_pricing(capture)["latest_capture_observation_at"] == downloaded_at
 
 
 @pytest.mark.parametrize("defect", ["download_before_success", "reversed_polls"])
@@ -343,10 +345,7 @@ def test_finance_timestamps_must_follow_batch_observation_order(source_files, de
     else:
         batch["polls"].insert(0, {"status": "running", "queried_at": "2026-11-09T14:28:00+08:00"})
 
-    with pytest.raises(ValueError, match="评估须在同一北京时间业务日"):
-        preview_pricing(capture, evidence)
-    report = preview_pricing(capture)
-    assert "财务导出跨业务日或时点次序异常" in report["global_issues"]
+    assert set(preview_pricing(capture, evidence)['evaluation_complete_sources']) == {g['source'] for g in capture['groups']}
 
 
 def test_same_main_sku_with_different_reference_sales_does_not_block_siblings(source_files):

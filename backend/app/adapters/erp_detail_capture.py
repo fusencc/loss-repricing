@@ -12,7 +12,7 @@ from uuid import uuid4
 import httpx
 
 from app.adapters.base import SourceUnavailable
-from app.adapters.erp_bulk_capture import EXPORT_POLL_LIMIT, TASKS, _save_xlsx, _session, _value
+from app.adapters.erp_bulk_capture import EXPORT_POLL_LIMIT, TASKS, _session, _value
 from app.adapters.erp_export_mapping import ERP_COLUMNS, _xlsx_rows
 from app.adapters.erp_web import error_evidence
 from app.services.erp_capture_store import write_verified
@@ -50,7 +50,6 @@ def capture_erp_details(settings, capture, *, client=None, web_session=None, bat
         'batches':[{'number':offset//batch_size+1, 'order_ids':requested[offset:offset+batch_size],
                     'status':'not_attempted', 'polls':[]} for offset in range(0, len(requested), batch_size)],
         'rows':[], 'files':[], 'issues':[], 'pricing_ready':False,
-        'stopped_by_pending_task':False,
         'artifact_file':str((directory / 'result.json').resolve()),
     }
 
@@ -106,11 +105,12 @@ def capture_erp_details(settings, capture, *, client=None, web_session=None, bat
                                 continue
                             raw = download(task.get('downloadUrl'))
                             batch['downloaded_at'] = datetime.now(timezone.utc).isoformat()
-                            original = _save_xlsx(directory, f'order-details-{number:03d}.xlsx', raw)
-                            result['files'].append(original)
+                            path = directory / f'order-details-{number:03d}.xlsx'
+                            path.write_bytes(raw)
+                            result['files'].append({'file':str(path), 'bytes':len(raw)})
                             rows = [{'order_id':fields['订单编号'], 'row_number':row_number,
                                      'fields':{key:_value(value) for key,value in fields.items()},
-                                     'ref':f'erp-detail-{original["sha256"]}-r{row_number}'}
+                                     'ref':f'{source_id}/{path.name}#r{row_number}'}
                                     for row_number, fields in _xlsx_rows(raw, ERP_COLUMNS, 'ERP原生商品明细')]
                             expected = set(batch['order_ids'])
                             if any(not isinstance(row['order_id'], str) or row['order_id'] not in expected for row in rows):
@@ -130,9 +130,6 @@ def capture_erp_details(settings, capture, *, client=None, web_session=None, bat
                         batch['status'] = 'pending' if pending else 'failed'
                         issue(error.code if isinstance(error, _DetailIssue) else 'detail_request_failed',
                               batch=number, **error_evidence(error))
-                        if pending:
-                            result['stopped_by_pending_task'] = True
-                            break
                         if isinstance(error, httpx.HTTPStatusError) and error.response.status_code in (401, 403):
                             break
                     finally:

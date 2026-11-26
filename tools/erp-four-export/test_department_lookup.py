@@ -22,9 +22,10 @@ from app.config import Settings
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("source", type=Path, help="第一步的输出目录（含 result.json）")
     parser.add_argument("--plan", action="store_true")
     args = parser.parse_args()
-    source = HERE / "downloads" / "20261126-1853"
+    source = args.source.resolve()
     manifest = json.loads((source / "result.json").read_text())
     groups = defaultdict(set)
     for case in manifest["results"]:

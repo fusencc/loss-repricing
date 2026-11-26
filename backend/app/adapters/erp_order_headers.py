@@ -2,7 +2,6 @@
 from collections import defaultdict
 from contextlib import nullcontext
 from datetime import datetime, timezone
-from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
 import httpx
@@ -47,8 +46,7 @@ def capture_order_headers(settings, capture, *, client=None, web_session=None, b
                     path = directory / f'batch-{offset//batch_size:04d}.json'
                     # 订单列表可能包含客户资料；此来源只存业务身份白名单。
                     write_verified(path,{'request':body,'total':total,'records':projected})
-                    raw = path.read_bytes()
-                    result['files'].append({'file':str(path.resolve()),'bytes':len(raw),'sha256':sha256(raw).hexdigest()})
+                    result['files'].append({'file':str(path.resolve())})
                     if not isinstance(rows, list):
                         result['issues'].append({'code': 'order_header_response_invalid', 'order_ids': batch})
                         continue

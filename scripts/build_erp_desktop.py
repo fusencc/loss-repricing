@@ -32,8 +32,8 @@ def build(output):
     source += 'import json\nfrom time import sleep\n' + privacy + '\n'
     source += definitions('backend/app/adapters/base.py',['SourceUnavailable'])+'\n'
     source += definitions('backend/app/adapters/erp_web.py',
-        ['ErpBusinessFailure', 'ErpAccountRateLimited', 'error_evidence', '_failure', 'retry_erp_read', 'safe_page_excerpt', 'WEB_BASE']) + '\n'
-    source += definitions('backend/app/services/erp_capture_store.py',['write_json', 'write_verified'])+'\n'
+        ['ErpBusinessFailure', 'ErpAccountRateLimited', 'error_evidence', '_failure', 'retry_erp_read', 'safe_page_excerpt', 'BLOCKED_LIST_RETRY_DELAYS', 'WEB_BASE']) + '\n'
+    source += definitions('backend/app/services/erp_capture_store.py',['_JSON_FORMAT', 'json_artifact_bytes', 'write_json', 'write_verified'])+'\n'
     source += ''.join(lines)+'\n'
     # 批量核心通过event_callback注入日志，独立文件采用入口内的标准库白名单记录器，
     # 不嵌入项目配置、凭据、环境文件或项目日志单例。

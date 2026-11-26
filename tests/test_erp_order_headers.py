@@ -26,10 +26,12 @@ def run(tmp_path, mode='valid'):
         return capture_order_headers(settings,capture,client=client)
 
 
-def test_explicit_order_headers_archive_stable_owners_without_private_fields(tmp_path):
-    result=run(tmp_path)
-    assert result['acquisition_complete']
-    assert set(result['orders'])=={'O1','O2'}
+def test_explicit_order_headers_archive_stable_owners_without_private_fields(tmp_path, monkeypatch):
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, 'read_bytes', lambda *_: pytest.fail('订单归属不应回读文件计算哈希'))
+        result=run(tmp_path)
+    assert len(result['files']) == 1 and 'sha256' not in result['files'][0]
+    assert result['acquisition_complete'] and set(result['orders']) == {'O1', 'O2'}
     assert result['orders']['O1']['shopid']=='STABLE'
     assert json.loads(Path(result['artifact_file']).read_text())==result
     assert all('DO-NOT-ARCHIVE' not in p.read_text() for p in tmp_path.rglob('*.json'))

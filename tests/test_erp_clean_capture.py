@@ -1,10 +1,12 @@
 import json
 import sqlite3
 
+import pytest
+
 from app.services import erp_capture_store as store
 
 
-def test_bulk_archive_and_clean_orders_preserve_sources_and_conflicts(tmp_path):
+def test_bulk_archive_and_clean_orders_preserve_sources_and_conflicts(tmp_path, monkeypatch):
     folder = tmp_path / "source-captures" / "erp-bulk-20261110T000000Z-0123456789abcdef0123456789abcdef"
     path = folder / "result.json"
     order = "00123456789012345678"
@@ -22,7 +24,9 @@ def test_bulk_archive_and_clean_orders_preserve_sources_and_conflicts(tmp_path):
                   group("blocked_pending", "001,002", "0", "待处理"),
               ]}
     store.write_verified(path, result)
-    saved = store.save_capture(tmp_path, {**result, "result_file": str(path)})
+    with monkeypatch.context() as patch:
+        patch.setattr(store, '_read_archive', lambda _: pytest.fail('保存不应解压回读归档'))
+        saved = store.save_capture(tmp_path, {**result, "result_file": str(path)})
     assert saved["cleaning_status"] == "saved"
     capture_id = saved["capture_id"]
     restored = store.load_capture(tmp_path, capture_id)
@@ -53,7 +57,7 @@ def test_clean_failure_leaves_archive_queryable(tmp_path, monkeypatch):
     with monkeypatch.context() as patch:
         patch.setattr(store, "save_clean_capture", fail)
         saved = store.save_capture(tmp_path, result)
-    assert saved["storage_verified"] and saved["cleaning_status"] == "failed"
+    assert saved["storage_saved"] and saved["cleaning_status"] == "failed"
     assert store.load_capture(tmp_path, saved["capture_id"])["capture_complete"] is False
     assert store.rebuild_clean_capture(tmp_path, saved["capture_id"])["orders"] == 0
 
