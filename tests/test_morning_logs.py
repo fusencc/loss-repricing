@@ -26,6 +26,7 @@ def setup_log(tmp_path, monkeypatch):
     sheet.append(['订单编号', '交易号', '店铺', '销售员'])
     sheet.append(['erp-order', '0587373171290572533', 'Tiktok-583TH', '杨颖'])
     sheet.append(['unknown-order', '0587373171290572534', 'Tiktok-583TH', '杨颖'])
+    sheet.append(['second-order', None, 'Tiktok-583TH', '杨颖'])
     book.save(export)
     monkeypatch.setattr('app.services.erp_capture_store.load_capture', lambda *_: {
         'groups': [{'files': [{'file': str(export)}]}]})
@@ -100,11 +101,11 @@ def test_success_log_refresh_uses_accepted_upload_not_price_readback(tmp_path, m
     morning_log.save_success_log(config, DAY, factory=factory)
     with closing(load_workbook(path)) as book:
         assert [row[0] for row in list(book['成功清单'].values)[1:]] == (
-            ['0587373171290572533', '0587373171290572534'] if priced else ['0587373171290572533'])
+            ['1738438844764620110', '1738438844764620111'] if priced else ['1738438844764620110'])
     engine.dispose()
 
 
-def test_missing_trade_number_skips_only_that_order(tmp_path, monkeypatch, caplog):
+def test_unmatched_source_order_skips_only_that_order(tmp_path, monkeypatch, caplog):
     engine, factory, config = setup_log(tmp_path, monkeypatch)
     with factory.begin() as session:
         execution = session.get(Execution, 'exec-0')
@@ -113,8 +114,8 @@ def test_missing_trade_number_skips_only_that_order(tmp_path, monkeypatch, caplo
         execution.request = request
     path = morning_log.save_success_log(config, DAY, factory=factory)
     with closing(load_workbook(path)) as book:
-        assert [row[0] for row in list(book['成功清单'].values)[1:]] == ['0587373171290572533']
-    assert '交易号缺失或不唯一' in caplog.text
+        assert [row[0] for row in list(book['成功清单'].values)[1:]] == ['1738438844764620110']
+    assert '订单归属缺失或不唯一' in caplog.text
     engine.dispose()
 
 
@@ -140,17 +141,44 @@ def test_background_readback_refreshes_both_logs_without_running_price_submissio
     engine.dispose()
 
 
-def test_success_log_uses_real_trade_number_dedupes_and_excludes_unknown(tmp_path, monkeypatch):
+def test_success_log_skips_a_record_without_item_id(tmp_path, monkeypatch):
     engine, factory, config = setup_log(tmp_path, monkeypatch)
+    with factory.begin() as session:
+        item = session.get(Item, 'item-0')
+        item.key = {**item.key, 'item_id': ''}
+        execution = session.get(Execution, 'exec-0')
+        execution.request = {**execution.request, 'key': item.key}
+    path = morning_log.save_success_log(config, DAY, factory=factory)
+    with closing(load_workbook(path)) as book:
+        assert list(book['成功清单'].values)[1:] == []
+    engine.dispose()
+
+
+def test_success_log_exports_one_text_item_id_per_order_and_item(tmp_path, monkeypatch):
+    engine, factory, config = setup_log(tmp_path, monkeypatch)
+    with factory.begin() as session:
+        first = session.get(Execution, 'exec-0')
+        request = json.loads(json.dumps(first.request))
+        request['trace']['source_rows'].append({'order_id': 'second-order'})
+        first.request = request
+        second = session.get(Execution, 'exec-1')
+        second.state, second.response = 'accepted', {'status': 'accepted'}
+        request = json.loads(json.dumps(second.request))
+        request['trace']['source_rows'] = [{'order_id': 'erp-order'}]
+        second.request = request
     path = morning_log.save_success_log(config, DAY, factory=factory)
     assert path.name == '11.25早上运行日志.xlsx'
     assert path.parent != morning_log.save_morning_log(config, DAY, factory=factory).parent
     with closing(load_workbook(path)) as book:
         assert book.sheetnames == ['成功清单', '失败清单', '汇总']
-        assert list(book['成功清单'].values) == [('交易号', '店铺', '销售', '状态'),
-            ('0587373171290572533', 'Tiktok-583TH', '杨颖', '提价成功')]
-        assert list(book['失败清单'].values) == [('交易号', '店铺', '销售', '失败原因')]
-        assert list(book['汇总'].values)[1][1:] == (1, 1, 0, 0)
+        assert list(book['成功清单'].values) == [
+            ('itemID', '店铺', '销售', '状态'),
+            ('1738438844764620110', 'Tiktok-583TH', '杨颖', '提价成功'),
+            ('1738438844764620111', 'Tiktok-583TH', '杨颖', '提价成功'),
+            ('1738438844764620110', 'Tiktok-583TH', '杨颖', '提价成功'),
+        ]
+        assert list(book['失败清单'].values) == [('itemID', '店铺', '销售', '失败原因')]
+        assert list(book['汇总'].values)[1][1:] == (3, 3, 0, 0)
     engine.dispose()
 
 
