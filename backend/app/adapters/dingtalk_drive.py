@@ -5,7 +5,7 @@ import json
 from urllib.parse import urlsplit
 
 from app.adapters.dingtalk import DingTalkClient
-from app.services.erp_capture_store import write_verified
+from app.services.erp_capture_store import write_json
 from app.services.store import stamp
 
 
@@ -43,29 +43,30 @@ def drive_folder(config, folder, parent):
         ding.close()
 
 
-def find_drive_workbook(config, folder, parent, name):
-    path = f'/v1.0/storage/spaces/{config.ding_drive_space_id}/dentries'
+def find_drive_workbook(space, parent, name, request, inspect):
+    path = f'/v1.0/storage/spaces/{space}/dentries'
     matches, cursors = [], set()
     params = {'parentId': parent, 'maxResults': 50}
-    with drive_folder(config, folder, parent) as (_, request, inspect):
-        while True:
-            page = request('GET', path, params=params)
-            matches.extend(item for item in page['dentries'] if item.get('name') == name)
-            cursor = page.get('nextToken')
-            if not cursor:
-                break
-            if cursor in cursors:
-                raise RuntimeError('钉盘目录分页未核对完整')
-            cursors.add(cursor)
-            params['nextToken'] = cursor
-        if len(matches) > 1:
-            raise RuntimeError('钉盘存在多份同名上午日志')
-        if matches:
-            row = inspect(matches[0]['id'])
-            if (row.get('name') != name or str(row.get('parentId')) != parent
-                    or str(row.get('spaceId')) != config.ding_drive_space_id):
-                raise RuntimeError('钉盘文件与目标目录不一致')
-            return {'type': row['type'], 'nodeId': row['uuid']}
+    while True:
+        page = request('GET', path, params=params)
+        matches.extend(item for item in page['dentries'] if item.get('name') == name)
+        cursor = page.get('nextToken')
+        if not cursor:
+            break
+        if cursor in cursors:
+            raise RuntimeError('钉盘目录分页未核对完整')
+        cursors.add(cursor)
+        params['nextToken'] = cursor
+    if len(matches) > 1:
+        raise RuntimeError('钉盘存在多份同名上午日志')
+    if matches:
+        row = matches[0]
+        if not (row.get('uuid') and row.get('type')):
+            row = inspect(row['id'])
+        if (row.get('name') != name or str(row.get('parentId', parent)) != parent
+                or str(row.get('spaceId', space)) != space):
+            raise RuntimeError('钉盘文件与目标目录不一致')
+        return {'type': row['type'], 'nodeId': row['uuid']}
     return None
 
 
@@ -89,10 +90,10 @@ def publish_drive_workbook(config, filename, folder, parent):
             raise RuntimeError('上次钉盘提交结果待核验，禁止自动重传')
     if record and record.get('sha256') == digest:
         return record
-    existing = find_drive_workbook(config, folder, parent, filename.name)
-    if existing and (existing['type'] != 'FILE' or (record and existing['nodeId'] != record['node_id'])):
-        raise RuntimeError('同名日志不是本次归档文件')
     with drive_folder(config, folder, parent) as (ding, request, inspect):
+        existing = find_drive_workbook(space, parent, filename.name, request, inspect)
+        if existing and (existing['type'] != 'FILE' or (record and existing['nodeId'] != record['node_id'])):
+            raise RuntimeError('同名日志不是本次归档文件')
         base = f'/v2.0/storage/spaces/files/{folder}'
         info = request('POST', base + '/uploadInfos/query', {
             'protocol': 'HEADER_SIGNATURE', 'option': {
@@ -108,7 +109,7 @@ def publish_drive_workbook(config, filename, folder, parent):
         upload = ding.http.put(url, headers=signature['headers'], content=raw, timeout=120)
         if not upload.is_success:
             raise RuntimeError(f'钉盘文件上传返回 HTTP {upload.status_code}')
-        write_verified(intent, {'folder_id': folder, 'name': filename.name, 'sha256': digest, 'submitted_at': stamp()})
+        write_json(intent, {'folder_id': folder, 'name': filename.name, 'sha256': digest, 'submitted_at': stamp()})
         committed = request('POST', base + '/commit', {
             'uploadKey': info['uploadKey'], 'name': filename.name, 'option': {
                 # 两个已配置目录中各自固定的日期日志随核验结果原位更新；新建仍禁止重名。
@@ -117,13 +118,16 @@ def publish_drive_workbook(config, filename, folder, parent):
                 'appProperties': [{'name': 'archive_sha256', 'value': digest, 'visibility': 'PRIVATE'}],
             },
         })['dentry']
-        row = inspect(committed['id'])
-        if (row.get('uuid') != committed['uuid'] or row.get('name') != filename.name or row.get('size') != len(raw)
-                or str(row.get('spaceId')) != space or str(row.get('parentId')) != parent
+        row = committed
+        if not all(row.get(key) for key in ('uuid', 'name', 'parentId')):
+            row = inspect(committed['id'])
+        if (not row.get('uuid') or row.get('uuid') != committed.get('uuid', row['uuid'])
+                or row.get('name') != filename.name or str(row.get('parentId')) != parent
+                or str(row.get('spaceId', space)) != space
                 or (existing and row.get('uuid') != existing['nodeId'])):
             raise RuntimeError('钉盘文件回执与本次发布不一致')
         record = {'node_id': row['uuid'], 'folder_id': folder, 'name': filename.name,
                   'sha256': digest, 'published_at': stamp()}
-        write_verified(receipt, record)
+        write_json(receipt, record)
         intent.unlink()
         return record

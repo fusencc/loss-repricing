@@ -14,7 +14,7 @@ from sqlalchemy import select
 
 from app.models import Batch, Execution, Item, Ownership, UserAccount
 from app.services.decimal_display import format_decimal
-from app.services.erp_capture_store import write_verified
+from app.services.erp_capture_store import write_json
 from app.services.store import stamp, BEIJING
 
 logger = logging.getLogger(__name__)
@@ -81,15 +81,24 @@ def _save_book(config, day, directory, sheets):
             raise RuntimeError('上次钉盘提交结果待核验，保留原工作簿')
     content = sha256(json.dumps(sheets, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
     manifest = filename.with_suffix('.content.json')
-    if filename.exists() and manifest.exists() and json.loads(manifest.read_text(encoding='utf-8')) == content:
-        return filename
+    if filename.exists():
+        try:
+            if manifest.read_bytes() == json.dumps(content).encode():
+                return filename
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logger.warning('工作簿缓存不可读，将重新生成：%s', exc)
     book = Workbook(write_only=True)
     for title, headers, rows in sheets:
         _sheet(book, title, headers, rows)
     temporary = path / 'morning.tmp'
     book.save(temporary)
     temporary.replace(filename)
-    write_verified(manifest, content)
+    try:
+        write_json(manifest, content)
+    except OSError as exc:
+        logger.warning('工作簿已生成，缓存未写入：%s', exc)
     return filename
 
 
@@ -264,14 +273,14 @@ def publish_workbook(folder, filename):
     if existing and record and existing['nodeId'] != record['node_id']:
         raise RuntimeError('同名日志不是本次归档文件')
     target = ['--node', existing['nodeId']] if existing else ['--folder', folder]
-    write_verified(intent, {'folder_id': folder, 'name': filename.name, 'sha256': digest})
+    write_json(intent, {'folder_id': folder, 'name': filename.name, 'sha256': digest})
     result = _dws(['drive', '+upload', *target, '--file', filename.name, '--format', 'json', '--yes'], filename.parent)
     node = result.get('nodeId')
     if not node or (existing and node != existing['nodeId']):
         raise RuntimeError('钉盘未返回一致的文件节点，不自动重传')
     record = {'node_id': node, 'folder_id': folder, 'name': filename.name,
               'sha256': digest, 'published_at': stamp()}
-    write_verified(receipt, record)
+    write_json(receipt, record)
     intent.unlink()
     return record
 

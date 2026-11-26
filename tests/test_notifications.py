@@ -71,7 +71,11 @@ def test_dingtalk_timeout_is_unknown():
     assert c.send_notice('u','t','m','https://example.com/')['state']=='unknown'
 
 @pytest.fixture
-def notices_context(tmp_path):
+def notices_context(tmp_path, monkeypatch):
+    from app.services.store import utcnow, BEIJING
+    now = utcnow()
+    send_time = max(now, now.astimezone(BEIJING).replace(hour=8, minute=0, second=0, microsecond=0))
+    monkeypatch.setattr('app.services.notifications.utcnow', lambda: send_time)
     from app.models import Batch, Item
     from app.models.notifications import Notice
     from app.models.coordination import UserAccount, Ownership

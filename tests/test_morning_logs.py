@@ -104,6 +104,18 @@ def test_success_log_refresh_uses_accepted_upload_not_price_readback(tmp_path, m
     engine.dispose()
 
 
+def test_damaged_content_cache_does_not_block_workbook(tmp_path, monkeypatch):
+    engine, factory, config = setup_log(tmp_path, monkeypatch)
+    path = morning_log.save_morning_log(config, DAY, factory=factory)
+    path.with_suffix('.content.json').write_bytes(b'\xff')
+    with factory.begin() as session:
+        session.get(Item, 'item-2').reason = '更新后的说明'
+    morning_log.save_morning_log(config, DAY, factory=factory)
+    with closing(load_workbook(path)) as book:
+        assert any(row[-1] == '更新后的说明' for row in book['明细'].values)
+    engine.dispose()
+
+
 def test_missing_trade_number_skips_only_that_order(tmp_path, monkeypatch, caplog):
     engine, factory, config = setup_log(tmp_path, monkeypatch)
     with factory.begin() as session:
@@ -118,7 +130,7 @@ def test_missing_trade_number_skips_only_that_order(tmp_path, monkeypatch, caplo
     engine.dispose()
 
 
-def test_background_readback_refreshes_both_logs_without_running_price_submission(tmp_path, monkeypatch):
+def test_background_readback_does_not_write_logs(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from datetime import datetime, timezone
     from app.worker import Worker
@@ -134,9 +146,9 @@ def test_background_readback_refreshes_both_logs_without_running_price_submissio
             session.get(Execution, 'exec-1').state = 'verified'
     worker = Worker(factory, SimpleNamespace(config=config, reconcile=reconcile))
     worker.tick(datetime(2026, 11, 25, 8, 0, tzinfo=timezone.utc).timestamp())
-    assert calls == [False, True]
-    with closing(load_workbook(tmp_path / 'success-logs' / DAY.isoformat() / '11.25早上运行日志.xlsx')) as book:
-        assert len(list(book['成功清单'].values)) == 3
+    assert calls == []
+    assert not (tmp_path / 'morning-logs').exists()
+    assert not (tmp_path / 'success-logs').exists()
     engine.dispose()
 
 
@@ -151,6 +163,41 @@ def test_success_log_uses_real_trade_number_dedupes_and_excludes_unknown(tmp_pat
             ('0587373171290572533', 'Tiktok-583TH', '杨颖', '提价成功')]
         assert list(book['失败清单'].values) == [('交易号', '店铺', '销售', '失败原因')]
         assert list(book['汇总'].values)[1][1:] == (1, 1, 0, 0)
+    engine.dispose()
+
+
+def test_daily_run_writes_both_logs_only_after_all_price_attempts(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from datetime import datetime, timezone
+    from app.worker import Worker
+    from app.services.store import enqueue
+
+    engine, factory, config = setup_log(tmp_path, monkeypatch)
+    config = config.model_copy(update={'ding_tk_morning_log_folder': 'own',
+        'ding_cancellation_log_folder': 'luodi', 'coordination_required': False})
+    events = []
+
+    def run_batch(job_id):
+        assert events == []
+        events.extend(['first-item-finished', 'last-item-finished'])
+        # 仍有 unknown 执行，不要求全部核验成功才写日志。
+        with factory() as session:
+            assert session.get(Execution, 'exec-1').state == 'unknown'
+        return 'batch'
+
+    def publish(config, path, *, success=False):
+        assert events[:2] == ['first-item-finished', 'last-item-finished']
+        events.append(('publish', success))
+
+    monkeypatch.setattr(morning_log, 'publish_morning_log', publish)
+    enqueue(factory, 'run', {'date': DAY.isoformat()}, f'daily:{DAY.isoformat()}')
+    worker = Worker(factory, SimpleNamespace(config=config, reconcile=lambda: None, run_batch=run_batch))
+    now = datetime(2026, 11, 25, 8, tzinfo=timezone.utc).timestamp()
+    worker.tick(now)
+    assert events == ['first-item-finished', 'last-item-finished', ('publish', False), ('publish', True)]
+    worker.tick(now + 61)
+    assert len(events) == 4
+    assert not (tmp_path / 'morning-logs' / DAY.isoformat() / 'refresh-pending.json').exists()
     engine.dispose()
 
 
@@ -213,7 +260,7 @@ def test_unknown_upload_keeps_original_workbook_when_records_change(tmp_path, mo
     engine.dispose()
 
 
-def test_cross_day_readback_refreshes_original_business_day(tmp_path, monkeypatch):
+def test_cross_day_readback_does_not_republish_finished_logs(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from datetime import datetime, timezone
     from app.worker import Worker
@@ -233,7 +280,7 @@ def test_cross_day_readback_refreshes_original_business_day(tmp_path, monkeypatc
             session.get(Execution, 'exec-1').state = 'verified'
     Worker(factory, SimpleNamespace(config=config, reconcile=reconcile)).tick(
         datetime(2026, 11, 25, 8, tzinfo=timezone.utc).timestamp())
-    assert calls == [('11.24早上运行日志.xlsx', False), ('11.24早上运行日志.xlsx', True)]
+    assert calls == []
     engine.dispose()
 
 
@@ -291,7 +338,9 @@ def test_historical_log_failure_is_retried_after_worker_restart(tmp_path, monkey
     monkeypatch.setattr(morning_log, 'publish_morning_log', publish)
     worker = Worker(factory, SimpleNamespace(config=config, reconcile=reconcile))
     now = datetime(2026, 11, 25, 8, tzinfo=timezone.utc).timestamp()
-    worker.tick(now)
+    # 已结束整轮的日志写入失败，才保留原业务日的补写意图。
+    reconcile()
+    assert worker._morning_log(config, date(2026, 11, 24))
     marker = tmp_path / 'morning-logs' / '2026-11-24' / 'refresh-pending.json'
     assert marker.exists()
     assert len(calls) == 2
@@ -324,7 +373,7 @@ def test_marker_cleanup_failure_does_not_block_claiming_price_job(tmp_path, monk
     monkeypatch.setattr(Path, 'unlink', unlink)
     monkeypatch.setattr(morning_log, 'publish_morning_log', lambda *_, **kw: None)
     calls = []
-    enqueue(factory, 'run', {}, 'manual-log-isolation')
+    enqueue(factory, 'run', {'date': DAY.isoformat()}, f'daily:{DAY.isoformat()}')
     def run(key):
         calls.append(key)
         return 'batch'

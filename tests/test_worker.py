@@ -180,12 +180,18 @@ def test_former_roster_day_uses_regular_schedule_and_batch(tmp_path, monkeypatch
     engine, factory, service = setup(tmp_path)
     service.config = Settings(_env_file=None, runtime_dir=tmp_path, coordination_required=False)
     update_settings(factory, {'schedule_enabled': True})
-    monkeypatch.setattr(Worker, '_morning_log', lambda *args: None)
+    written_days = []
+    def write_log(worker, config, day):
+        assert service.calls == 1
+        written_days.append(day.isoformat())
+    monkeypatch.setattr(Worker, '_morning_log', write_log)
     worker = Worker(factory, service)
     worker.tick(datetime(2026, 11, 25, 20, tzinfo=timezone.utc).timestamp())
     assert service.calls == 0
+    assert written_days == []
     worker.tick(datetime(2026, 11, 26, 1, tzinfo=timezone.utc).timestamp())
     assert service.calls == 1
+    assert written_days == ['2026-11-26']
     with factory() as session:
         job = session.query(Job).one()
         assert job.state == 'done' and job.batch_id == 'batch-result'

@@ -25,7 +25,7 @@ from app.services.erp_clean_capture import save_clean_capture
 CAPTURE_ID = re.compile(r'erp-capture-[0-9]{8}T[0-9]{12}Z-[a-f0-9]{32}')
 
 
-def write_verified(path, data):
+def write_json(path, data):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix('.tmp')
@@ -33,12 +33,17 @@ def write_verified(path, data):
         with temporary.open('x', encoding='utf-8') as stream:
             json.dump(data, stream, ensure_ascii=False, indent=2, allow_nan=False)
         temporary.replace(path)
-        restored = json.loads(path.read_text(encoding='utf-8'))
-        if restored != data:
-            path.unlink()
-            raise OSError('ERP采集文件回读不一致，未确认保存成功')
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def write_verified(path, data):
+    path = Path(path)
+    write_json(path, data)
+    restored = json.loads(path.read_text(encoding='utf-8'))
+    if restored != data:
+        path.unlink()
+        raise OSError('ERP采集文件回读不一致，未确认保存成功')
 
 
 BULK_DIRECTORY = re.compile(r'erp-bulk-[0-9]{8}T[0-9]{6}Z-[a-f0-9]{32}')

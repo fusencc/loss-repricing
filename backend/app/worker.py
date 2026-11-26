@@ -86,32 +86,12 @@ class Worker:
         if now - self.last_reconcile >= 60:
             track_logs = service_config and (service_config.ding_tk_morning_log_folder
                                             or service_config.ding_cancellation_log_folder)
-            dates = set()
-            if track_logs:
-                from app.models import Batch, Item, Execution
-                with self.factory() as session:
-                    dates.update(row[0] for row in session.query(Batch.business_date).select_from(Execution)
-                        .join(Item, Item.id == Execution.item_id).join(Batch, Batch.id == Item.batch_id)
-                        .filter(Batch.mode == 'live', Execution.state.in_(
-                            ['submitting', 'accepted', 'unknown', 'mismatch'])).all())
-                    if session.query(Batch.id).filter_by(mode='live', business_date=local.date().isoformat()).first():
-                        dates.add(local.date().isoformat())
-                dates.update(marker.parent.name for marker in
-                             (service_config.runtime_dir / 'morning-logs').glob('*/refresh-pending.json'))
-                # 核验前持久标记原业务日；即使本轮转失败或写入断网、进程重启也会补刷。
-                from app.services.erp_capture_store import write_verified
-                for business_date in dates:
-                    marker = service_config.runtime_dir / 'morning-logs' / business_date / 'refresh-pending.json'
-                    try:
-                        write_verified(marker, {'business_date': business_date})
-                    except OSError as exc:
-                        self._failure('worker.morning_log_failed', exc)
             self.service.reconcile()
             self.last_reconcile = now
-            # 后台核验后同时补原业务日归档，跨日成功不能误写到今天的文件。
+            # 只重试整轮结束后写入失败的日志，不随逐条核验生成或刷新日志。
             if track_logs:
-                for business_date in sorted(dates):
-                    self._morning_log(service_config, date.fromisoformat(business_date))
+                for marker in sorted((service_config.runtime_dir / 'morning-logs').glob('*/refresh-pending.json')):
+                    self._morning_log(service_config, date.fromisoformat(marker.parent.name))
         job = claim_job(self.factory, self.owner, now)
         if job is None:
             return
@@ -182,10 +162,10 @@ class Worker:
 
     def _morning_log(self, config, day):
         from app.services.morning_log import publish_morning_log, save_morning_log, save_success_log
-        from app.services.erp_capture_store import write_verified
         marker = config.runtime_dir / 'morning-logs' / day.isoformat() / 'refresh-pending.json'
         try:
-            write_verified(marker, {'business_date': day.isoformat()})
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
         except OSError as exc:
             self._failure('worker.morning_log_failed', exc)
         errors = []

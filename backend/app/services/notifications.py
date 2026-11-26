@@ -331,7 +331,8 @@ def _dispatch_notices(factory,config,owner):
     try:
         with factory() as session:
             ids=list(session.scalars(select(Notice.id).join(Batch, Batch.id == Notice.batch_id).where(
-                Batch.mode == 'live', Notice.synthetic.is_(False), Notice.delivery_state.in_(['pending','accepted','delivered']))))
+                Batch.mode == 'live', Notice.synthetic.is_(False), Notice.delivery_state.in_(['pending','accepted','delivered']))
+                .order_by(Notice.created_at, Notice.id)))
         for notice_id in ids:
             if not _renew_dispatch(factory,owner):
                 break
@@ -371,7 +372,8 @@ def _dispatch_notices(factory,config,owner):
                     _,resolve=_coord()
                     unassigned=any(resolve(session,i.key) is None for i in current)
                     notice.summary=dict(notice.summary,unassigned=unassigned)
-                    if client is None:
+                    if client is None or utcnow().astimezone(BEIJING).hour < 8:
+                        # 早间通知留在持久队列，8 点后按原入队顺序发送；回执查询照常进行。
                         continue
                     if _warning_notice(notice):
                         userid = getattr(config, 'ding_alert_userid', '')

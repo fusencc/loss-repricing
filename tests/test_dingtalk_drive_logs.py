@@ -7,7 +7,7 @@ import pytest
 from app.adapters import dingtalk_drive
 
 
-def drive(tmp_path, monkeypatch, *, fail=False):
+def drive(tmp_path, monkeypatch, *, fail=False, sparse=False):
     path = tmp_path / '11.25早上运行日志.xlsx'
     path.write_bytes(b'first')
     config = SimpleNamespace(ding_drive_space_id='123')
@@ -17,6 +17,8 @@ def drive(tmp_path, monkeypatch, *, fail=False):
     @contextmanager
     def folder(*_):
         def request(method, endpoint, payload=None, params=None):
+            if method == 'GET':
+                return {'dentries': [dict(current, type='FILE')]}
             if endpoint.endswith('/query'):
                 return {'uploadKey': 'upload', 'headerSignatureInfo': {
                     'resourceUrls': ['https://upload.dingtalk.com/file'], 'headers': {}}}
@@ -24,10 +26,13 @@ def drive(tmp_path, monkeypatch, *, fail=False):
             if fail:
                 raise RuntimeError('unknown commit')
             current['size'] = len(path.read_bytes())
-            return {'dentry': current}
-        yield SimpleNamespace(http=SimpleNamespace(put=lambda *a, **kw: SimpleNamespace(is_success=True))), request, lambda _: current
+            return {'dentry': {'id': '456'} if sparse else current}
+        def inspect(node_id):
+            assert sparse and node_id == '456', '完整回执不应重复查询文件'
+            calls.append('inspect')
+            return current
+        yield SimpleNamespace(http=SimpleNamespace(put=lambda *a, **kw: SimpleNamespace(is_success=True))), request, inspect
     monkeypatch.setattr(dingtalk_drive, 'drive_folder', folder)
-    monkeypatch.setattr(dingtalk_drive, 'find_drive_workbook', lambda *_: {'type': 'FILE', 'nodeId': 'file'})
     return config, path, calls
 
 
@@ -42,6 +47,13 @@ def test_changed_daily_log_updates_same_node_while_unchanged_log_is_not_uploaded
     assert first['node_id'] == second['node_id'] == 'file'
     assert second['sha256'] == sha256(path.read_bytes()).hexdigest()
     assert not path.with_suffix('.publish-intent.json').exists()
+
+
+def test_sparse_commit_receipt_queries_file_once(tmp_path, monkeypatch):
+    config, path, calls = drive(tmp_path, monkeypatch, sparse=True)
+    receipt = dingtalk_drive.publish_drive_workbook(config, path, 'folder', '789')
+    assert receipt['node_id'] == 'file'
+    assert calls == ['OVERWRITE', 'inspect']
 
 
 def test_uncertain_commit_stops_reupload_and_does_not_claim_success(tmp_path, monkeypatch):
