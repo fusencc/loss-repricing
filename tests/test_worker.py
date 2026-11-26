@@ -29,7 +29,7 @@ def test_job_completes_and_schedule_creates_only_one_daily_job(tmp_path):
     engine, factory, service = setup(tmp_path)
     update_settings(factory, {"schedule_enabled": True})
     worker = Worker(factory, service)
-    now = datetime(2026, 11, 5, 1, 0, tzinfo=timezone.utc).timestamp()
+    now = datetime(2026, 11, 4, 21, 0, tzinfo=timezone.utc).timestamp()
     worker.tick(now)
     worker.tick(now + 5)
     assert service.calls == 1
@@ -39,11 +39,11 @@ def test_job_completes_and_schedule_creates_only_one_daily_job(tmp_path):
     engine.dispose()
 
 
-def test_schedule_starts_at_beijing_nine(tmp_path):
+def test_schedule_starts_at_beijing_five(tmp_path):
     engine, factory, service = setup(tmp_path)
     update_settings(factory, {"schedule_enabled": True})
     worker = Worker(factory, service)
-    before = datetime(2026, 11, 5, 0, 59, 59, tzinfo=timezone.utc).timestamp()
+    before = datetime(2026, 11, 4, 20, 59, 59, tzinfo=timezone.utc).timestamp()
     worker.tick(before)
     assert service.calls == 0
     with factory() as session:
@@ -58,11 +58,11 @@ def test_schedule_starts_at_beijing_nine(tmp_path):
     engine.dispose()
 
 
-def test_schedule_disabled_at_beijing_nine(tmp_path):
+def test_schedule_disabled_at_beijing_five(tmp_path):
     engine, factory, service = setup(tmp_path)
     update_settings(factory, {"schedule_enabled": False})
     worker = Worker(factory, service)
-    worker.tick(datetime(2026, 11, 5, 1, 0, tzinfo=timezone.utc).timestamp())
+    worker.tick(datetime(2026, 11, 4, 21, 0, tzinfo=timezone.utc).timestamp())
     assert service.calls == 0
     with factory() as session:
         assert session.query(Job).count() == 0
@@ -154,7 +154,7 @@ def test_notice_dispatch_failure_does_not_skip_reconciliation_or_daily_job(tmp_p
     monkeypatch.setattr(service, "reconcile", lambda: reconciles.append(True))
     monkeypatch.setattr("app.worker.event", lambda name, **kwargs: logged.append(name))
     update_settings(factory, {"schedule_enabled": True})
-    Worker(factory, service).tick(datetime(2026, 11, 5, 1, 0, tzinfo=timezone.utc).timestamp())
+    Worker(factory, service).tick(datetime(2026, 11, 4, 21, 0, tzinfo=timezone.utc).timestamp())
     assert reconciles == [True] and service.calls == 1
     assert "worker.notice_dispatch_failed" in logged
     with factory() as session:
@@ -182,7 +182,7 @@ def test_former_roster_day_uses_regular_schedule_and_batch(tmp_path, monkeypatch
     update_settings(factory, {'schedule_enabled': True})
     monkeypatch.setattr(Worker, '_morning_log', lambda *args: None)
     worker = Worker(factory, service)
-    worker.tick(datetime(2026, 11, 25, 23, tzinfo=timezone.utc).timestamp())
+    worker.tick(datetime(2026, 11, 25, 20, tzinfo=timezone.utc).timestamp())
     assert service.calls == 0
     worker.tick(datetime(2026, 11, 26, 1, tzinfo=timezone.utc).timestamp())
     assert service.calls == 1

@@ -81,7 +81,7 @@ class Worker:
         config = settings_value(self.factory)
         local = datetime.fromtimestamp(now, timezone.utc).astimezone(BEIJING)
         service_config = getattr(self.service, "config", None)
-        if config["schedule_enabled"] and local.hour >= 9:
+        if config["schedule_enabled"] and local.hour >= 5:
             enqueue(self.factory, "run", {"date": local.date().isoformat()}, f"daily:{local.date().isoformat()}")
         if now - self.last_reconcile >= 60:
             track_logs = service_config and (service_config.ding_tk_morning_log_folder

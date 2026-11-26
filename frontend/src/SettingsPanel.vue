@@ -59,7 +59,7 @@ async function save() {
           <el-switch v-model="form.autonomous_enabled" aria-labelledby="autonomous-label" />
         </div>
         <div class="setting-line">
-          <div><strong id="schedule-label">开启定时检查</strong><p>北京时间 09:00 起，每 5 分钟检查一次。</p></div>
+          <div><strong id="schedule-label">开启定时检查</strong><p>北京时间 05:00 起，每 5 分钟检查一次。</p></div>
           <el-switch v-model="form.schedule_enabled" aria-labelledby="schedule-label" />
         </div>
         <div class="settings-fields">
