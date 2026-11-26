@@ -52,15 +52,14 @@ test('personal export rounds only amount fields to two decimals and preserves ID
   const rows = workbook['提价记录']
   assert.equal(rows.length, 4)
   assert.deepEqual(rows[0].map(c => c.value), ['商品编码（SKU）', '商品ID', '产品ID', '店铺名称／编号', '站点', '平台', '一次毛利金额',
-    '毛利币种', '价格币种', '原营销价', '目标营销价', '上传价格', '记录状态', '更新时间（北京时间）', '是否模拟数据'])
+    '毛利币种', '价格币种', '原营销价', '目标营销价', '上传价格', '记录状态', '更新时间（北京时间）'])
   assert.deepEqual(rows[1].map(c => c.value), [item.key.sku, item.key.item_id, item.key.product_id, item.key.shop_id, 'PH', 'Tiktok',
     '-0.12', 'CNY', 'PHP', '12.12', '13', '20.01',
-    '已提价', '2026-11-23 09:00:00', '否'])
+    '已提价', '2026-11-23 09:00:00'])
   for (const index of [0, 1, 2, 3, 6, 9, 10, 11]) assert.equal(rows[1][index].type, 's')
   assert.deepEqual(rows[2].slice(0, 4).map(c => c.value), ['=1+1', null, item.key.product_id, '店铺名称'])
   assert.equal(rows[2][0].type, 's', 'formula-looking SKU must stay text')
   assert.deepEqual(rows[2].slice(6, 12).map(c => c.value), [null, null, null, null, null, null])
-  assert.equal(rows[2][14].value, '是')
   assert.deepEqual(rows[3].slice(0, 3).map(c => c.value), [item.key.sku, item.key.item_id, null])
   assert.equal(rows[3][6].value, '0')
   assert.deepEqual(workbook['导出信息'].slice(0, 4).map(r => r.map(c => c.value)), [['导出项目', '内容'], ['销售员', group.name], ['部门', '测试部门'], ['记录总数', 3]])
@@ -139,7 +138,7 @@ test('export layout keeps headers and identities visible with readable styled ro
   assert.equal(sheet.row_height, 36)
   assert.equal(sheet.wrap, true)
   assert.deepEqual(sheet.alignment, ['left', 'left', 'left', 'left', 'center', 'left', 'right', 'center', 'center',
-    'right', 'right', 'right', 'center', 'left', 'center'])
+    'right', 'right', 'right', 'center', 'left'])
   assert.equal(sheet.stripe, 'FFF0F4F8')
   assert.equal(sheet.status_fill, 'FFE6F4EA')
   assert.equal(sheet.status_bold, true)
