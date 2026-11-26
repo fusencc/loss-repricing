@@ -19,6 +19,8 @@ from app.domain.money import MoneyRatio
 from app.domain.price_reference import saved_price_limit
 from app.adapters.base import SourceUnavailable, SubmitResult
 from app.adapters.roster_price_upload import ROSTER_UPLOAD_TRACE, RosterPriceTransport
+from app.adapters.erp_price_upload import ERP_UPLOAD_TRACE, ErpPriceTransport
+from app.adapters.erp_bulk_capture import ERP_DEPARTMENTS
 from app.adapters.official_price_logs import capture_recent_price_changes, recent_price_log_for
 from app.services.store import utcnow, stamp, parse_stamp, BEIJING, settings_value, settings_for_submit, _lock_runtime_settings, enqueue, is_erp_reconciliation, write_decisions
 from app.services.coordination import automation_gate, lock_authorization
@@ -29,6 +31,7 @@ class PricingService:
     def __init__(self, factory, adapter, settings):
         self.factory, self.adapter, self.config = factory, adapter, settings
         self._roster_channel = None
+        self._department_channel = None
 
     def _roster_transport(self):
         """仅供历史固定名单执行回查，不提供新提交入口。"""
@@ -39,6 +42,13 @@ class PricingService:
     def close(self):
         if self._roster_channel is not None:
             self._roster_channel.close()
+        if self._department_channel is not None:
+            self._department_channel.close()
+
+    def _department_transport(self):
+        if self._department_channel is None:
+            self._department_channel = ErpPriceTransport(self.config)
+        return self._department_channel
 
     def _enrich(self, snapshot, *, history_from=None):
         """真实近期调价由开放接口证明；本地档案只补充未知执行锁和人工保护。"""
@@ -81,19 +91,26 @@ class PricingService:
         return result
 
     @staticmethod
-    def _runtime_allowed(key, cfg, manual):
+    def _runtime_allowed(key, cfg, manual, *, department=False):
         if cfg["paused"] or key.site in cfg["paused_sites"]:
             return False, "当前范围已暂停新提交"
         if not manual and not cfg["autonomous_enabled"]:
             return False, "自动运行尚未启用"
-        if key.shop_id not in cfg["pilot_shops"] or key.site not in cfg["site_enabled"]:
+        if not department and (key.shop_id not in cfg["pilot_shops"] or key.site not in cfg["site_enabled"]):
             return False, "店铺或站点不在已启用试点名单"
         return True, ""
 
-    def _allowed(self, key, manual=False):
-        allowed, reason = self._runtime_allowed(key, settings_value(self.factory), manual)
+    def _allowed(self, key, manual=False, *, department=None):
+        allowed, reason = self._runtime_allowed(key, settings_value(self.factory), manual, department=department is not None)
         if not allowed:
             return allowed, reason
+        if department is not None:
+            if self.adapter.mode != 'live' or not self.config.live_submit_enabled:
+                return False, "ERP 部门真实提交未启用"
+            if self.config.coordination_required:
+                with self.factory() as session:
+                    return automation_gate(session, key, erp_salesperson=department.get('salesperson'))
+            return True, ""
         if self.adapter.mode == "file":
             return False, "文件模式仅对账，不执行上传"
         if self.adapter.mode == "live":
@@ -125,6 +142,59 @@ class PricingService:
             event('batch.completed', batch_id=batch_id, source=self.adapter.mode,
                   synthetic=getattr(self.adapter, 'synthetic', False), duration_ms=(time.monotonic() - started) * 1000)
             return batch_id
+
+    def run_department_batch(self, run_key, prepared):
+        """日任务根据部门原始订单和销售单品定价；重启后只消费本批仍未领取的执行。"""
+        day, name = prepared.day, prepared.department
+        if self.adapter.mode != 'live' or name not in ERP_DEPARTMENTS or prepared.snapshot.business_date != day:
+            raise ValueError("部门批次缺少本业务日的正式来源")
+        if day != utcnow().astimezone(BEIJING).date():
+            raise SourceUnavailable("部门批次已跨业务日，等待当日采集")
+        key = f'erp-department:{day.isoformat()}:{name}'
+        with self.factory() as session:
+            batch_id = session.scalar(select(Batch.id).where(Batch.run_key == key))
+        if batch_id is None:
+            auth = observe_prices(self.factory, prepared.snapshot) if self.config.coordination_required else {}
+            decisions = []
+            for original in prepared.decisions:
+                decision = original.model_copy(update={'trace': dict(original.trace)})
+                price = prepared.prices.get(decision.key.identity())
+                source = dict(decision.trace.get('erp_department') or {}, department=name)
+                decision.trace['erp_department'] = source
+                if price is not None:
+                    source.update(shop_name=price.shop_name, salesperson=price.salesperson)
+                if decision.ready and (price is None or not price.shop_name or
+                        (price.upload_price, price.target_actual) != (decision.upload_price, decision.target_actual)):
+                    decision.ready, decision.status, decision.reason = False, '待处理', '本轮部门算价未匹配到同一店铺、商品和金额'
+                if self.config.coordination_required:
+                    decision.trace['authorization'] = auth.get(decision.key.target_identity(), {})
+                decisions.append(decision)
+            archive = prepared.snapshot.model_dump(mode='json')
+            archive['source_versions'].update(erp_department=name, erp_job_id=run_key)
+            try:
+                with transaction(self.factory) as session:
+                    batch_id = str(uuid4())
+                    session.add(Batch(id=batch_id, run_key=key, business_date=day.isoformat(), mode='live',
+                        status='running', created_at=stamp(), snapshot=archive, summary={}))
+                    session.flush()
+                    write_decisions(session, batch_id, decisions)
+            except IntegrityError:
+                with self.factory() as session:
+                    batch_id = session.scalar(select(Batch.id).where(Batch.run_key == key))
+                    if batch_id is None:
+                        raise
+        with self.factory() as session:
+            pending = session.scalars(select(Item.id).where(Item.batch_id == batch_id, Item.phase == 'proposed')).all()
+        for item_id in pending:
+            with self.factory() as session:
+                saved = session.scalar(select(Item.decision).where(Item.id == item_id, Item.phase == 'proposed'))
+            if saved is None:
+                continue
+            decision = Decision.model_validate(saved)
+            if self._submit(item_id, decision, day, department=decision.trace['erp_department'], batch_id=batch_id) is False:
+                self._hold(item_id, '已跨北京时间业务日，本条未提交')
+        self._summarize(batch_id)
+        return batch_id
 
     def _run_batch(self, run_key, item_id=None):
         target_id = None
@@ -279,14 +349,16 @@ class PricingService:
                 item.reason, item.updated_at = reason, stamp()
 
     def _hold(self, item_id, reason, status="待处理", *, decision=None):
+        values = dict(status=status, phase="blocked", reason=reason, updated_at=stamp())
+        if decision is not None:
+            values['decision'] = decision.model_dump(mode="json")
         with transaction(self.factory) as session:
-            item = session.get(Item, item_id)
-            item.status, item.phase, item.reason, item.updated_at = status, "blocked", reason, stamp()
-            if decision is not None:
-                item.decision = decision.model_dump(mode="json")
-        event('execution.blocked', item_id=item_id)
+            # 并发恢复时，较晚返回的预检结果不能覆盖已经领取的执行。
+            changed = session.execute(update(Item).where(Item.id == item_id, Item.phase == "proposed").values(**values))
+        if changed.rowcount:
+            event('execution.blocked', item_id=item_id)
 
-    def _locked_submission_access(self, session, decision):
+    def _locked_submission_access(self, session, decision, department=None):
         control = lock_control(session, decision.key)
         correction_id = decision.trace.get('correction_id')
         if correction_id:
@@ -299,9 +371,10 @@ class PricingService:
         locked = lock_authorization(session, decision.key)
         return automation_gate(
             session, decision.key, decision.trace.get("authorization", {}), locked=locked,
+            erp_salesperson=department.get('salesperson') if department is not None else None,
         )
 
-    def _claim(self, item_id, decision):
+    def _claim(self, item_id, decision, *, department=None, execution_id=None):
         identity = decision.key.target_identity()
         # 先确保锁行存在；并发创建的冲突只需重新读取，不影响已有执行。
         try:
@@ -310,7 +383,7 @@ class PricingService:
                     session.add(VariantGuard(variant_id=identity))
         except IntegrityError:
             pass
-        execution_id = str(uuid4())
+        execution_id = execution_id or str(uuid4())
         with transaction(self.factory) as session:
             if session.scalar(select(Execution.id).where(Execution.item_id == item_id)):
                 return None
@@ -318,7 +391,7 @@ class PricingService:
             item = session.get(Item, item_id)
             item.decision = decision.model_dump(mode="json")
             if self.config.coordination_required:
-                allowed, reason = self._locked_submission_access(session, decision)
+                allowed, reason = self._locked_submission_access(session, decision, department)
                 if not allowed:
                     item = session.get(Item, item_id)
                     item.status, item.phase, item.reason, item.updated_at = "待处理", "blocked", reason, stamp()
@@ -348,13 +421,30 @@ class PricingService:
                 return None
             cutoff = stamp(utcnow() - timedelta(hours=72))
             conditions = [VariantGuard.variant_id == identity, VariantGuard.execution_id.is_(None)]
-            if self.adapter.mode != "live" and not decision.trace.get("correction_id"):
+            if (self.adapter.mode != "live" or department is not None) and not decision.trace.get("correction_id"):
                 conditions.append(or_(VariantGuard.last_effective_at.is_(None), VariantGuard.last_effective_at <= cutoff))
             claimed = session.execute(update(VariantGuard).where(*conditions).values(execution_id=execution_id))
             if claimed.rowcount != 1:
                 item = session.get(Item, item_id)
-                item.status, item.phase, item.reason = "待核验", "blocked", "同一在线变体仍在核验或距生效不足72小时"
+                if department is not None and session.get(VariantGuard, identity, with_for_update=True).execution_id is None:
+                    item.status, item.phase, item.reason = '不调价', 'excluded', '近72小时已有本系统核验成功的调价记录'
+                else:
+                    item.status, item.phase, item.reason = "待核验", "blocked", "同一在线变体仍在核验或距生效不足72小时"
                 return None
+            if department is not None:
+                # 旧执行按平台逐行成功终结，尚无已核验实际价时间；也覆盖迁移前遗留的未知执行。
+                prior = session.execute(select(Execution.id, Execution.state).join(Item).join(Batch).where(
+                    Batch.mode == 'live', Execution.variant_id == identity,
+                    or_(Execution.state.in_(('submitting', 'accepted', 'unknown', 'mismatch')),
+                        (Execution.state == 'uploaded') & (Execution.updated_at > cutoff))
+                ).order_by(Execution.state == 'uploaded', Execution.created_at, Execution.id).limit(1)).first()
+                if prior:
+                    guard = session.get(VariantGuard, identity)
+                    guard.execution_id = prior.id if prior.state != 'uploaded' else None
+                    item.status, item.phase = ('待核验', 'blocked') if guard.execution_id else ('不调价', 'excluded')
+                    item.reason, item.updated_at = ('本商品已有未终结提交，仅查结果' if guard.execution_id else
+                        '近72小时已有本系统成功调价记录'), stamp()
+                    return None
             session.add(Execution(id=execution_id, item_id=item_id, variant_id=identity, state="submitting",
                 request=decision.model_dump(mode="json"), response={}, evidence={}, created_at=stamp(), updated_at=stamp()))
             if decision.trace.get("correction_id"):
@@ -369,17 +459,22 @@ class PricingService:
               source=self.adapter.mode, synthetic=getattr(self.adapter, 'synthetic', False))
         return execution_id
 
-    def _submit(self, item_id, decision, business_date=None):
+    def _submit(self, item_id, decision, business_date=None, *, department=None, batch_id=None):
         if business_date and utcnow().astimezone(BEIJING).date() != business_date:
             return False
         manual = bool(decision.trace.get("correction_id"))
-        allowed, reason = self._allowed(decision.key, manual=manual)
+        allowed, reason = (self._allowed(decision.key, department=department) if department is not None else
+                           self._allowed(decision.key, manual=manual))
         if not allowed:
             self._hold(item_id, reason)
             return
         if self.adapter.mode == 'live' and not manual:
             try:
-                official = capture_recent_price_changes(self.config, [decision.key], now=utcnow())
+                connection = {}
+                if department is not None:
+                    transport = self._department_transport()
+                    connection = {'client': transport.client, 'auth': transport.auth}
+                official = capture_recent_price_changes(self.config, [decision.key], now=utcnow(), **connection)
                 decision.trace['official_price_history_before_submit'] = official
                 recent = recent_price_log_for(official, decision.key)
             except (SourceUnavailable, ValueError, TypeError, KeyError):
@@ -392,19 +487,30 @@ class PricingService:
                     decision.reason_code, decision.reason = 'recent_price_change', '提交前查到近72小时调价日志，不调价'
                     self._hold(item_id, decision.reason, decision.status, decision=decision)
                     return
-        execution_id = self._claim(item_id, decision)
+        if department is None:
+            execution_id = self._claim(item_id, decision)
+        else:
+            execution_id = str(uuid4())
+            try:
+                decision.trace[ERP_UPLOAD_TRACE] = self._department_transport().prepare(
+                    execution_id, batch_id, business_date, department['shop_name'], decision)
+            except (SourceUnavailable, ValueError, TypeError, KeyError, ArithmeticError, OSError) as exc:
+                event('execution.department_preflight_failed', exception=exc, item_id=item_id)
+                self._hold(item_id, str(exc) if isinstance(exc, (SourceUnavailable, ValueError)) else '单品上传前核验未完成')
+                return
+            execution_id = self._claim(item_id, decision, department=department, execution_id=execution_id)
         if not execution_id:
             return
         # 执行意图已在上个事务持久化。最后一段与人工接管串行化：
         # 请求已开始后接管不会撤销外部调用；崩溃时上个意图仍在，继续核验不重传。
         with transaction(self.factory) as session:
             if self.config.coordination_required:
-                allowed, reason = self._locked_submission_access(session, decision)
+                allowed, reason = self._locked_submission_access(session, decision, department)
             # 执行意图落库后，管理员或本站点超差仍可能撤回新提交授权。
             # 在最后一次外部调用前读取当前设置，只有能证明尚未调用才可释放本次锁。
             if allowed:
                 allowed, reason = self._runtime_allowed(
-                    decision.key, settings_for_submit(session), manual,
+                    decision.key, settings_for_submit(session), manual, department=department is not None,
                 )
             # 等待授权或设置锁也可能跨日。以外部调用前的业务日为准。
             now = utcnow()
@@ -423,7 +529,8 @@ class PricingService:
             try:
                 event('execution.submit_started', execution_id=execution_id, item_id=item_id,
                       source=self.adapter.mode, synthetic=getattr(self.adapter, 'synthetic', False))
-                result = self.adapter.submit(execution_id, decision)
+                transport = self._department_transport() if department is not None else self.adapter
+                result = transport.submit(execution_id, decision)
             except Exception as exc:
                 event('execution.unknown', exception=exc, execution_id=execution_id, item_id=item_id,
                       source=self.adapter.mode, synthetic=getattr(self.adapter, 'synthetic', False))
@@ -466,6 +573,8 @@ class PricingService:
                 roster_task = self.adapter.mode == 'live' and ROSTER_UPLOAD_TRACE in decision.trace
                 if roster_task:
                     result = self._roster_transport().lookup(execution.id, execution.task_id, decision)
+                elif self.adapter.mode == 'live' and ERP_UPLOAD_TRACE in decision.trace:
+                    result = self._department_transport().lookup(execution.id, execution.task_id, decision)
                 else:
                     result = self.adapter.lookup(execution.id, execution.task_id, decision.key)
                 if result.status == 'unknown':

@@ -9,6 +9,7 @@ from app.db import transaction
 from app.models import Job, WorkerLease
 from app.services.store import claim_job, enqueue, settings_value, stamp, utcnow, BEIJING
 from app.services.operation_alerts import enqueue_operation_alert
+from app.services.scheduled_departments import run_daily_departments
 from app.adapters.base import SourceUnavailable
 from app.observability import bind_context, bind_sink, event, get_sink
 
@@ -134,8 +135,12 @@ class Worker:
             elif job.payload.get('resume_roster_workflow') or job.kind == 'erp_roster_notice':
                 state, error = 'cancelled', '固定名单任务已停用'
             elif job.kind == "run":
-                batch_id = (self.service.run_batch(job.id, item_id=job.payload["item_id"])
-                            if job.payload.get("item_id") else self.service.run_batch(job.id))
+                if daily and getattr(getattr(self.service, "adapter", None), "mode", None) == "live":
+                    batch_id = run_daily_departments(self.service, job, date.fromisoformat(scheduled_day))
+                elif job.payload.get("item_id"):
+                    batch_id = self.service.run_batch(job.id, item_id=job.payload["item_id"])
+                else:
+                    batch_id = self.service.run_batch(job.id)
                 if daily and getattr(service_config, "adapter_mode", None) == "live":
                     error = self._morning_log(service_config, date.fromisoformat(scheduled_day))
                     if error:

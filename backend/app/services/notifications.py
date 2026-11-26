@@ -92,8 +92,14 @@ def _salesperson_items(session, notice, items, user):
     UserAccount, resolve = _coord()
     current = []
     for item in items:
-        batch = session.get(Batch, item.batch_id)
-        seller = ((batch.snapshot or {}).get('source_versions') or {}).get('erp_roster_salesperson')
+        department = ((item.decision or {}).get('trace') or {}).get('erp_department')
+        if department is not None:
+            seller = department.get('salesperson')
+            if not isinstance(seller, str) or not seller.strip():
+                continue
+        else:
+            batch = session.get(Batch, item.batch_id)
+            seller = ((batch.snapshot or {}).get('source_versions') or {}).get('erp_roster_salesperson')
         seller = seller.strip() if isinstance(seller, str) else ''
         owner = user
         if seller and notice.parent_id:
@@ -382,7 +388,7 @@ def _dispatch_notices(factory,config,owner):
                         if not _warning_notice(notice):
                             current = _salesperson_items(session, notice, current, user)
                             if not current:
-                                notice.last_error = 'ERP销售员与当前负责人姓名不一致，未发送'
+                                notice.last_error = 'ERP销售员未确定或与当前负责人姓名不一致，未发送'
                                 continue
                         notice.item_ids=[i.id for i in current]
                         notice.summary=(dict(_summary(current),kind='warning',title='亏损提价告警',exceptions=0)
@@ -396,12 +402,7 @@ def _dispatch_notices(factory,config,owner):
                         error = '管理员告警未配置钉钉userid，未发送'
                     elif user and user.active:
                         # ERP 姓名已逐条与负责人确认一致；主管升级通知仍发给授权主管本人。
-                        name = user.display_name.strip()
-                        if not notice.parent_id:
-                            batch = session.get(Batch, current[0].batch_id)
-                            saved_name = ((batch.snapshot or {}).get('source_versions') or {}).get('erp_roster_salesperson')
-                            name = saved_name.strip() if isinstance(saved_name, str) and saved_name.strip() else name
-                        recipient = resolve_salesperson_userid(config, name)
+                        recipient = resolve_salesperson_userid(config, user.display_name.strip())
                         userid, error = recipient.get('userid'), recipient.get('error')
                     else:
                         userid, error = None, '负责人缺少已确认的启用账号姓名，未发送'

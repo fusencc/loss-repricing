@@ -277,7 +277,10 @@ def job_detail(job_id: str, request: Request, actor=Depends(require_user)):
         job = session.get(Job, job_id)
         if not job or (actor.role!="admin" and not job_visible(session,job,actor)):
             raise HTTPException(404, "任务不存在")
-        return {k: v for k, v in columns(job).items() if k not in {"owner", "dedupe_key", "payload"}}
+        result = {k: v for k, v in columns(job).items() if k not in {"owner", "dedupe_key", "payload"}}
+        if actor.role == "admin" and "department_batches" in job.payload:
+            result["department_batches"] = job.payload["department_batches"]
+        return result
 
 
 @secured.get("/settings", dependencies=[Depends(require_admin)])
@@ -291,8 +294,8 @@ def patch_settings(body: Changes, request: Request):
     if "pilot_shops" in changes:
         changes["pilot_shops"] = sorted({s.strip() for s in changes["pilot_shops"] if s.strip()})
     if request.app.state.config.adapter_mode == "live" and changes.get("autonomous_enabled"):
-        if not request.app.state.config.live_submit_enabled or not request.app.state.adapter.readiness().get("contract_ready"):
-            raise HTTPException(409, "真实数据源待接入；配置与合同就绪后才可启用真实自动执行")
+        if not request.app.state.config.live_submit_enabled:
+            raise HTTPException(409, "请先在正式服务中开启真实提交开关")
     return update_settings(request.app.state.factory, changes)
 
 

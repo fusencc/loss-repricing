@@ -233,3 +233,57 @@ def test_retired_roster_resume_cannot_become_regular_price_submission(tmp_path):
     with factory() as session:
         assert session.get(Job, job_id).state == 'cancelled'
     engine.dispose()
+
+
+def test_daily_live_job_runs_department_capture_instead_of_http_contract(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    engine, factory, service = setup(tmp_path)
+    service.config = Settings(_env_file=None, runtime_dir=tmp_path)
+    service.adapter = SimpleNamespace(mode='live')
+    calls = []
+    def departments(pricing, job, day):
+        calls.append((pricing, job.id, day.isoformat()))
+        return 'department-batch'
+    monkeypatch.setattr('app.worker.run_daily_departments', departments, raising=False)
+    monkeypatch.setattr(Worker, '_morning_log', lambda *args: None)
+    update_settings(factory, {'schedule_enabled': True})
+    Worker(factory, service).tick(datetime(2026, 11, 26, 21, 0, tzinfo=timezone.utc).timestamp())
+    with factory() as session:
+        job = session.query(Job).one()
+        assert calls == [(service, job.id, '2026-11-27')]
+        assert job.state == 'done' and job.batch_id == 'department-batch'
+    assert service.calls == 0
+    engine.dispose()
+
+
+def test_daily_capture_keeps_completed_department_when_another_needs_retry(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from app.services import scheduled_departments
+
+    engine, factory, service = setup(tmp_path)
+    service.config = Settings(_env_file=None, runtime_dir=tmp_path, live_submit_enabled=True)
+    service.factory = factory
+    service.adapter = SimpleNamespace(mode='live')
+    saved = []
+    def capture(config):
+        assert not config.live_submit_enabled
+        return {'group_capture_id': 'parent', 'departments': [
+            {'department': 'Tiktok一部', 'status': 'failed'},
+            {'department': 'Tiktok五部', 'status': 'completed'},
+        ]}
+    def execute(job_id, prepared):
+        saved.append(prepared)
+        return 'batch-5'
+    service.run_department_batch = execute
+    monkeypatch.setattr(scheduled_departments, 'run_workflow', capture)
+    monkeypatch.setattr('app.services.erp_department_pricing.load_department_batch',
+                        lambda folder, day, scope: scope['department'])
+    update_settings(factory, {'schedule_enabled': True})
+    Worker(factory, service).tick(datetime(2026, 11, 26, 21, tzinfo=timezone.utc).timestamp())
+    with factory() as session:
+        job = session.query(Job).one()
+        assert job.state == 'queued'
+        assert job.payload['department_batches'] == {'Tiktok五部': 'batch-5'}
+    assert saved == ['Tiktok五部']
+    engine.dispose()

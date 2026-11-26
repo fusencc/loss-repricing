@@ -131,13 +131,13 @@ class ManualLiveAdapter:
             return value
         finally: private_request.reset(context)
 
-    def _logs(self):
+    def _logs(self, *, through=None):
         a = self.authorization
         rows, total = [], None
         for page in range(1, 101):
             value = self._request('POST', '/Api/api-tiktok-sales/operationLog/findByPage', json={
                 'page': page, 'limit': 100, 'shopNames': a['shop_name'], 'productIds': self.key.product_id,
-                'createTimeStart': a['business_date'] + ' 00:00:00', 'createTimeEnd': a['business_date'] + ' 23:59:59'})
+                'createTimeStart': a['business_date'] + ' 00:00:00', 'createTimeEnd': (through or a['business_date']) + ' 23:59:59'})
             if value.get('resp_code') != 0: raise ValueError('操作日志读取失败')
             data = value['datas']; count = data['count']
             if type(count) is not int or count < 0:
@@ -237,17 +237,26 @@ class ManualLiveAdapter:
         return self.upload_confirmed_price(execution_id, decision, self.previous_ids)
 
     def upload_confirmed_price(self, execution_id, decision, previous_log_ids):
-        # 单商品授权与已获授权的名单批次共用正式上传。调用方先持久化执行、核对现价并记录原日志。
+        # 人工和部门批次共用单商品模板；执行意图只能由一个调用方创建。
+        intent_path = self.directory / ('intent-'+execution_id+'.json')
+        if intent_path.exists():
+            return SubmitResult('unknown', message='已有上传意图，仅核验，不重传')
+        intent_path = self.directory / ('intent-'+execution_id+'.json')
+        if intent_path.exists():
+            return SubmitResult('unknown', message='已有上传意图，仅核验，不重传')
         try:
             validate_authorization(self.authorization, decision.key, decision.upload_price)
             if (not self.settings.live_submit_enabled or not decision.ready or decision.upload_column != '税后价格'):
                 raise ValueError('真实开关或单商品上传字段无效')
             intent = {'execution_id': execution_id, 'authorization': self.authorization, 'decision': decision.model_dump(mode='json'),
                 'previous_log_ids': previous_log_ids, 'created_at': utcnow().isoformat()}
-            intent_path = self.directory / ('intent-'+execution_id+'.json')
-            if intent_path.exists(): return SubmitResult('unknown', message='已有上传意图，仅核验，不重传')
-            write_verified(intent_path, intent)
             book = price_upload_workbook(decision, self.authorization['shop_name'])
+            try:
+                with intent_path.open('x', encoding='utf-8') as stream:
+                    json.dump(intent, stream, ensure_ascii=False)
+            except FileExistsError:
+                book.close()
+                return SubmitResult('unknown', message='已有上传意图，仅核验，不重传')
             (self.directory / ('upload-'+execution_id+'.xlsx')).write_bytes(book.getvalue())
         except (ValueError, KeyError): return SubmitResult('rejected', message='单商品授权或提交前数据未通过')
         try:
@@ -257,12 +266,15 @@ class ManualLiveAdapter:
         write_verified(self.directory / ('upload-response-'+execution_id+'.json'), value)
         return HttpAdapter._upload_result(value, {'single_data_row_number': 2})
 
-    def _task_evidence(self, execution_id, key, task_id=None):
+    def _task_evidence(self, execution_id, key, task_id=None, *, through=None):
         intent = json.loads((self.directory / ('intent-'+execution_id+'.json')).read_text())
         if key != self.key or intent['authorization'] != self.authorization:
             raise ValueError('核验身份冲突')
         a = self.authorization
-        new_rows = [r for r in self._logs() if str(r['id']) not in intent['previous_log_ids']]
+        # 已有外部任务号时允许回查跨日结果；无任务号仍只匹配提交当日的新增日志。
+        rows = self._logs(through=through) if task_id and through else self._logs()
+        previous = set(intent['previous_log_ids'])
+        new_rows = [r for r in rows if str(r['id']) not in previous]
         matches = [r for r in new_rows if r.get('type') == 2 and r['id'] not in (None, '')
             and (task_id is None or str(r['id']) == task_id)
             and r.get('shopName') == a['shop_name'] and r.get('productId') == key.product_id

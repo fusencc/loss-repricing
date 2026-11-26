@@ -66,3 +66,15 @@ def test_default_live_storage_is_separate_from_file_reconciliation(tmp_path):
     assert not live.live_submit_enabled and not live.ding_enabled
     with pytest.raises(ValueError):
         Settings(_env_file=None, notification_mode="demo")
+
+
+def test_department_automation_can_be_enabled_without_generic_http_contract(client):
+    login(client)
+    assert not client.app.state.adapter.readiness()['contract_ready']
+    response = client.patch('/api/settings', json={'autonomous_enabled': True})
+    assert response.status_code == 409
+    client.app.state.config.live_submit_enabled = True
+    response = client.patch('/api/settings', json={'autonomous_enabled': True})
+    assert response.status_code == 200
+    assert response.json()['autonomous_enabled'] is True
+    assert response.json()['pilot_shops'] == []

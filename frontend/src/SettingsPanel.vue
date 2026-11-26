@@ -23,7 +23,7 @@ const busy = ref(false)
 const failure = ref('')
 const dirty = computed(() => JSON.stringify(form.value) !== JSON.stringify(props.settings))
 const cleanShops = computed(() => [...new Set(form.value.pilot_shops.map(shop => shop.trim()).filter(Boolean))])
-const incompleteScope = computed(() => form.value.autonomous_enabled && (!form.value.site_enabled.length || !cleanShops.value.length))
+const incompleteScope = computed(() => props.contracts.mode !== 'live' && form.value.autonomous_enabled && (!form.value.site_enabled.length || !cleanShops.value.length))
 const siteOptions = computed(() => [...new Set([...sites, ...form.value.site_enabled, ...form.value.paused_sites])])
 watch(() => props.settings, (value) => { form.value = copySettings(value) })
 
@@ -55,20 +55,20 @@ async function save() {
           <el-switch v-model="form.paused" aria-labelledby="paused-label" />
         </div>
         <div class="setting-line">
-          <div><strong id="autonomous-label">开启自动运行</strong><p>自动运行仅覆盖试点店铺和已启用的站点。真实提交需要完成数据接入，并开启真实提交开关。</p></div>
+          <div><strong id="autonomous-label">开启自动运行</strong><p>ERP 定时任务处理 TikTok 一部、五部、十二部和二十二部。开启后，符合条件的商品会提交提价并核验实际营销价。</p></div>
           <el-switch v-model="form.autonomous_enabled" aria-labelledby="autonomous-label" />
         </div>
         <div class="setting-line">
-          <div><strong id="schedule-label">开启定时检查</strong><p>北京时间 05:00 起，每 5 分钟检查一次。</p></div>
+          <div><strong id="schedule-label">开启定时检查</strong><p>每天北京时间 05:00 起执行一次。来源暂不可用时，5 分钟后重试。</p></div>
           <el-switch v-model="form.schedule_enabled" aria-labelledby="schedule-label" />
         </div>
         <div class="settings-fields">
-          <el-form-item label="试点店铺 ID">
+          <el-form-item label="通用接口试点店铺 ID">
             <el-select v-model="form.pilot_shops" multiple filterable allow-create default-first-option placeholder="输入店铺 ID 后按回车">
               <el-option v-for="shop in settings.pilot_shops" :key="shop" :label="shop" :value="shop" />
             </el-select>
           </el-form-item>
-          <el-form-item label="启用站点">
+          <el-form-item label="通用接口启用站点">
             <el-select v-model="form.site_enabled" multiple placeholder="选择已批准的试点站点">
               <el-option v-for="site in siteOptions" :key="site" :label="site" :value="site" />
             </el-select>
@@ -88,8 +88,8 @@ async function save() {
       </el-form>
     </section>
     <section class="panel settings-panel">
-      <header class="panel-heading"><h2>接口就绪状态</h2><span class="mode-pill" :class="`mode-${contracts.mode}`">{{ modeLabel(contracts.mode) }}</span></header>
-      <el-alert v-if="contracts.mode === 'live'" title="数据源待接入" type="info" show-icon :closable="false" />
+      <header class="panel-heading"><h2>通用接口就绪状态</h2><span class="mode-pill" :class="`mode-${contracts.mode}`">{{ modeLabel(contracts.mode) }}</span></header>
+      <el-alert v-if="contracts.mode === 'live' && contracts.missing.length" title="通用接口配置待补齐" type="info" show-icon :closable="false" />
       <dl class="readiness-list">
         <div><dt>真实提交开关</dt><dd>{{ liveEnabled ? '已开启' : '未开启' }}</dd></div>
         <div><dt>已核验站点</dt><dd>{{ contracts.verified_sites.join('、') || '暂无' }}</dd></div>

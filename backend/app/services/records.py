@@ -57,6 +57,9 @@ def record_department(item, batch):
     """
     # 名单及库存补算的部门来自本批经校验的 ERP 范围；部分成功回读重建了在线快照，
     # 未携带费用部门，不应因此把已有明确批次归属的成功记录隐藏到未知部门。
+    department = ((item.decision or {}).get('trace', {}).get('erp_department') or {}).get('department')
+    if department and batch.mode == 'live' and batch.run_key.startswith('erp-department:'):
+        return department
     roster_department = display_text(roster_record_source(batch).get('erp_roster_department'))
     if roster_department:
         return ('Tiktok' + roster_department[6:] if roster_department[:6].lower() == 'tiktok'
@@ -73,6 +76,10 @@ def record_department(item, batch):
 
 
 def record_seller(item, batch, ownerships, names):
+    department = (item.decision or {}).get('trace', {}).get('erp_department') or {}
+    if batch.mode == 'live' and batch.run_key.startswith('erp-department:') and department:
+        seller = display_text(department.get('salesperson'))
+        return {'id': f'erp:{seller}', 'name': seller} if seller else {'id': None, 'name': '待分配'}
     # 名单批次保存了本次经校验的 ERP 销售员。普通提价和库存补算按同一个名字归档。
     source = roster_record_source(batch)
     roster_seller = display_text(source.get('erp_roster_salesperson'))
@@ -245,7 +252,7 @@ def public_record(item, batch, execution, department, seller):
     first_margin = selected_order_first_margin(decision)
     evidence = execution.evidence or {} if execution else {}
     archive = evidence.get('price_record') or {}
-    shop_name = display_text(archive.get('shop_name'))
+    shop_name = display_text(archive.get('shop_name')) or display_text((trace.get('erp_department') or {}).get('shop_name'))
     if not shop_name and decision is request:
         authorization = (trace.get('erp_roster_upload') or {}).get('authorization') or {}
         shop_name = display_text(authorization.get('shop_name'))

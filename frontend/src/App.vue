@@ -522,7 +522,7 @@ onUnmounted(() => {
               <header class="panel-heading"><h2>执行就绪状态</h2><el-button v-if="isAdmin" type="primary" link @click="navigate('settings')">查看配置 <el-icon><ArrowRight /></el-icon></el-button></header>
               <dl v-if="overview" class="readiness-list">
                 <div><dt>真实提交开关</dt><dd>{{ overview.readiness.live_enabled ? '已开启' : '未开启' }}</dd></div>
-                <div><dt>数据接口就绪</dt><dd>{{ overview.readiness.contract_ready ? '已就绪' : '待补齐' }}</dd></div>
+                <div><dt>通用接口配置</dt><dd>{{ overview.readiness.contract_ready ? '已就绪' : '待补齐' }}</dd></div>
                 <div><dt>后台任务最近运行</dt><dd>{{ timeLabel(overview.worker.heartbeat) }}</dd></div>
               </dl>
               <p v-if="overview?.worker.last_error" class="service-error"><el-icon><WarningFilled /></el-icon>{{ overview.worker.last_error }}</p>

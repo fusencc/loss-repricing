@@ -16,11 +16,15 @@ def enable(config):
     config.ding_enabled = True
 
 
-def test_actual_dispatch_resolves_saved_erp_name_not_bound_userid(notices_context, monkeypatch):
+@pytest.mark.parametrize('department', [False, True])
+def test_actual_dispatch_resolves_saved_erp_name_not_bound_userid(notices_context, monkeypatch, department):
     factory, config = notices_context
     enable(config)
     with factory.begin() as session:
-        session.get(Batch, 'b').snapshot = {'source_versions': {'erp_roster_salesperson': ' seller '}}
+        if department:
+            session.get(Item, 'i').decision = {'trace': {'erp_department': {'salesperson': ' seller '}}}
+        else:
+            session.get(Batch, 'b').snapshot = {'source_versions': {'erp_roster_salesperson': ' seller '}}
         session.get(UserAccount, 'seller').dingtalk_userid = None
     resolver = Mock(wraps=resolve_salesperson_userid)
     monkeypatch.setattr('app.services.notifications.resolve_salesperson_userid', resolver)
@@ -59,11 +63,15 @@ def test_dispatch_falls_back_to_authorized_account_name(notices_context, monkeyp
         assert session.scalar(select(Notice)).recipient_userid == 'ding-seller'
 
 
-def test_conflicting_erp_seller_does_not_send_to_account_owner(notices_context, monkeypatch):
+@pytest.mark.parametrize('department,seller', [(False, 'other'), (True, 'other'), (True, None)])
+def test_conflicting_erp_seller_does_not_send_to_account_owner(notices_context, monkeypatch, department, seller):
     factory, config = notices_context
     enable(config)
     with factory.begin() as session:
-        session.get(Batch, 'b').snapshot = {'source_versions': {'erp_roster_salesperson': 'other'}}
+        if department:
+            session.get(Item, 'i').decision = {'trace': {'erp_department': {'salesperson': seller}}}
+        else:
+            session.get(Batch, 'b').snapshot = {'source_versions': {'erp_roster_salesperson': seller}}
     enqueue_batch_notices(factory, 'b')
     resolver = Mock(side_effect=AssertionError('conflicting seller must not resolve'))
     monkeypatch.setattr('app.services.notifications.resolve_salesperson_userid', resolver)
