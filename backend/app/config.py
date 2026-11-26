@@ -1,5 +1,4 @@
 """只从独立环境配置读取连接和凭据，绝不复用预算程序的账号。"""
-from datetime import date
 from pathlib import Path
 from pydantic import Field, SecretStr, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -35,11 +34,6 @@ class Settings(BaseSettings):
     erp_capture_platform: str = "Tiktok"
     erp_capture_platform_id: str = "9B583641B0CA11EDAAB1AC1F6B9B9987"
     erp_capture_bloc: str = "集团二部"
-    # 名单日按代码内七人名单自动采集和算价。
-    erp_roster_date: date | None = date(2026, 11, 26)
-    erp_roster_schedule_enabled: bool = True
-    # 固定名单的单日真实授权，与名单业务日一致才允许执行。普通自动任务另走原有授权。
-    erp_roster_submit_date: date | None = None
     erp_capture_request_interval_seconds: float = Field(default=16, ge=0, le=300)
     # 网页后端暂无批量销量开放合同；串行读取并限制请求频率，后续改用批量/增量来源。
     sales_request_interval_seconds: float = Field(default=2, ge=0, le=30)
@@ -53,8 +47,6 @@ class Settings(BaseSettings):
     live_writer_exclusive: bool = False
     ding_alert_userid: str = ""  # 管理员告警的独立机器人私聊目标，不借用销售员归属。
     ding_enabled: bool = False
-    ding_roster_enabled: bool = False
-    ding_roster_userids: dict[str, str] = Field(default_factory=dict, repr=False)
     ding_corp_id: str = ""
     ding_client_id: str = ""
     ding_client_secret: str = ""

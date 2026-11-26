@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from app.models import Batch, Item, WorkerLease
 from app.models.notifications import Notice
 from app.adapters.dingtalk import DingTalkClient
+from app.adapters.dingtalk_directory import resolve_salesperson_userid
 from app.services.store import stamp, utcnow, BEIJING
 
 
@@ -74,6 +75,24 @@ def _recipient_items(session, notice):
             expected=ownership.owner_id if ownership and _active(session,ownership.owner_id) else 'admin'
         if expected == notice.recipient_id:
             current.append(item)
+    return current
+
+
+def _salesperson_items(session, notice, items, user):
+    # 网页归属先授权；ERP 留存销售员与当前负责人不同的单条不向该负责人投递。
+    UserAccount, resolve = _coord()
+    current = []
+    for item in items:
+        batch = session.get(Batch, item.batch_id)
+        seller = ((batch.snapshot or {}).get('source_versions') or {}).get('erp_roster_salesperson')
+        seller = seller.strip() if isinstance(seller, str) else ''
+        owner = user
+        if seller and notice.parent_id:
+            ownership = resolve(session, item.key)
+            owner = session.get(UserAccount, ownership.owner_id) if ownership else None
+        if seller and (not owner or not owner.active or owner.display_name.strip() != seller):
+            continue
+        current.append(item)
     return current
 
 
@@ -339,6 +358,13 @@ def _dispatch_notices(factory,config,owner):
                         notice.last_error='已无当前有权查看的条目，通知已取消'
                         notice.updated_at=stamp()
                         continue
+                    UserAccount,_=_coord()
+                    user=session.get(UserAccount,notice.recipient_id) if notice.recipient_id!='admin' else None
+                    if not _warning_notice(notice):
+                        current = _salesperson_items(session, notice, current, user)
+                        if not current:
+                            notice.last_error = 'ERP销售员与当前负责人姓名不一致，未发送'
+                            continue
                     notice.item_ids=[i.id for i in current]
                     notice.summary=(dict(_summary(current),kind='warning',title='亏损提价告警',exceptions=0)
                                     if _warning_notice(notice) else _summary(current,bool(notice.parent_id)))
@@ -347,12 +373,22 @@ def _dispatch_notices(factory,config,owner):
                     notice.summary=dict(notice.summary,unassigned=unassigned)
                     if client is None:
                         continue
-                    UserAccount,_=_coord()
-                    user=session.get(UserAccount,notice.recipient_id) if notice.recipient_id!='admin' else None
-                    userid=(getattr(config,'ding_alert_userid','') if _warning_notice(notice)
-                            else user.dingtalk_userid if user and user.active else None)
+                    if _warning_notice(notice):
+                        userid = getattr(config, 'ding_alert_userid', '')
+                        error = '管理员告警未配置钉钉userid，未发送'
+                    elif user and user.active:
+                        # ERP 姓名已逐条与负责人确认一致；主管升级通知仍发给授权主管本人。
+                        name = user.display_name.strip()
+                        if not notice.parent_id:
+                            batch = session.get(Batch, current[0].batch_id)
+                            saved_name = ((batch.snapshot or {}).get('source_versions') or {}).get('erp_roster_salesperson')
+                            name = saved_name.strip() if isinstance(saved_name, str) and saved_name.strip() else name
+                        recipient = resolve_salesperson_userid(config, name)
+                        userid, error = recipient.get('userid'), recipient.get('error')
+                    else:
+                        userid, error = None, '负责人缺少已确认的启用账号姓名，未发送'
                     if not userid:
-                        notice.last_error='负责人未绑定钉钉userid，未发送'
+                        notice.last_error=error
                         continue
                     claimed=session.execute(update(Notice).where(Notice.id==notice_id,Notice.delivery_state=='pending').values(
                         delivery_state='sending',recipient_userid=userid,updated_at=stamp(utcnow())))

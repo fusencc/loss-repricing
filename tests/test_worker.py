@@ -43,7 +43,6 @@ def test_schedule_starts_at_beijing_nine(tmp_path):
     engine, factory, service = setup(tmp_path)
     update_settings(factory, {"schedule_enabled": True})
     worker = Worker(factory, service)
-    # UTC 00:59:59 对应北京时间 08:59:59。
     before = datetime(2026, 11, 5, 0, 59, 59, tzinfo=timezone.utc).timestamp()
     worker.tick(before)
     assert service.calls == 0
@@ -92,7 +91,7 @@ def test_second_worker_cannot_consume_while_leader_alive(tmp_path):
     engine, factory, service = setup(tmp_path)
     worker_a, worker_b = Worker(factory, service), Worker(factory, service)
     worker_a.tick(100)
-    job_id = enqueue(factory, "run", {})
+    enqueue(factory, "run", {})
     worker_b.tick(101)
     assert service.calls == 0
     worker_b.tick(300)
@@ -107,12 +106,10 @@ def test_slow_source_failure_waits_five_minutes_from_failure(tmp_path, monkeypat
     monkeypatch.setattr("app.worker.time.monotonic", lambda: elapsed[0])
     monkeypatch.setattr(service, "reconcile", lambda: reconciles.append(True))
     original = service.run_batch
-
     def slow_source(run_key):
         if not service.ready:
             elapsed[0] += 360
         return original(run_key)
-
     service.run_batch = slow_source
     service.ready = False
     job_id = enqueue(factory, "run", {})
@@ -143,185 +140,64 @@ def test_expired_daily_retry_does_not_process_the_new_business_day(tmp_path):
     assert service.calls == 1
     with factory() as session:
         assert session.get(Job, yesterday).state == "cancelled"
-        today = session.query(Job).filter_by(dedupe_key="daily:2026-11-06").one()
-        assert today.state == "done"
+        assert session.query(Job).filter_by(dedupe_key="daily:2026-11-06").one().state == "done"
     engine.dispose()
-
 
 
 def test_notice_dispatch_failure_does_not_skip_reconciliation_or_daily_job(tmp_path, monkeypatch):
     engine, factory, service = setup(tmp_path)
     service.config = Settings(_env_file=None, runtime_dir=tmp_path)
-    reconciles = []
-    logged = []
-
+    reconciles, logged = [], []
     def unavailable(*_):
         raise RuntimeError("notification dispatch failed")
-
     monkeypatch.setattr("app.services.notifications.dispatch_notices", unavailable)
     monkeypatch.setattr(service, "reconcile", lambda: reconciles.append(True))
     monkeypatch.setattr("app.worker.event", lambda name, **kwargs: logged.append(name))
     update_settings(factory, {"schedule_enabled": True})
-
-    worker = Worker(factory, service)
-    worker.tick(datetime(2026, 11, 5, 1, 0, tzinfo=timezone.utc).timestamp())
-
-    assert reconciles == [True]
-    assert service.calls == 1
+    Worker(factory, service).tick(datetime(2026, 11, 5, 1, 0, tzinfo=timezone.utc).timestamp())
+    assert reconciles == [True] and service.calls == 1
     assert "worker.notice_dispatch_failed" in logged
     with factory() as session:
         job = session.query(Job).filter_by(dedupe_key="daily:2026-11-05").one()
         assert job.state == "done" and job.batch_id == "batch-result"
     engine.dispose()
 
-def test_pilot_day_at_seven_routes_only_to_roster_and_publishes_once(tmp_path, monkeypatch):
-    from datetime import date
-    from openpyxl import load_workbook
 
+def test_former_roster_day_does_not_override_disabled_schedule(tmp_path):
     engine, factory, service = setup(tmp_path)
-    pilot_day = date(2026, 11, 26)
-    service.config = Settings(_env_file=None, runtime_dir=tmp_path,
-                              coordination_required=False, live_submit_enabled=True,
-                              ding_tk_morning_log_folder='tk-folder', ding_cancellation_log_folder='cancel-folder')
-    calls = []
-    drive_calls = []
-
-    def capture(config, *, roster_date, on_roster_scope=None):
-        assert roster_date == pilot_day and config.live_submit_enabled is False
-        calls.append(roster_date)
-        return {'status': 'completed', 'ready_prices': 0, 'departments': []}
-
-    monkeypatch.setattr('app.services.erp_workflow.run_workflow', capture)
-    def drive(args, directory):
-        folder = args[args.index('--folder') + 1]
-        drive_calls.append((args[1], folder))
-        if args[1] == '+list':
-            return {'files': [], 'hasMore': False}
-        assert folder in ('tk-folder', 'cancel-folder')
-        assert (directory / args[args.index('--file') + 1]).is_file()
-        return {'nodeId': 'success-file' if folder == 'cancel-folder' else 'tk-file'}
-
-    monkeypatch.setattr('app.services.morning_log._dws', drive)
-
+    service.config = Settings(_env_file=None, runtime_dir=tmp_path, coordination_required=False)
     worker = Worker(factory, service)
-    before = datetime(2026, 11, 25, 22, 59, 59, tzinfo=timezone.utc).timestamp()
-    worker.tick(before)
-    assert calls == []
-    worker.tick(before + 1)
-    worker.tick(before + 6)
-    worker.tick(before + 86401)
-    assert calls == [pilot_day]
+    for hour in (23, 1):
+        day = 25 if hour == 23 else 26
+        worker.tick(datetime(2026, 11, day, hour, tzinfo=timezone.utc).timestamp())
     assert service.calls == 0
-    assert drive_calls == [('+list', 'tk-folder'), ('+upload', 'tk-folder'),
-                           ('+list', 'cancel-folder'), ('+upload', 'cancel-folder')]
-    published = tmp_path / 'morning-logs' / pilot_day.isoformat() / '11.26早上运行日志.xlsx'
-    assert published.is_file()
     with factory() as session:
-        job = session.query(Job).one()
-        assert job.dedupe_key == 'daily:2026-11-26' and job.state == 'done'
-        assert job.error is None
-    workbook = load_workbook(published, read_only=True)
-    try:
-        assert workbook.sheetnames == ['明细']
-        assert len(list(workbook['明细'].values)[0]) == 14
-        success = load_workbook(tmp_path / 'success-logs' / pilot_day.isoformat() / published.name, read_only=True)
-        try:
-            assert list(success['汇总'].values)[1][1:] == (0, 0, 0, 0)
-        finally:
-            success.close()
-    finally:
-        workbook.close()
-        engine.dispose()
-
-
-def test_roster_with_ready_prices_hands_same_job_and_day_to_pricing(tmp_path, monkeypatch):
-    from datetime import date
-
-    engine, factory, service = setup(tmp_path)
-    pilot_day = date(2026, 11, 26)
-    service.config = Settings(_env_file=None, runtime_dir=tmp_path,
-                              coordination_required=False, live_submit_enabled=True)
-    calls = []
-    first = {'salesperson': '桂露', 'ready_prices': 1}
-    second = {'salesperson': '莫雯舒', 'ready_prices': 1}
-    capture = {'status': 'completed', 'ready_prices': 2, 'departments': [first, second],
-               'artifact_dir': str(tmp_path)}
-
-    def collect(config, *, roster_date, on_roster_scope=None):
-        assert not config.live_submit_enabled
-        assert roster_date == pilot_day
-        if on_roster_scope:
-            on_roster_scope(first)
-        assert [person for _, person in calls] == ['桂露']
-        on_roster_scope(second)
-        return capture
-
-    def submit(service_arg, run_key, day, scope):
-        assert service_arg is service
-        assert day == pilot_day
-        calls.append((run_key, scope['salesperson']))
-        return {'salesperson': scope['salesperson'], 'batch_id': 'price-batch', 'state': 'evaluated'}
-
-    monkeypatch.setattr('app.services.erp_workflow.run_workflow', collect)
-    monkeypatch.setattr('app.services.erp_roster_pricing.run_roster_pricing', submit)
-    monkeypatch.setattr('app.services.roster_notices.enqueue_roster_notices', lambda *args: None)
-    monkeypatch.setattr(Worker, '_morning_log', lambda *args, **kwargs: None)
-    Worker(factory, service).tick(datetime(2026, 11, 26, 1, 0, tzinfo=timezone.utc).timestamp())
-
-    with factory() as session:
-        job = session.query(Job).one()
-        assert calls == [(job.id, '桂露'), (job.id, '莫雯舒')]
-        assert job.state == 'done'
-    assert capture['pricing_batches'][0]['batch_id'] == 'price-batch'
+        assert session.query(Job).count() == 0
     engine.dispose()
 
 
-def test_zero_stock_resume_reuses_original_daily_job(tmp_path, monkeypatch):
-    from datetime import date
-
+def test_former_roster_day_uses_regular_schedule_and_batch(tmp_path, monkeypatch):
     engine, factory, service = setup(tmp_path)
-    day = date(2026, 11, 26)
-    service.config = Settings(_env_file=None, runtime_dir=tmp_path, coordination_required=False,
-                              live_submit_enabled=True, erp_roster_submit_date=day)
-    calls = []
-
-    def resume(service_arg, job_id, roster_date, manifest_id):
-        assert service_arg is service and roster_date == day
-        calls.append((job_id, manifest_id))
-        return {'桂露': {'targets': 4}}
-
-    monkeypatch.setattr('app.services.erp_roster_pricing.resume_roster_stock_pricing', resume)
-    job_id = enqueue(factory, 'run', {'date': str(day), 'resume_roster_workflow': 'a' * 32}, f'daily:{day}')
-    Worker(factory, service).tick(datetime(2026, 11, 26, 1, 5, tzinfo=timezone.utc).timestamp())
-
+    service.config = Settings(_env_file=None, runtime_dir=tmp_path, coordination_required=False)
+    update_settings(factory, {'schedule_enabled': True})
+    monkeypatch.setattr(Worker, '_morning_log', lambda *args: None)
+    worker = Worker(factory, service)
+    worker.tick(datetime(2026, 11, 25, 23, tzinfo=timezone.utc).timestamp())
+    assert service.calls == 0
+    worker.tick(datetime(2026, 11, 26, 1, tzinfo=timezone.utc).timestamp())
+    assert service.calls == 1
     with factory() as session:
         job = session.query(Job).one()
-        assert job.id == job_id and job.state == 'done'
-    assert calls == [(job_id, 'a' * 32)]
+        assert job.state == 'done' and job.batch_id == 'batch-result'
     engine.dispose()
 
 
-
-def test_roster_scope_without_ready_prices_is_logged_even_when_upload_is_disabled(tmp_path, monkeypatch):
-    from datetime import date
+def test_retired_roster_resume_cannot_become_regular_price_submission(tmp_path):
     engine, factory, service = setup(tmp_path)
-    day = date(2026, 11, 26)
-    service.config = Settings(_env_file=None, runtime_dir=tmp_path, coordination_required=False,
-                              live_submit_enabled=False)
-    scope = {'salesperson': '桂露', 'department': 'Tiktok二十二部', 'ready_prices': 0}
-    logged = []
-    def collect(config, *, roster_date, on_roster_scope):
-        on_roster_scope(scope)
-        return {'status': 'completed', 'ready_prices': 0, 'departments': [scope]}
-    monkeypatch.setattr('app.services.erp_workflow.run_workflow', collect)
-    monkeypatch.setattr('app.services.roster_filter_records.save_roster_filter_records',
-                        lambda *args: logged.append(args))
-    monkeypatch.setattr('app.services.erp_roster_pricing.run_roster_pricing',
-                        lambda *args: (_ for _ in ()).throw(AssertionError('不能提交价格')))
-    monkeypatch.setattr('app.services.roster_notices.enqueue_roster_notices', lambda *args: None)
-    monkeypatch.setattr(Worker, '_morning_log', lambda *args, **kwargs: None)
-    Worker(factory, service).tick(datetime(2026, 11, 26, 1, 0, tzinfo=timezone.utc).timestamp())
-    assert len(logged) == 1
-    assert logged[0][0] is factory and logged[0][3] == day and logged[0][4] == scope
+    job_id = enqueue(factory, 'run', {'date': '2026-11-26', 'resume_roster_workflow': 'a' * 32},
+                     'daily:2026-11-26')
+    Worker(factory, service).tick(datetime(2026, 11, 26, 1, tzinfo=timezone.utc).timestamp())
     assert service.calls == 0
+    with factory() as session:
+        assert session.get(Job, job_id).state == 'cancelled'
     engine.dispose()

@@ -23,7 +23,7 @@ def main():
     parser = argparse.ArgumentParser(description='ERP批量下载与保存（默认四类候选）')
     parser.add_argument('--capture-id', help='读取已保存的采集编号，不请求ERP')
     parser.add_argument('--source', choices=SOURCES, help='仅抓指定来源；默认抓四类')
-    parser.add_argument('--salesperson', help='ERP销售员姓名，例如杨颖；不指定则不筛选销售员')
+    parser.add_argument('--salesperson', help='ERP销售员姓名；不指定则不筛选销售员')
     parser.add_argument('--max-orders', type=int, help='小量试抓：仅限制财务导出订单数，每类保留完整候选名单')
     parser.add_argument('--batch-size', type=int, help='每批订单数（1至1000，默认1000）')
     parser.add_argument('--progress', action='store_true', help='显示下载进度')

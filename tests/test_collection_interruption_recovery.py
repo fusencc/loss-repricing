@@ -7,43 +7,51 @@ import pytest
 from openpyxl import Workbook
 
 from app.adapters import sales_batch_export as sales
-from app.adapters.erp_bulk_capture import _blocked_ids
+from app.adapters.erp_bulk_capture import BLOCKED_PAGE_SIZE, _blocked_ids
 from app.adapters.sales_auth import SalesAuth
 from app.config import Settings
 
 
 def test_dynamic_page_overlap_keeps_unique_orders_and_continues_to_next_page():
     requested = []
+    size = BLOCKED_PAGE_SIZE
     def post(path, body):
         page = body['page']
         requested.append(page)
+        assert body['limit'] == size
         # 新记录插入使第二页回读第一页面尾；满页仍须继续，不能按去重后行数结束。
-        indices = {1: range(20), 2: range(18, 38), 3: range(38, 41)}[page]
-        return {'total': 43, 'records': [
+        indices = {1: range(size), 2: range(size - 2, 2 * size - 2),
+                   3: range(2 * size - 2, 2 * size + 1)}[page]
+        return {'total': 2 * size + 3, 'records': [
             {'orderid': f'B{i}', 'status': 4, 'platform': 'Tiktok', 'jzfh': '1'}
             for i in indices]}
     group = {'status': 4, 'filters': {}, 'pages': [], 'total': None}
-    assert _blocked_ids(post, group) == [f'B{i}' for i in range(41)]
+    assert _blocked_ids(post, group) == [f'B{i}' for i in range(2 * size + 1)]
     assert requested == [1, 2, 3]
     assert group['pages'][1]['duplicate_rows'] == 2
-    assert group['pages'][1]['raw_rows'] == 20
-    assert group['total'] == 41
+    assert group['pages'][1]['raw_rows'] == size
+    assert group['total'] == 2 * size + 1
+    assert not group.get('excluded_rows') and 'list_error' not in group
 
 
-def test_duplicate_does_not_hide_out_of_scope_record():
+def test_duplicate_out_of_scope_record_is_excluded_without_discarding_valid_rows():
+    size = BLOCKED_PAGE_SIZE
     def post(path, body):
         rows = [{'orderid': f'B{i}', 'status': 4, 'platform': 'Tiktok', 'jzfh': '1'}
-                for i in range(20)]
+                for i in range(size)]
         if body['page'] == 2:
-            rows = [dict(rows[-1], platform='Shopee')]
-        return {'total': 21, 'records': rows}
+            rows = [dict(rows[-1], platform='Shopee'), dict(rows[-1], orderid=f'B{size}')]
+        return {'total': size + 2, 'records': rows}
     group = {'status': 4, 'filters': {}, 'pages': [], 'total': None}
-    with pytest.raises(Exception, match='平台范围不符'):
-        _blocked_ids(post, group)
-    assert len(group['candidate_order_ids']) == 20
-    assert group['list_error']['validation_reason'] == 'platform_mismatch'
-    assert group['list_error']['order_id'] == 'B19'
-    assert group['list_error']['row_number'] == 1
+    assert _blocked_ids(post, group) == [f'B{i}' for i in range(size + 1)]
+    assert group['total'] == size + 1
+    excluded, = group['excluded_rows']
+    assert excluded['validation_reason'] == 'platform_mismatch'
+    assert excluded['order_id'] == f'B{size - 1}'
+    assert excluded['page'] == 2 and excluded['row_number'] == 1
+    assert group['pages'][1]['excluded_rows'] == 1
+    assert group['pages'][1]['duplicate_rows'] == 0
+    assert 'list_error' not in group and not group.get('failed_pages')
 
 
 @pytest.mark.parametrize('failure', ['http400', 'business', 'timeout', 'http503'])

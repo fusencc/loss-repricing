@@ -1,11 +1,6 @@
 """ERP 候选至待提价文件的只读编排；复用统一规则，不调用模型或价格上传。"""
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
-from contextvars import copy_context
-from datetime import date, datetime
-from app.services.store import BEIJING
 from pathlib import Path
-from queue import Queue
 from uuid import uuid4
 import json
 from hashlib import sha256
@@ -33,7 +28,6 @@ from app.adapters.live_online_preparation import prepare_online_states
 from app.services.erp_capture_store import load_capture, rebuild_clean_capture, save_capture, write_verified
 from app.services.erp_pricing import load_pricing_preview, save_pricing_preview
 from app.services.erp_seller_candidates import summarize_seller_candidates
-from app.services.erp_roster_capture import project_seller_capture
 
 def filter_candidate_history(settings, targets, *, client=None, auth=None):
     """按子商品查询近72小时官方历史；仅明确有调价记录时排除，未知继续。"""
@@ -53,62 +47,15 @@ def filter_candidate_history(settings, targets, *, client=None, auth=None):
     return history,eligible,filtered
 
 
-# 2026-11-24 用户确认：11月10日至24日历史财务表清洗后的「销售员」「部门」
-# 字段显示这七人各自仅属于一个部门，无跨部门冲突；据此只采集各人的已确认部门，
-# 不再与四部门交叉组合。部门值使用既有 ERP 筛选合同的原始名称。
-# 这是取数范围，不是网页归属、店铺试点或真实价格提交授权；四类来源仍逐一读取。
-ERP_ROSTER_DEPARTMENTS = {
-    '桂露': 'Tiktok二十二部',
-    '莫雯舒': 'Tiktok一部',
-    '赵亮亮': 'Tiktok十二部',
-    '刘付文昌': 'Tiktok一部',
-    '李佳丽': 'Tiktok二十二部',
-    '杨颖': 'Tiktok十二部',
-    '曹雪娇': 'Tiktok五部',
-}
-ERP_ROSTER_NAMES = tuple(ERP_ROSTER_DEPARTMENTS)
-
-
-def _roster(settings, required_day):
-    today = datetime.now(BEIJING).date()
-    if required_day is not None and required_day != today:
-        raise ValueError('名单任务不属于当前北京时间业务日')
-    if required_day is None and settings.erp_roster_date != today:
-        return None
-    names = ERP_ROSTER_NAMES
-    if not isinstance(names, tuple) or not names or any(not isinstance(n, str) or not n.strip() for n in names):
-        raise ValueError('代码中的销售员名单须为非空姓名元组，不进行 ERP 采集')
-    return list(dict.fromkeys(n.strip() for n in names))
-
-
-def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, progress=None,
-                 roster_date: date | None = None, roster_person=None, on_roster_scope=None):
-    """名单按 ERP 采集与销售算价两条车道处理；指定采集编号时回放单批。"""
-    if roster_person is not None and (roster_date is None or roster_person not in ERP_ROSTER_DEPARTMENTS):
-        raise ValueError('名单刷新须绑定单日名单中的销售员')
+def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, progress=None):
+    """按部门采集和算价；指定采集编号时回放单批。"""
     if capture_id is not None:
-        if roster_date is not None:
-            raise ValueError('名单采集不能与离线回放同时指定')
         rebuild_clean_capture(settings.runtime_dir, capture_id)
         capture = load_capture(settings.runtime_dir, capture_id)
         return _evaluate_capture(settings, capture, replay=True, evidence=evidence, exports=exports, progress=progress)
     if evidence is not None or exports is not None:
         raise ValueError('补充文件只可用于明确指定采集编号的离线对账')
 
-    names = _roster(settings, roster_date)
-    if roster_person is not None:
-        if roster_person not in names:
-            raise ValueError('刷新销售员不在本轮名单中')
-        names = [roster_person]
-    # 名单与部门归属先于登录和公共费用取数校验；缺少归属不得扩大为跨部门采集。
-    if names is not None:
-        if any(ERP_ROSTER_DEPARTMENTS.get(name) not in ERP_DEPARTMENTS for name in names):
-            raise ValueError('代码中的销售员名单缺少有效部门归属，不进行 ERP 采集')
-        by_department = {department: [name for name in names if ERP_ROSTER_DEPARTMENTS[name] == department]
-                         for department in ERP_DEPARTMENTS}
-        scopes = [(department, people) for department, people in by_department.items() if people]
-    else:
-        scopes = [(department, None) for department in ERP_DEPARTMENTS]
     directory = Path(settings.runtime_dir) / 'erp-workflows' / uuid4().hex
     directory.mkdir(mode=0o700, parents=True)
     departments = []
@@ -117,96 +64,40 @@ def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, prog
         'department_order': list(ERP_DEPARTMENTS), 'departments': departments,
         'ready_prices': 0, 'artifact_dir': str(directory.resolve()),
     }
-    if names is not None:
-        summary['salespersons'] = names
-        summary['roster_date'] = datetime.now(BEIJING).date().isoformat()
     manifest = directory / 'result.json'
     write_verified(manifest, summary)
 
-    def collect(department, people, web_session):
-        capture = None
+    with httpx.Client(timeout=60, trust_env=False, follow_redirects=False) as client:
+        auth = SalesAuth(settings, client)
         try:
-            if progress:
-                progress(f'开始采集 {department}。')
-            collected = capture_erp_bulk(settings, department=department, progress=progress, web_session=web_session,
-                                         **({'roster_salespeople': people} if people is not None else {}))
-            capture = save_capture(settings.runtime_dir, collected)
-            headers, native = _capture_erp_sources(settings, capture, progress, web_session)
-            return capture, headers, native, None
-        except Exception as error:
-            return capture, None, None, _workflow_failure(error, capture)
-
-    def consume(pool=None):
-        with httpx.Client(timeout=60, trust_env=False, follow_redirects=False) as client:
-            auth = SalesAuth(settings, client)
-            try:
-                daily_fees = refresh_daily_fees(settings, client=client, auth=auth)
-            except SourceUnavailable as error:
-                event('erp.failed', exception=error, source='erp', stage='collect', error_code='source_unavailable')
-                daily_fees = None
-            current_fx = _capture_round_fx(settings)
-
-            def finish(department, name, capture, headers, native, failure):
-                scope = {'department': department, **({'salesperson': name} if name is not None else {})}
-                result = failure or {}
+            daily_fees = refresh_daily_fees(settings, client=client, auth=auth)
+        except SourceUnavailable as error:
+            event('erp.failed', exception=error, source='erp', stage='collect', error_code='source_unavailable')
+            daily_fees = None
+        current_fx = _capture_round_fx(settings)
+        with _session(settings) as web_session:
+            for department in ERP_DEPARTMENTS:
+                capture = None
                 try:
-                    if failure is None:
-                        result = _evaluate_capture(settings, capture, replay=False, progress=progress,
-                            headers=headers, native=native, daily_fees=daily_fees, current_fx=current_fx,
-                            client=client, auth=auth)
-                    result.update(scope)
-                    if name is not None and on_roster_scope is not None:
-                        on_roster_scope(result)
                     if progress:
-                        progress(f"{department} 处理结果：{result['status']}。")
+                        progress(f'开始采集 {department}。')
+                    collected = capture_erp_bulk(settings, department=department, progress=progress,
+                                                 web_session=web_session)
+                    capture = save_capture(settings.runtime_dir, collected)
+                    headers, native = _capture_erp_sources(settings, capture, progress, web_session)
+                    result = _evaluate_capture(settings, capture, replay=False, progress=progress,
+                        headers=headers, native=native, daily_fees=daily_fees, current_fx=current_fx,
+                        client=client, auth=auth)
                 except Exception as error:
-                    result.update(_workflow_failure(error, capture))
-                    result.update(scope)
+                    result = _workflow_failure(error, capture)
+                result['department'] = department
                 departments.append(result)
-                if names is not None:
-                    departments.sort(key=lambda entry: names.index(entry['salesperson']))
                 summary['ready_prices'] += result['ready_prices']
                 write_verified(manifest, summary)
-                return result
+                if progress:
+                    progress(f"{department} 处理结果：{result['status']}。")
 
-            if pool is None:
-                with _session(settings) as web_session:
-                    for department, _ in scopes:
-                        finish(department, None, *collect(department, None, web_session))
-                return
-
-            pending = Queue()
-
-            def produce():
-                try:
-                    with _session(settings) as web_session:
-                        for department, people in scopes:
-                            capture, headers, native, failure = collect(department, people, web_session)
-                            for person in people:
-                                if failure is not None:
-                                    pending.put((department, person, None, None, None, dict(failure)))
-                                    continue
-                                try:
-                                    projected = project_seller_capture(settings.runtime_dir, capture, headers, native, person)
-                                except Exception as error:
-                                    pending.put((department, person, None, None, None, _workflow_failure(error)))
-                                else:
-                                    pending.put((department, person, *projected, None))
-                finally:
-                    pending.put(None)
-
-            producer = pool.submit(copy_context().run, produce)
-            while (task := pending.get()) is not None:
-                finish(*task)
-            producer.result()
-
-    if names is None:
-        consume()
-    else:
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            pool.submit(copy_context().run, consume, pool).result()
-    expected = len(scopes) if names is None else len(names)
-    if len(departments) == expected and all(department['status'] == 'completed' for department in departments):
+    if len(departments) == len(ERP_DEPARTMENTS) and all(department['status'] == 'completed' for department in departments):
         summary['status'] = 'completed'
     elif summary['ready_prices'] or any(department['status'] == 'completed' for department in departments):
         summary['status'] = 'needs_attention'

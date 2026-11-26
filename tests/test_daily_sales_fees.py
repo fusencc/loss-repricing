@@ -191,7 +191,6 @@ def test_workflow_refreshes_daily_fees_before_erp_collection(tmp_path,monkeypatc
     from app.services import erp_workflow
     settings,_,_,_=setup(tmp_path)
     events=[]
-    monkeypatch.setattr(erp_workflow,'_roster',lambda *_: None)
     monkeypatch.setattr(erp_workflow,'ERP_DEPARTMENTS',('D1',))
     monkeypatch.setattr(erp_workflow,'refresh_daily_fees',lambda s, **kwargs:events.append('fees'))
     monkeypatch.setattr(erp_workflow,'query_current_erp_fx',lambda s: {'ref': 'test-fx'})

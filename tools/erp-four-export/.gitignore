@@ -1,0 +1,6 @@
+config.json
+downloads/
+state/
+*.log
+__pycache__/
+.venv/

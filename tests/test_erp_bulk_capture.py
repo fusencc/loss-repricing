@@ -100,6 +100,33 @@ def test_read_attempts_at_most_three_times(tmp_path, path, failures):
     assert calls.count('/newIp/report/orderDownload/asyncOrderListDownload') <= 1
 
 
+def test_blocked_page_uses_backoff_in_bulk_capture(tmp_path, monkeypatch):
+    from app.adapters import erp_bulk_capture
+
+    delays = []
+    requests = []
+    monkeypatch.setattr(erp_bulk_capture, 'sleep', delays.append)
+
+    def handler(request):
+        if request.url.path.endswith('/login'):
+            return httpx.Response(200, json={'code': 200, 'data': {'token': 'secret'}})
+        assert request.url.path == '/Api/order/list'
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            raise httpx.ReadTimeout('mock timeout', request=request)
+        if len(requests) == 2:
+            return httpx.Response(503)
+        return httpx.Response(200, json={'code': 0, 'data': {'records': [], 'total': 0}})
+
+    settings = Settings(_env_file=None, runtime_dir=tmp_path, erp_username='u', erp_password='p')
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        result = capture_erp_bulk(settings, source='blocked_pending', client=client)
+
+    assert result['capture_complete']
+    assert len(requests) == 3 and all(body == requests[0] for body in requests)
+    assert delays == [16, 32]
+
+
 def test_duplicate_finance_is_kept_for_audit_without_marking_capture_complete(tmp_path):
     from app.services.erp_capture_store import find_saved_order, save_capture
     from app.services.erp_pricing import preview_pricing
@@ -492,7 +519,7 @@ def test_default_bulk_uses_four_verified_candidate_sources(tmp_path):
         assert path.endswith('/dowDeficitOrder') and body['financecheck'] == '3'
     for path, body in calls[2:]:
         assert path == '/Api/order/list' and body['jzfh'] == '1'
-        assert 'financecheck' not in body and body['limit'] == 20
+        assert 'financecheck' not in body and body['limit'] == 100
     for group in result['groups']:
         assert group['list_complete']
         assert group['status_discrepancies'] == []
@@ -502,14 +529,14 @@ def test_default_bulk_uses_four_verified_candidate_sources(tmp_path):
 
 def test_blocked_small_pages_have_disjoint_verified_ranges():
     from app.adapters.erp_bulk_capture import _blocked_ids
-    rows = [{'orderid': f'B{i}', 'status': 4, 'platform': 'Tiktok', 'jzfh': '1'} for i in range(21)]
+    rows = [{'orderid': f'B{i}', 'status': 4, 'platform': 'Tiktok', 'jzfh': '1'} for i in range(101)]
     def post(path, body):
         start = (body['page'] - 1) * body['limit']
-        return {'total': 21, 'records': rows[start:start+body['limit']]}
+        return {'total': 101, 'records': rows[start:start+body['limit']]}
     group = {'status':4, 'filters':{}, 'pages':[], 'total':None}
     orders = _blocked_ids(post, group)
-    assert len(orders) == 21
-    assert [(p['start'],p['end']) for p in group['pages'] if p['verified']] == [(0,20),(20,21)]
+    assert len(orders) == 101
+    assert [(p['start'],p['end']) for p in group['pages'] if p['verified']] == [(0,100),(100,101)]
 
 
 @pytest.mark.parametrize('drift', [False, True])
@@ -521,17 +548,17 @@ def test_blocked_pagination_uses_observed_orders_despite_total_drift(tmp_path, d
         path = request.url.path
         if path == '/finance.xlsx':
             return httpx.Response(200, content=xlsx(headers, [
-                [f'B{i:04d}','待处理','Tiktok','集团二部',-1,-1,-1] for i in range(21)]))
+                [f'B{i:04d}','待处理','Tiktok','集团二部',-1,-1,-1] for i in range(101)]))
         body = json.loads(request.content)
         if path.endswith('/login'):
             return httpx.Response(200, json={'code':200,'data':{'token':'SECRET'}})
         if path == '/Api/order/list':
             pages.append(body['page'])
             assert body['jzfh'] == '1' and 'financecheck' not in body
-            start, stop = (0,20) if body['page'] == 1 else (20,21)
+            start, stop = (0,100) if body['page'] == 1 else (100,101)
             records = [{'orderid':f'B{i:04d}','status':3,'platform':'Tiktok','jzfh':'1'}
                        for i in range(start,stop)]
-            total = 22 if drift and body['page'] == 2 else 21
+            total = 102 if drift and body['page'] == 2 else 101
             return httpx.Response(200, json={'code':0,'data':{'total':total,'records':records}})
         if path.endswith('/asyncOrderListDownload'):
             submissions.append(body)
@@ -546,12 +573,12 @@ def test_blocked_pagination_uses_observed_orders_despite_total_drift(tmp_path, d
     group = result['groups'][0]
     assert pages == [1,2]
     assert group['list_complete']
-    assert submissions == [{'orderIdList':[f'B{i:04d}' for i in range(21)]}]
+    assert submissions == [{'orderIdList':[f'B{i:04d}' for i in range(101)]}]
     assert group['batches'][0]['status'] == 'complete'
-    assert len(group['candidate_order_ids']) == group['total'] == 21
+    assert len(group['candidate_order_ids']) == group['total'] == 101
     assert group['failed_pages'] == [] and 'list_error' not in group
     assert group['error'] is None
-    assert group['pages'][-1]['total'] == (22 if drift else 21)
+    assert group['pages'][-1]['total'] == (102 if drift else 101)
     assert result['selection_complete'] and result['capture_complete']
     from app.adapters.erp_pricing import CaptureGroup
     normalized = CaptureGroup.model_validate(group)
@@ -559,11 +586,11 @@ def test_blocked_pagination_uses_observed_orders_despite_total_drift(tmp_path, d
 
 
 @pytest.mark.parametrize('totals, counts', [
-    ([286, 289], [20, 3]),
-    ([40, 20], [20, 0]),
+    ([286, 289], [100, 3]),
+    ([200, 100], [100, 0]),
     ([20], [3]),
     ([0], [0]),
-    ([21, 40], [20, 20]),
+    ([101, 200], [100, 100]),
 ])
 def test_blocked_dynamic_counts_end_without_incomplete_or_rescan(totals, counts):
     from app.adapters.erp_bulk_capture import _blocked_ids
@@ -571,7 +598,7 @@ def test_blocked_dynamic_counts_end_without_incomplete_or_rescan(totals, counts)
     def post(path, body):
         page = body['page']
         requested.append(page)
-        start = (page - 1) * 20
+        start = (page - 1) * 100
         return {'total': totals[page - 1], 'records': [
             {'orderid':f'B{i}', 'status':4, 'platform':'Tiktok', 'jzfh':'1'}
             for i in range(start, start + counts[page - 1])
@@ -610,7 +637,7 @@ def test_blocked_bad_row_does_not_discard_valid_rows_on_the_same_page(bad_row, r
 def test_blocked_later_page_failure_keeps_and_exports_verified_prefix(tmp_path, limited):
     from app.adapters.base import SourceUnavailable
     from app.adapters.erp_web import ErpAccountRateLimited
-    ids = [f'B{i:03d}' for i in range(20)]
+    ids = [f'B{i:03d}' for i in range(100)]
     submitted = []
     def post(path, body, **kwargs):
         if path == '/Api/order/list':
@@ -618,7 +645,7 @@ def test_blocked_later_page_failure_keeps_and_exports_verified_prefix(tmp_path, 
                 if limited:
                     raise ErpAccountRateLimited()
                 raise SourceUnavailable('第二页读取失败')
-            return {'total': 40, 'records': [
+            return {'total': 200, 'records': [
                 {'orderid': order, 'platform': 'Tiktok', 'status': 3, 'jzfh': '1'} for order in ids]}
         if path.endswith('/asyncOrderListDownload'):
             submitted.append(body['orderIdList'])
@@ -635,7 +662,7 @@ def test_blocked_later_page_failure_keeps_and_exports_verified_prefix(tmp_path, 
     group = result['groups'][0]
     assert submitted == [ids]
     assert group['candidate_order_ids'] == ids
-    assert len(group['rows']) == 20
+    assert len(group['rows']) == 100
     assert group['failed_pages'] == [2] and not group['list_complete']
     assert not result['capture_complete']
     from app.adapters.erp_pricing import CaptureGroup

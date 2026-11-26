@@ -56,7 +56,7 @@ export interface SellerGroup {
 
 const sellerNameOrder = new Intl.Collator('zh-Hans-u-co-pinyin')
 
-export function groupBySeller(items: RecordItem[]): SellerGroup[] {
+export function groupBySeller(items: RecordItem[], countRange?: BusinessDateRange): SellerGroup[] {
   const groups = new Map<string, SellerGroup>()
   for (const item of items) {
     const id = item.seller.id === null ? 'unassigned' : `seller:${item.seller.id}`
@@ -68,7 +68,9 @@ export function groupBySeller(items: RecordItem[]): SellerGroup[] {
     }
     group.items.push(item)
     const status = recordStatusLabel(item)
-    group.counts[status] += 1
+    if (!countRange || (item.business_date >= countRange.start && item.business_date <= countRange.end)) {
+      group.counts[status] += 1
+    }
     // 接口已按记录更新从新到旧排列，跳过较新的待处理或不调价记录。
     if (status === '已提价') group.latestPriced ??= item
   }

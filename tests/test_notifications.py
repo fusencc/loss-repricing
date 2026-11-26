@@ -83,12 +83,17 @@ def notices_context(tmp_path):
     with factory.begin() as s:
         for uid,role in [('seller','sales'),('other','sales'),('manager','manager')]:
             s.add(UserAccount(id=uid,username=uid,display_name=uid,role=role,password_hash='unused',
-                              dingtalk_userid='ding-'+uid,created_at=stamp(),updated_at=stamp()))
+                              dingtalk_userid='obsolete-'+uid,created_at=stamp(),updated_at=stamp()))
         s.add(Ownership(id='o',scope_key=scope_key('tiktok','shop','MY'),platform='tiktok',shop_id='shop',site='MY',owner_id='seller',supervisor_id='manager'))
         s.add(Batch(id='b',run_key='b',business_date='2026-11-05',mode='live',status='done',created_at=stamp(),snapshot={},summary={}))
         s.flush()
         s.add(Item(id='i',batch_id='b',variant_id='v',key=key,status='待处理',phase='failed',reason='reason',decision={},updated_at=stamp()))
-    cfg=SimpleNamespace(notification_mode='live',ding_enabled=False,session_secret='x'*32,admin_username='admin',
+    import json
+    (tmp_path / 'dingtalk_users.json').write_text(json.dumps({'users': [
+        {'name': name, 'user_id': 'ding-' + name, 'active': True}
+        for name in ('seller', 'other', 'manager')
+    ]}), encoding='utf-8')
+    cfg=SimpleNamespace(runtime_dir=tmp_path,notification_mode='live',ding_enabled=False,session_secret='x'*32,admin_username='admin',
                         ding_corp_id='corp',ding_client_id='client',ding_client_secret='secret',ding_agent_id='123',public_base_url='https://example.com')
     yield factory,cfg
     engine.dispose()

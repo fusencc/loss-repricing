@@ -18,11 +18,10 @@ from app.domain.engine import evaluate, allowed_error, snapshot_problem
 from app.domain.money import MoneyRatio
 from app.domain.price_reference import saved_price_limit
 from app.adapters.base import SourceUnavailable, SubmitResult
-from app.adapters.roster_price_upload import ROSTER_UPLOAD_TRACE, VERIFIED_FULFILLMENT, RosterPriceTransport
+from app.adapters.roster_price_upload import ROSTER_UPLOAD_TRACE, RosterPriceTransport
 from app.adapters.official_price_logs import capture_recent_price_changes, recent_price_log_for
-from app.adapters.normalization import money
 from app.services.store import utcnow, stamp, parse_stamp, BEIJING, settings_value, settings_for_submit, _lock_runtime_settings, enqueue, is_erp_reconciliation, write_decisions
-from app.services.coordination import automation_gate, authorization_snapshot, lock_authorization
+from app.services.coordination import automation_gate, lock_authorization
 from app.services.price_control import observe_prices, price_baseline, same_price, record_conflict, lock_control, verified_baseline
 
 
@@ -32,6 +31,7 @@ class PricingService:
         self._roster_channel = None
 
     def _roster_transport(self):
+        """仅供历史固定名单执行回查，不提供新提交入口。"""
         if self._roster_channel is None:
             self._roster_channel = RosterPriceTransport(self.config)
         return self._roster_channel
@@ -40,24 +40,19 @@ class PricingService:
         if self._roster_channel is not None:
             self._roster_channel.close()
 
-    def _enrich(self, snapshot, *, roster=None):
+    def _enrich(self, snapshot):
         """真实近期调价由开放接口证明；本地档案只补充未知执行锁和人工保护。"""
         result = snapshot.model_copy(deep=True)
         if self.adapter.mode == 'live':
-            # 名单复用 ERP 首查的有效计数及明确的未知，只补查此前未覆盖的子商品。
-            history = dict.fromkeys(roster.unknown_history_ids) if roster is not None else {}
-            if roster is not None:
-                history.update((row.key.item_id, row.recent_price_log) for row in result.online
-                               if row.recent_price_log is not None)
-            missing = {row.key.item_id: row.key for row in result.online if row.key.item_id not in history}
-            if missing or roster is None:
-                official = capture_recent_price_changes(self.config, list(missing.values()), now=utcnow())
-                result.source_versions['recent_price_history'] = official['source_id']
-                for item_id, key in missing.items():
-                    try:
-                        history[item_id] = recent_price_log_for(official, key)
-                    except (ValueError, TypeError, KeyError):
-                        history[item_id] = None
+            history = {}
+            keys = {row.key.item_id: row.key for row in result.online}
+            official = capture_recent_price_changes(self.config, list(keys.values()), now=utcnow())
+            result.source_versions['recent_price_history'] = official['source_id']
+            for item_id, key in keys.items():
+                try:
+                    history[item_id] = recent_price_log_for(official, key)
+                except (ValueError, TypeError, KeyError):
+                    history[item_id] = None
         with self.factory() as session:
             protections = session.scalars(select(Protection).where(Protection.active.is_(True))).all()
             for online in result.online:
@@ -82,37 +77,19 @@ class PricingService:
         return result
 
     @staticmethod
-    def _runtime_allowed(key, cfg, manual, *, roster=False):
+    def _runtime_allowed(key, cfg, manual):
         if cfg["paused"] or key.site in cfg["paused_sites"]:
             return False, "当前范围已暂停新提交"
-        if roster:
-            return True, ""
         if not manual and not cfg["autonomous_enabled"]:
             return False, "自动运行尚未启用"
         if key.shop_id not in cfg["pilot_shops"] or key.site not in cfg["site_enabled"]:
             return False, "店铺或站点不在已启用试点名单"
         return True, ""
 
-    def _allowed(self, key, manual=False, *, roster=None):
-        allowed, reason = self._runtime_allowed(key, settings_value(self.factory), manual, roster=roster is not None)
+    def _allowed(self, key, manual=False):
+        allowed, reason = self._runtime_allowed(key, settings_value(self.factory), manual)
         if not allowed:
             return allowed, reason
-        if roster is not None:
-            if (manual or self.adapter.mode != "live" or not self.config.live_submit_enabled
-                    or self.config.erp_roster_submit_date != roster.day or self.config.erp_roster_date != roster.day
-                    or roster.day != utcnow().astimezone(BEIJING).date()):
-                return False, "当日名单真实提交未启用"
-            price = roster.prices.get(key.identity())
-            if price is None or not price.shop_name:
-                return False, "缺少本轮算价与 ERP 店铺的精确绑定"
-            if price.fulfillment not in VERIFIED_FULFILLMENT.get(key.site, ()):
-                return False, "本站点与仓配组合缺少已验证的单品上传和回读证据"
-            if not self._roster_transport().available:
-                return False, "单品提交的销售账号或接口地址未配置"
-            if self.config.coordination_required:
-                with self.factory() as session:
-                    return automation_gate(session, key, roster_salesperson=roster.salesperson)
-            return True, ""
         if self.adapter.mode == "file":
             return False, "文件模式仅对账，不执行上传"
         if self.adapter.mode == "live":
@@ -136,20 +113,16 @@ class PricingService:
         with transaction(self.factory) as session:
             write_decisions(session, batch_id, decisions)
 
-    def run_batch(self, run_key, item_id=None, *, roster=None):
-        if roster is not None and (item_id is not None or self.adapter.mode != "live"):
-            raise ValueError("固定日期名单仅适用真实批次")
+    def run_batch(self, run_key, item_id=None):
         with bind_sink(get_sink(self.config)), bind_context(operation_id=uuid4().hex):
             event('batch.started', source=self.adapter.mode, synthetic=getattr(self.adapter, 'synthetic', False))
             started = time.monotonic()
-            batch_id = self._run_batch(run_key, item_id, roster=roster)
+            batch_id = self._run_batch(run_key, item_id)
             event('batch.completed', batch_id=batch_id, source=self.adapter.mode,
                   synthetic=getattr(self.adapter, 'synthetic', False), duration_ms=(time.monotonic() - started) * 1000)
             return batch_id
 
-    def _run_batch(self, run_key, item_id=None, *, roster=None):
-        fixed_day = roster.day if roster is not None else None
-        approved_prices = roster.prices if roster is not None else None
+    def _run_batch(self, run_key, item_id=None):
         target_id = None
         if item_id:
             with self.factory() as session:
@@ -165,12 +138,10 @@ class PricingService:
             # 点选旧记录也核验该稳定目标的全部未知执行，绝不再次上传未知请求。
             self.reconcile(target_id=target_id)
         business_date = utcnow().astimezone(BEIJING).date()
-        if fixed_day is not None and business_date != fixed_day:
-            raise SourceUnavailable('固定日期批次已跨北京时间业务日')
         # 日界后生成新批次，旧批次里已经送达的意图仍由reconcile独立跟进。
         actual_key = f"{run_key}:{business_date.isoformat()}"
-        initial = roster.collect(business_date)[0] if roster is not None else self.adapter.collect(business_date)
-        snapshot = self._enrich(initial, roster=roster)
+        initial = self.adapter.collect(business_date)
+        snapshot = self._enrich(initial)
         evaluation_time = utcnow()
         if problem := snapshot_problem(snapshot, evaluation_time, business_date):
             # 不完整的重取不能覆盖先前候选，也不能将未返回的商品标为不调。
@@ -188,12 +159,7 @@ class PricingService:
         authorizations = {}
         # 跨日判定仅供查看，不将上一日观察用于接管或外部改价冲突判断。
         if self.config.coordination_required and evaluation_time.astimezone(BEIJING).date() == business_date:
-            observed = snapshot
-            if approved_prices is not None:
-                observed = snapshot.model_copy(update={
-                    "online": [row for row in snapshot.online if row.key.identity() in approved_prices],
-                })
-            authorizations = observe_prices(self.factory, observed)
+            authorizations = observe_prices(self.factory, snapshot)
         decisions = evaluate(snapshot, evaluation_time)
         if self.config.coordination_required:
             with self.factory() as session:
@@ -204,76 +170,50 @@ class PricingService:
         with transaction(self.factory) as session:
             batch = session.scalar(select(Batch).where(Batch.run_key == actual_key))
             if not batch:
-                archive = snapshot.model_dump(mode="json")
-                if approved_prices is not None:
-                    archive["erp_roster_approved_prices"] = {
-                        key: price.as_json() for key, price in approved_prices.items()
-                    }
                 batch = Batch(id=str(uuid4()), run_key=actual_key, business_date=business_date.isoformat(),
-                    mode=self.adapter.mode, status="running", created_at=stamp(), snapshot=archive, summary={})
+                    mode=self.adapter.mode, status="running", created_at=stamp(), snapshot=snapshot.model_dump(mode="json"), summary={})
                 session.add(batch)
             else:
                 # 模式属于原始批次证据，不能靠切换适配器覆盖成另一模式。
                 if batch.mode != self.adapter.mode:
                     raise ValueError("原始批次模式与当前适配器不一致，禁止跨模式运行")
-                # 名单任务重启后，首次入批的商品及精确拟价继续限定授权范围。
-                if approved_prices is not None:
-                    original_prices = batch.snapshot["erp_roster_approved_prices"]
-                    approved_prices = {
-                        key: price for key, price in approved_prices.items()
-                        if price.as_json() == original_prices.get(key)
-                    }
                 batch.status, batch.error = "running", None
             batch_id = batch.id
-        if approved_prices is not None:
-            decisions = [d for d in decisions if d.key.identity() in approved_prices]
         self._save_decisions(batch_id, decisions)
         event('batch.saved', batch_id=batch_id, count=len(decisions),
               source=self.adapter.mode, synthetic=getattr(self.adapter, 'synthetic', False))
         if utcnow().astimezone(BEIJING).date() != business_date:
-            self._rollover(run_key, batch_id, item_id, fixed_day=fixed_day)
+            self._rollover(run_key, batch_id, item_id)
             self._summarize(batch_id)
             return batch_id
 
-        # 名单直接复用当日已归档的算价输入；现价由每条上传前实时预检核对。
-        # 通用入口仍按既有合同批内刷新，不能把名单策略扩展到其他取数合同。
-        fresh_at, fresh_decisions, fresh_approved = None, {}, {}
-        if roster is not None:
-            fresh_decisions = {d.key.identity(): d for d in decisions}
-            fresh_approved = approved_prices
+        fresh_at, fresh_decisions = None, {}
         with self.factory() as session:
             item_ids = session.scalars(select(Item.id).where(Item.batch_id == batch_id, Item.phase == "proposed")).all()
         selected_item_id = item_id
         for item_id in item_ids:
             if utcnow().astimezone(BEIJING).date() != business_date:
-                self._rollover(run_key, batch_id, selected_item_id, fixed_day=fixed_day)
+                self._rollover(run_key, batch_id, selected_item_id)
                 break
             with self.factory() as session:
                 item = session.get(Item, item_id)
                 original = Decision.model_validate(item.decision)
-            price = None
-            if approved_prices is not None:
-                price = approved_prices.get(original.key.identity())
-                if price is None or (price.upload_price, price.target_actual) != (original.upload_price, original.target_actual):
-                    # 租约恢复后的旧待提交记录也必须在本轮通过的名单、店铺和金额内。
-                    self._hold(item_id, "记录已超出本轮有效算价范围")
-                    continue
-            allowed, reason = self._allowed(original.key, roster=roster)
+            allowed, reason = self._allowed(original.key)
             if not allowed:
                 self._hold(item_id, reason)
                 continue
-            if roster is None and (fresh_at is None or (utcnow() - fresh_at).total_seconds() >= 300):
+            if fresh_at is None or (utcnow() - fresh_at).total_seconds() >= 300:
                 try:
                     latest = self.adapter.collect(business_date)
                     refreshed = self._enrich(latest)
                 except SourceUnavailable:
                     if utcnow().astimezone(BEIJING).date() != business_date:
-                        self._rollover(run_key, batch_id, selected_item_id, fixed_day=fixed_day)
+                        self._rollover(run_key, batch_id, selected_item_id)
                         break
                     self._summarize(batch_id, refresh_error="提交前刷新失败，等待后台重新取数")
                     raise
                 if utcnow().astimezone(BEIJING).date() != business_date:
-                    self._rollover(run_key, batch_id, selected_item_id, fixed_day=fixed_day)
+                    self._rollover(run_key, batch_id, selected_item_id)
                     break
                 evaluation_time = utcnow()
                 # 空快照也须至少有一类有效来源，失败来源不能伪装成零订单。
@@ -293,13 +233,11 @@ class PricingService:
                 after = decision.trace.get("online_rows", [])
                 if (len(before) == 1 and len(after) == 1
                         and not same_price(price_baseline(before[0]), price_baseline(after[0]))):
-                    reason = "检测到外部价格、折扣、仓配或版本变化"
-                    reason += "，已刷新基线" if roster is None else "，由名单单品预检核对"
+                    reason = "检测到外部价格、折扣、仓配或版本变化，已刷新基线"
                     decision.trace.setdefault('warnings', []).append(reason)
-                    if roster is None:
-                        record_conflict(self.factory, original.key, reason, baseline=price_baseline(after[0]))
-                        self._hold(item_id, reason, decision=decision)
-                        continue
+                    record_conflict(self.factory, original.key, reason, baseline=price_baseline(after[0]))
+                    self._hold(item_id, reason, decision=decision)
+                    continue
             with transaction(self.factory) as session:
                 item = session.get(Item, item_id)
                 item.decision = decision.model_dump(mode="json")
@@ -307,38 +245,30 @@ class PricingService:
             if not decision.ready:
                 self._hold(item_id, decision.reason, decision.status)
                 continue
-            if price is not None and (
-                    decision.upload_price != original.upload_price or decision.target_actual != original.target_actual
-                    or fresh_approved.get(decision.key.identity()) != price):
-                self._hold(item_id, "提交前重算结果已变化，原批次价格或商品归属待重新核对")
-                continue
-            if self._submit(item_id, decision, business_date, roster=roster) is False:
-                self._rollover(run_key, batch_id, selected_item_id, fixed_day=fixed_day)
+            if self._submit(item_id, decision, business_date) is False:
+                self._rollover(run_key, batch_id, selected_item_id)
                 break
         else:
             # 最后一个候选可能在计算/挂起阶段跨日，没有下一轮循环替它触发重新取数。
             if utcnow().astimezone(BEIJING).date() != business_date:
-                self._rollover(run_key, batch_id, selected_item_id, fixed_day=fixed_day)
+                self._rollover(run_key, batch_id, selected_item_id)
         self._summarize(batch_id)
         return batch_id
 
-    def _rollover(self, run_key, batch_id, selected_item_id, *, fixed_day=None):
+    def _rollover(self, run_key, batch_id, selected_item_id):
         """跨北京时间日界后丢弃缓存；持久排队新日期评估，保留单目标授权范围。"""
-        # 单日名单跨日只结束原范围，避免转成次日全量任务。
-        if fixed_day is None:
-            today = utcnow().astimezone(BEIJING).date().isoformat()
-            with self.factory() as session:
-                job = session.get(Job, run_key)
-                scheduled_day = job.payload.get("date") if job else None
-                scheduled = job and job.dedupe_key == f"daily:{scheduled_day}" and scheduled_day
-            if scheduled and not selected_item_id:
-                # 定时批次的跨日重算与新日调度共用日唯一键。
-                enqueue(self.factory, "run", {"date": today}, f"daily:{today}")
-            else:
-                enqueue(self.factory, "run", {"item_id": selected_item_id} if selected_item_id else {},
-                        f"rollover:{batch_id}:{today}")
-        reason = ('固定名单批次已跨北京时间业务日' if fixed_day is not None else
-                  '已跨北京时间业务日，已排队重新取数计算')
+        today = utcnow().astimezone(BEIJING).date().isoformat()
+        with self.factory() as session:
+            job = session.get(Job, run_key)
+            scheduled_day = job.payload.get("date") if job else None
+            scheduled = job and job.dedupe_key == f"daily:{scheduled_day}" and scheduled_day
+        if scheduled and not selected_item_id:
+            # 定时批次的跨日重算与新日调度共用日唯一键。
+            enqueue(self.factory, "run", {"date": today}, f"daily:{today}")
+        else:
+            enqueue(self.factory, "run", {"item_id": selected_item_id} if selected_item_id else {},
+                    f"rollover:{batch_id}:{today}")
+        reason = '已跨北京时间业务日，已排队重新取数计算'
         with transaction(self.factory) as session:
             for item in session.scalars(select(Item).where(Item.batch_id == batch_id, Item.phase == "proposed")):
                 item.status, item.phase = "待处理", "blocked"
@@ -352,7 +282,7 @@ class PricingService:
                 item.decision = decision.model_dump(mode="json")
         event('execution.blocked', item_id=item_id)
 
-    def _locked_submission_access(self, session, decision, roster):
+    def _locked_submission_access(self, session, decision):
         control = lock_control(session, decision.key)
         correction_id = decision.trace.get('correction_id')
         if correction_id:
@@ -365,10 +295,9 @@ class PricingService:
         locked = lock_authorization(session, decision.key)
         return automation_gate(
             session, decision.key, decision.trace.get("authorization", {}), locked=locked,
-            roster_salesperson=roster.salesperson if roster is not None else None,
         )
 
-    def _claim(self, item_id, decision, *, roster=None, execution_id=None):
+    def _claim(self, item_id, decision):
         identity = decision.key.target_identity()
         # 先确保锁行存在；并发创建的冲突只需重新读取，不影响已有执行。
         try:
@@ -377,7 +306,7 @@ class PricingService:
                     session.add(VariantGuard(variant_id=identity))
         except IntegrityError:
             pass
-        execution_id = execution_id or str(uuid4())
+        execution_id = str(uuid4())
         with transaction(self.factory) as session:
             if session.scalar(select(Execution.id).where(Execution.item_id == item_id)):
                 return None
@@ -385,7 +314,7 @@ class PricingService:
             item = session.get(Item, item_id)
             item.decision = decision.model_dump(mode="json")
             if self.config.coordination_required:
-                allowed, reason = self._locked_submission_access(session, decision, roster)
+                allowed, reason = self._locked_submission_access(session, decision)
                 if not allowed:
                     item = session.get(Item, item_id)
                     item.status, item.phase, item.reason, item.updated_at = "待处理", "blocked", reason, stamp()
@@ -422,17 +351,6 @@ class PricingService:
                 item = session.get(Item, item_id)
                 item.status, item.phase, item.reason = "待核验", "blocked", "同一在线变体仍在核验或距生效不足72小时"
                 return None
-            if roster is not None:
-                # 已确认成功的本程序任务可能晚于复用的 ERP 首查；持锁去重，不再访问官方接口。
-                previous = session.scalar(select(Execution.id).join(Item, Execution.item_id == Item.id)
-                    .join(Batch, Batch.id == Item.batch_id).where(Batch.mode == 'live',
-                        Execution.variant_id == identity, Execution.state == 'uploaded',
-                        Execution.created_at > cutoff).limit(1))
-                if previous:
-                    session.get(VariantGuard, identity).execution_id = None
-                    item.status, item.phase = '不调价', 'excluded'
-                    item.reason, item.updated_at = '近72小时本系统已有成功调价任务，不重复上传', stamp()
-                    return None
             session.add(Execution(id=execution_id, item_id=item_id, variant_id=identity, state="submitting",
                 request=decision.model_dump(mode="json"), response={}, evidence={}, created_at=stamp(), updated_at=stamp()))
             if decision.trace.get("correction_id"):
@@ -447,16 +365,15 @@ class PricingService:
               source=self.adapter.mode, synthetic=getattr(self.adapter, 'synthetic', False))
         return execution_id
 
-    def _submit(self, item_id, decision, business_date=None, *, roster=None):
+    def _submit(self, item_id, decision, business_date=None):
         if business_date and utcnow().astimezone(BEIJING).date() != business_date:
             return False
         manual = bool(decision.trace.get("correction_id"))
-        allowed, reason = self._allowed(decision.key, manual=manual, roster=roster)
+        allowed, reason = self._allowed(decision.key, manual=manual)
         if not allowed:
             self._hold(item_id, reason)
             return
-        if self.adapter.mode == 'live' and not manual and roster is None:
-            # 通用实时批次仍在提交前复查；名单已使用本轮首查结果。
+        if self.adapter.mode == 'live' and not manual:
             official = capture_recent_price_changes(self.config,[decision.key],now=utcnow())
             decision.trace['official_price_history_before_submit'] = official
             try:
@@ -470,56 +387,23 @@ class PricingService:
                 decision.reason_code, decision.reason = 'recent_price_change', '提交前查到近72小时调价日志，不调价'
                 self._hold(item_id,decision.reason,decision.status,decision=decision)
                 return
-        if roster is not None:
-            price = roster.prices[decision.key.identity()]
-            with self.factory() as session:
-                item = session.get(Item, item_id)
-                batch = session.get(Batch, item.batch_id)
-            if (
-                    batch.mode != "live" or batch.business_date != roster.day.isoformat()
-                    or batch.snapshot.get("source_versions", {}).get("erp_roster_salesperson") != roster.salesperson
-                    or price.as_json() != batch.snapshot.get("erp_roster_approved_prices", {}).get(decision.key.identity())
-                    or (price.upload_price, price.target_actual) != (decision.upload_price, decision.target_actual)):
-                self._hold(item_id, "确认的名单、店铺或金额与本轮执行不一致")
-                return
-            execution_id = str(uuid4())
-            try:
-                decision.trace[ROSTER_UPLOAD_TRACE] = self._roster_transport().prepare(
-                    execution_id, batch.id, roster.day, price.shop_name, decision,
-                )
-            except (SourceUnavailable, ValueError, KeyError, TypeError, ArithmeticError, OSError) as exc:
-                error_id = event('execution.roster_preflight_failed', exception=exc, item_id=item_id)
-                reason = str(exc) if type(exc) in (SourceUnavailable, ValueError) else "单品提交前证据不完整"
-                self._hold(item_id, reason + (f"（排查编号 {error_id}）" if error_id else ""))
-                return
-            execution_id = self._claim(item_id, decision, roster=roster, execution_id=execution_id)
-        else:
-            execution_id = self._claim(item_id, decision)
+        execution_id = self._claim(item_id, decision)
         if not execution_id:
             return
         # 执行意图已在上个事务持久化。最后一段与人工接管串行化：
         # 请求已开始后接管不会撤销外部调用；崩溃时上个意图仍在，继续核验不重传。
         with transaction(self.factory) as session:
             if self.config.coordination_required:
-                allowed, reason = self._locked_submission_access(session, decision, roster)
+                allowed, reason = self._locked_submission_access(session, decision)
             # 执行意图落库后，管理员或本站点超差仍可能撤回新提交授权。
             # 在最后一次外部调用前读取当前设置，只有能证明尚未调用才可释放本次锁。
             if allowed:
                 allowed, reason = self._runtime_allowed(
-                    decision.key, settings_for_submit(session), manual, roster=roster is not None,
+                    decision.key, settings_for_submit(session), manual,
                 )
             # 等待授权或设置锁也可能跨日。以外部调用前的业务日为准。
             now = utcnow()
             crossed_day = business_date is not None and now.astimezone(BEIJING).date() != business_date
-            if allowed and not crossed_day and self.adapter.mode == "live":
-                # 名单只采用本条实时预检时间，整批归档时间不再充当提交时效。
-                if roster is not None:
-                    observation = decision.trace[ROSTER_UPLOAD_TRACE]
-                else:
-                    observation = decision.trace["online_rows"][0]
-                observed_at = parse_stamp(observation.get("observed_at"))
-                if observed_at is None or not timedelta(0) <= now - observed_at <= timedelta(minutes=15):
-                    allowed, reason = False, "当前在线价格快照无效或超过15分钟，等待新的有效价数据"
             if crossed_day or not allowed:
                 if crossed_day:
                     reason = "已跨北京时间业务日，等待重新取数计算"
@@ -534,10 +418,7 @@ class PricingService:
             try:
                 event('execution.submit_started', execution_id=execution_id, item_id=item_id,
                       source=self.adapter.mode, synthetic=getattr(self.adapter, 'synthetic', False))
-                if roster is not None:
-                    result = self._roster_transport().submit(execution_id, decision)
-                else:
-                    result = self.adapter.submit(execution_id, decision)
+                result = self.adapter.submit(execution_id, decision)
             except Exception as exc:
                 event('execution.unknown', exception=exc, execution_id=execution_id, item_id=item_id,
                       source=self.adapter.mode, synthetic=getattr(self.adapter, 'synthetic', False))
@@ -552,8 +433,6 @@ class PricingService:
             if result.status == "rejected":
                 item.status = "待处理"
                 session.get(VariantGuard, execution.variant_id).execution_id = None
-            elif roster is not None and result.status == 'accepted':
-                item.status = '已提价'
             else:
                 item.status = "待核验"
             item.updated_at = stamp()

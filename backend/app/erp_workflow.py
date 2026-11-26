@@ -1,5 +1,4 @@
 """按部门串行运行 ERP 只读链路，非完整结果返回非零退出码。"""
-from datetime import date
 import argparse
 import json
 from pathlib import Path
@@ -14,7 +13,6 @@ from app.services.erp_workflow import run_workflow
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--roster-date', type=date.fromisoformat, help='仅在该北京时间日期按代码内七人名单采集；日期不符或名单无效停止')
     parser.add_argument('--capture-id', help='显式离线回放该采集；省略则依次处理四个 TikTok 部门')
     parser.add_argument('--evidence', type=Path, help='离线回放的绑定算价证据 JSON')
     parser.add_argument('--erp-details', type=Path)
@@ -32,7 +30,7 @@ def main():
         evidence = json.loads(args.evidence.read_text(encoding='utf-8')) if args.evidence else None
         exports = (args.erp_details.read_bytes(), args.sales_variants.read_bytes()) if args.erp_details else None
         result = run_workflow(settings, capture_id=args.capture_id, evidence=evidence,
-                              exports=exports, roster_date=args.roster_date,
+                              exports=exports,
                               progress=lambda message: print(message, flush=True))
     except (SourceUnavailable, OSError, ValueError, KeyError, sqlite3.Error) as error:
         error_id = event('erp.failed', exception=error, source='erp', synthetic=False,

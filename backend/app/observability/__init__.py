@@ -41,7 +41,6 @@ CATALOG = {
     'batch.saved': ('INFO', '批次与计算判定已保存'),
     'batch.completed': ('INFO', '批次处理结束，业务结果以持久记录为准'),
     'execution.blocked': ('INFO', '当前记录停止新提交，原因见业务记录'),
-    'execution.roster_preflight_failed': ('WARNING', '固定名单商品提交前复核失败'),
     'execution.intent_saved': ('INFO', '执行意图及目标锁已持久保存'),
     'execution.submit_started': ('INFO', '开始外部提交，仅发送一次'),
     'execution.unknown': ('ERROR', '提交结果未知，保留锁且仅查询、不重传'),

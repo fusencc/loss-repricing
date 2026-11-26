@@ -98,7 +98,6 @@ def test_department_finance_batches_follow_sources_without_seller_priority(tmp_p
 def test_workflow_continues_after_incomplete_or_failed_department(tmp_path, monkeypatch):
     attempted = []
     sessions = []
-    monkeypatch.setattr(erp_workflow, '_roster', lambda settings, required_day: None)
 
     def collect(settings, *, department, web_session, **kwargs):
         sessions.append(web_session)
@@ -133,7 +132,6 @@ def test_workflow_continues_after_incomplete_or_failed_department(tmp_path, monk
 
 
 def test_clean_index_failure_does_not_block_saved_capture(tmp_path, monkeypatch):
-    monkeypatch.setattr(erp_workflow, '_roster', lambda settings, required_day: None)
     monkeypatch.setattr(erp_workflow, 'refresh_daily_fees', lambda *args, **kwargs: {})
     monkeypatch.setattr(erp_workflow, 'query_current_erp_fx', lambda *a: {'ref': 'test-fx'})
     monkeypatch.setattr(erp_workflow, 'ERP_DEPARTMENTS', ('Tiktok一部',))
@@ -195,7 +193,6 @@ def test_round_reuses_real_erp_and_sales_authentication_and_clock(tmp_path, monk
     from app.domain.types import VariantKey
     from app.adapters.erp_order_headers import capture_order_headers
 
-    monkeypatch.setattr(erp_workflow, '_roster', lambda settings, required_day: None)
     erp_clock, sales_clock = [0], [0]
     def erp_sleep(seconds):
         erp_clock[0] += seconds

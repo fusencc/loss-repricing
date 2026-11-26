@@ -1,6 +1,5 @@
 """持久后台任务进程。日志仅提供技术排查，不改变租约、执行意图或未知不重传规则。"""
 from datetime import date, datetime, timezone
-from pathlib import Path
 from threading import Event, Thread
 from uuid import uuid4
 import time
@@ -82,10 +81,7 @@ class Worker:
         config = settings_value(self.factory)
         local = datetime.fromtimestamp(now, timezone.utc).astimezone(BEIJING)
         service_config = getattr(self.service, "config", None)
-        pilot_begins_today = (getattr(service_config, "erp_roster_schedule_enabled", False)
-                              and getattr(service_config, "erp_roster_date", None) == local.date())
-        start_hour = 7 if pilot_begins_today else 9
-        if (config["schedule_enabled"] or pilot_begins_today) and local.hour >= start_hour:
+        if config["schedule_enabled"] and local.hour >= 9:
             enqueue(self.factory, "run", {"date": local.date().isoformat()}, f"daily:{local.date().isoformat()}")
         if now - self.last_reconcile >= 60:
             track_logs = service_config and (service_config.ding_tk_morning_log_folder
@@ -135,65 +131,11 @@ class Worker:
             current_day = datetime.fromtimestamp(current_time, timezone.utc).astimezone(BEIJING).date().isoformat()
             daily = job.kind == "run" and scheduled_day and job.dedupe_key == f"daily:{scheduled_day}"
             service_config = getattr(self.service, "config", None)
-            roster_date = getattr(service_config, "erp_roster_date", None)
             if daily and scheduled_day < current_day:
                 # 日任务只消费本日数据。旧执行继续走独立核验，新日由其自己的唯一日任务处理。
                 state, error = "cancelled", "原定时任务已过业务日，按新业务日定时任务处理"
-            elif daily and job.payload.get('resume_roster_workflow'):
-                from app.models import Audit
-                from app.services.erp_roster_pricing import resume_roster_stock_pricing
-                if (not roster_date or scheduled_day != roster_date.isoformat()
-                        or service_config.erp_roster_submit_date != roster_date
-                        or service_config.adapter_mode != 'live' or not service_config.live_submit_enabled):
-                    raise ValueError('零库存续跑只适用已授权的同日名单')
-                resume_id = job.payload['resume_roster_workflow']
-                results = resume_roster_stock_pricing(self.service, job.id, roster_date, resume_id)
-                error = self._morning_log(service_config, roster_date)
-                with transaction(self.factory) as session:
-                    session.add(Audit(id=str(uuid4()), action='roster.zero_stock_resumed', actor='worker',
-                                      detail={'job_id': job.id, 'workflow_id': resume_id, 'sellers': results},
-                                      created_at=stamp()))
-            elif daily and roster_date and scheduled_day == roster_date.isoformat():
-                from app.services.erp_workflow import run_workflow
-                from app.services.erp_roster_pricing import run_roster_pricing
-                from app.services.erp_capture_store import write_verified
-                # 采集只读，消费者线程通过工厂新建会话，不复用任务会话。
-                config = service_config.model_copy(update={'live_submit_enabled': False})
-                job_id = job.id
-                pricing_batches = []
-
-                def price_scope(scope):
-                    if service_config.adapter_mode == 'live':
-                        from app.services.roster_filter_records import save_roster_filter_records
-                        try:
-                            save_roster_filter_records(self.factory, config.runtime_dir, job_id, roster_date, scope)
-                        except Exception as exc:
-                            # 日志归档失败留因，不重采、不影响其他独立商品的既有执行。
-                            scope['history_log_error_id'] = event('worker.roster_history_log_failed', exception=exc)
-                    if (scope['ready_prices'] and service_config.adapter_mode == 'live'
-                            and service_config.live_submit_enabled):
-                        result = run_roster_pricing(self.service, job_id, roster_date, scope)
-                        pricing_batches.append(result)
-                        scope['pricing_batch'] = result
-
-                capture = run_workflow(config, roster_date=roster_date, on_roster_scope=price_scope)
-                if pricing_batches:
-                    capture['pricing_batches'] = pricing_batches
-                    write_verified(Path(capture['artifact_dir']) / 'result.json', capture)
-                from app.services.roster_notices import enqueue_roster_notices
-                try:
-                    enqueue_roster_notices(self.factory, config, roster_date, capture)
-                except Exception as exc:
-                    # 消息入队失败不影响结果存档，也不能因此重新采集。
-                    error_id = event('worker.roster_notice_enqueue_failed', exception=exc)
-                    error = f"固定名单钉钉通知入队失败，排查编号：{error_id}"
-                log_error = self._morning_log(config, roster_date)
-                error = "；".join(filter(None, (error, log_error))) or None
-            elif job.kind == "erp_roster_notice":
-                from app.services.roster_notices import send_roster_notice
-                result = send_roster_notice(self.factory, service_config, job.id, self.owner)
-                if result['state'] != 'accepted':
-                    state, error = 'failed', result['error']
+            elif job.payload.get('resume_roster_workflow') or job.kind == 'erp_roster_notice':
+                state, error = 'cancelled', '固定名单任务已停用'
             elif job.kind == "run":
                 batch_id = (self.service.run_batch(job.id, item_id=job.payload["item_id"])
                             if job.payload.get("item_id") else self.service.run_batch(job.id))

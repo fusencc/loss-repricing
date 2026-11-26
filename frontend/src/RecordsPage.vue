@@ -33,8 +33,10 @@ const logTitle = computed(() => `${activeSeller.value?.name ?? '销售员'}的�
 const selectedSeller = ref<string | null>(null)
 const sellerQuery = ref('')
 const searchInput = ref<HTMLInputElement | null>(null)
-const groups = computed(() => groupBySeller(data.value?.items ?? []))
-const counts = computed(() => countRecordStatuses(data.value?.items ?? []))
+const todayRange = ref(todayBusinessDateRange())
+const todayItems = computed(() => filterRecordBusinessDates(data.value?.items ?? [], todayRange.value))
+const groups = computed(() => groupBySeller(data.value?.items ?? [], todayRange.value))
+const counts = computed(() => countRecordStatuses(todayItems.value))
 // 仅筛选当前部门已读取的姓名；保留完整人员记录，不改变部门汇总或下载内容。
 const visibleGroups = computed(() => {
   const query = sellerQuery.value.trim().toLocaleLowerCase()
@@ -44,9 +46,15 @@ const activeSeller = computed(() => groups.value.find(group => group.id === sele
 const logRange = ref(todayBusinessDateRange())
 const logItems = computed(() => filterRecordBusinessDates(activeSeller.value?.items ?? [], logRange.value))
 const departmentName = computed(() => departments.find(entry => entry.id === department.value)?.name ?? '部门提价记录')
-const sellerCount = computed(() => groups.value.filter(group => group.assigned).length)
+const sellerCount = computed(() => groupBySeller(todayItems.value).filter(group => group.assigned).length)
 const states = recordDisplayStates
+let dayTimer: ReturnType<typeof setInterval> | undefined
 let disconnect: (() => void) | undefined
+
+function updateToday() {
+  const range = todayBusinessDateRange()
+  if (range.start !== todayRange.value.start) todayRange.value = range
+}
 let request = 0
 let opener: HTMLElement | null = null
 
@@ -58,6 +66,7 @@ function stopLive() {
 }
 
 function startLive() {
+  updateToday()
   stopLive()
   if (document.visibilityState !== 'visible') return
   const current = request
@@ -132,10 +141,12 @@ function restoreFocus() {
 
 onMounted(() => {
   startLive()
+  dayTimer = setInterval(updateToday, 30_000)
   document.addEventListener('visibilitychange', onVisibilityChange)
 })
 onUnmounted(() => {
   stopLive()
+  clearInterval(dayTimer)
   document.removeEventListener('visibilitychange', onVisibilityChange)
 })
 </script>
@@ -157,7 +168,7 @@ onUnmounted(() => {
       <div class="records-overview" aria-live="polite">
         <div>
           <strong>{{ departmentName }}</strong>
-          <span v-if="data">{{ sellerCount }} 位销售员，全部 {{ data.total }} 条记录<span v-if="groups.some(group => !group.assigned)">，含待分配记录</span></span>
+          <span v-if="data">今日 {{ sellerCount }} 位销售员，共 {{ todayItems.length }} 条记录<span v-if="todayItems.some(item => item.seller.id === null)">，含待分配记录</span></span>
           <span v-if="refreshing" class="records-refreshing">正在更新，当前显示上次读取的结果</span>
         </div>
         <div v-if="data" class="records-counts"><span v-for="state in states" :key="state"><i :class="recordTone(state)"></i>{{ state === '不调价' ? '不调价' : state }} <b>{{ counts[state] }}</b></span><span class="records-activity-placeholder"><i class="neutral"></i>活动中</span></div>
@@ -183,7 +194,7 @@ onUnmounted(() => {
         </div>
         <table v-else class="records-table motion-reveal">
           <caption class="records-sr">{{ departmentName }}全部销售员提价记录，点击姓名查看本人详细日志</caption>
-          <thead><tr><th scope="col">销售员 / 全部记录</th><th scope="col">最近已提价商品 / SKU</th><th scope="col">店铺 / 站点</th><th scope="col" title="算价选中的订单修正一次毛利，按原币展示">修正一次毛利</th><th scope="col">最近营销价变动</th><th scope="col">上传价</th><th scope="col">处理状态</th><th scope="col">最近更新</th></tr></thead>
+          <thead><tr><th scope="col">销售员 / 全部记录</th><th scope="col">最近已提价商品 / SKU</th><th scope="col">店铺 / 站点</th><th scope="col" title="算价选中的订单修正一次毛利，按原币展示">修正一次毛利</th><th scope="col">最近营销价变动</th><th scope="col">上传价</th><th scope="col">今日处理状态</th><th scope="col">最近更新</th></tr></thead>
           <tbody><tr v-for="(group, index) in visibleGroups" :key="group.id" class="records-person-row" :data-seller="group.id" @click="openSeller(group, $event)">
             <td class="records-person-cell"><button class="records-person-button" :aria-label="`查看${group.name}的全部${group.items.length}条提价日志`" aria-haspopup="dialog" @click.stop="openSeller(group, $event)"><span class="records-avatar" :class="`tone-${index % 4}`" aria-hidden="true">{{ group.assigned ? group.name.slice(-1) : '?' }}</span><span><strong>{{ group.name }}</strong><small>共计{{ group.items.length }}条</small></span></button></td>
             <template v-if="group.latestPriced">
@@ -195,7 +206,7 @@ onUnmounted(() => {
               <td class="records-upload-cell"><span class="records-mobile-label">上传价</span><strong>{{ formatDecimal(group.latestPriced.execution?.uploaded_price ?? '未记录') }}</strong><small v-if="group.latestPriced.execution?.uploaded_price != null">{{ group.latestPriced.decision?.trace.station_currency || '币种未记录' }}</small></td>
             </template>
             <td v-else class="records-no-priced" colspan="5">暂无已提价记录</td>
-            <td class="records-progress-cell"><div class="records-status-list"><template v-for="state in states" :key="state"><span v-if="group.counts[state]" class="records-status" :class="recordTone(state)"><i></i>{{ state }} {{ group.counts[state] }}</span></template></div></td>
+            <td class="records-progress-cell"><div class="records-status-list"><template v-for="state in states" :key="state"><span v-if="group.counts[state]" class="records-status" :class="recordTone(state)"><i></i>{{ state }} {{ group.counts[state] }}</span></template><span v-if="!states.some(state => group.counts[state])" class="records-status neutral">当天无记录</span></div></td>
             <td class="records-time-cell"><div class="records-row-end"><time v-if="group.latestPriced?.display_time" :datetime="group.latestPriced.display_time">{{ timeLabel(group.latestPriced.display_time) }}</time><span v-else>—</span><button type="button" class="records-download" title="下载Excel" aria-label="下载Excel" @click.stop="downloadSeller(group)"><Download aria-hidden="true" /></button></div></td>
           </tr></tbody>
         </table>

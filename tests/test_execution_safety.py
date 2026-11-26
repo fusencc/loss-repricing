@@ -464,7 +464,7 @@ def test_midnight_while_reading_final_authorization_stops_old_day_upload(safety_
         assert [job.dedupe_key for job in jobs] == [f"rollover:{batch_id}:2026-11-06"]
 
 
-def test_live_price_can_expire_while_waiting_for_final_authorization(safety_context, monkeypatch):
+def test_waiting_for_final_authorization_does_not_reject_old_observation(safety_context, monkeypatch):
     from app.services import execution as execution_service
 
     factory, cfg, adapter, clock = safety_context
@@ -486,25 +486,18 @@ def test_live_price_can_expire_while_waiting_for_final_authorization(safety_cont
     monkeypatch.setattr(execution_service, "settings_for_submit", delayed_settings)
     service = PricingService(factory, adapter, cfg)
     batch_id = service.run_batch("expired-at-final-gate")
-    assert [decision.key.item_id for _, decision in adapter.submissions] == ["I1", "I2"]
+    assert [decision.key.item_id for _, decision in adapter.submissions] == ["I0", "I1", "I2"]
     with factory() as session:
-        item = session.scalar(select(Item).where(Item.key["item_id"].as_string() == "I0"))
-        execution = session.scalar(select(Execution).where(Execution.item_id == item.id))
-        assert execution.response["status"] == "not_submitted"
-        assert "超过15分钟" in item.reason
-        assert session.get(VariantGuard, execution.variant_id).execution_id is None
-        item_id = item.id
-        saved_reason = item.reason
-        saved_decision = dict(item.decision)
+        pending = session.scalars(select(Execution)).all()
+        assert len(pending) == 3
+        assert all(execution.state == "unknown" for execution in pending)
+        assert all(session.get(VariantGuard, execution.variant_id).execution_id == execution.id for execution in pending)
 
     assert service.run_batch("expired-at-final-gate") == batch_id
-    with factory() as session:
-        item = session.get(Item, item_id)
-        assert (item.phase, item.reason, item.decision) == ("blocked", saved_reason, saved_decision)
-    assert [decision.key.item_id for _, decision in adapter.submissions] == ["I1", "I2"]
+    assert [decision.key.item_id for _, decision in adapter.submissions] == ["I0", "I1", "I2"]
 
-    service.run_batch("fresh-reevaluation", item_id=item_id)
-    assert [decision.key.item_id for _, decision in adapter.submissions] == ["I1", "I2", "I0"]
+    service.run_batch("fresh-reevaluation", item_id=pending[0].item_id)
+    assert [decision.key.item_id for _, decision in adapter.submissions] == ["I0", "I1", "I2"]
 
 
 def test_live_first_incomplete_snapshot_requeues_daily_job(safety_context, monkeypatch):

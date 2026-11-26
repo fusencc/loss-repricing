@@ -104,7 +104,10 @@ def test_salesperson_cli_checks_order_ownership_before_finance_and_on_download(
                    'platform': 'Tiktok', 'jzfh': '1'}
             if issue != 'missing_list_owner':
                 row['shopUsername'] = '其他人' if issue == 'other_list_owner' else seller
-            return {'total': 1, 'records': [row]}
+            records = [row]
+            if issue in ('other_list_owner', 'missing_list_owner'):
+                records.append(dict(row, orderid=f"GOOD{body['status']}", shopUsername=seller))
+            return {'total': len(records), 'records': records}
         if path == bulk.ORDER_EXPORT:
             order, = body['orderIdList']
             submissions.append(order)
@@ -123,7 +126,9 @@ def test_salesperson_cli_checks_order_ownership_before_finance_and_on_download(
     args = ['--salesperson', seller, '--all', '--output', str(tmp_path)]
     if source:
         args.extend(['--source', source])
-    assert cli.main(args) == (0 if issue is None else 1)
+    list_owner_issue = issue in ('other_list_owner', 'missing_list_owner')
+    complete = issue is None or list_owner_issue
+    assert cli.main(args) == (0 if complete else 1)
     run_dir, = tmp_path.glob('erp-capture-*')
     meta = json.loads((run_dir / 'run.json').read_text())
     archive = json.loads(next(run_dir.glob('source-captures/*/result.json')).read_text())
@@ -131,14 +136,26 @@ def test_salesperson_cli_checks_order_ownership_before_finance_and_on_download(
         'loss_allocatable', 'loss_pending', 'blocked_allocatable', 'blocked_pending',
     ]
     assert meta['sources'] == [g['source'] for g in archive['groups']] == expected_sources
-    assert archive['capture_complete'] is (issue is None)
-    if issue is None:
+    assert archive['capture_complete'] is complete
+    if list_owner_issue:
+        group, = archive['groups']
+        status = group['status']
+        assert group['list_complete'] and group['error'] is None
+        assert submissions == [f'GOOD{status}']
+        assert [row['orderid'] for row in group['rows']] == [f'GOOD{status}']
+        assert group['rows'][0]['fields']['销售员'] == seller
+        excluded, = group['excluded_rows']
+        assert excluded['order_id'] == f'B{status}'
+        assert excluded['validation_reason'] == 'salesperson_mismatch'
+        assert group['pages'][0]['excluded_rows'] == 1
+        assert not group['failed_pages']
+    elif issue is None:
         assert submissions == (['B3'] if source else ['L4', 'L3', 'B4', 'B3'])
         assert all(g['rows'][0]['fields']['销售员'] == seller for g in archive['groups'])
     else:
         group, = archive['groups']
         assert group['error'] and not group['rows']
-        if issue in ('missing_id', 'missing_list_owner', 'other_list_owner'):
+        if issue == 'missing_id':
             assert not group['list_complete'] and not submissions
         else:
             assert group['list_complete'] and group['batches'][0]['status'] == 'failed'

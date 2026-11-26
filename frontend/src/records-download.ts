@@ -8,8 +8,8 @@ export const recordsExcelMime = 'application/vnd.openxmlformats-officedocument.s
 const text = (value: string | null | undefined): Cell => value == null ? null : { type: String, value, format: '@' }
 const amount = (value: string | null | undefined): Cell => text(value == null ? value : formatDecimal(value))
 const headers = ['商品编码（SKU）', '商品ID', '产品ID', '店铺名称／编号', '站点', '平台', '一次毛利金额', '毛利币种',
-  '价格币种', '原营销价', '目标营销价', '上传价格', '记录状态', '更新时间（北京时间）', '是否模拟数据']
-const widths = [32, 28, 28, 32, 12, 16, 30, 12, 12, 30, 30, 30, 14, 25, 16]
+  '价格币种', '原营销价', '目标营销价', '上传价格', '记录状态', '更新时间（北京时间）']
+const widths = [32, 28, 28, 32, 12, 16, 30, 12, 12, 30, 30, 30, 14, 25]
 const statusColumn = 12
 const headerCell = (value: string): Cell => ({ type: String, value, fontWeight: 'bold',
   backgroundColor: '#243B53', textColor: '#FFFFFF', height: 34, align: 'center', alignVertical: 'center', wrap: true })
@@ -45,13 +45,13 @@ export async function createSellerExcel(group: SellerExport, department: string,
       amount(item.first_margin?.amount), text(item.first_margin?.currency),
       text(item.decision?.trace.station_currency), amount(item.decision?.current_actual),
       amount(item.decision?.target_actual), amount(item.execution?.uploaded_price),
-      text(status), text(beijingTime(item.updated_at)), text(item.synthetic ? '是' : '否'),
+      text(status), text(beijingTime(item.updated_at)),
     ]
     return cells.map((cell, column): Cell => {
       const styled: Cell = { ...(cell ?? { type: String, value: '' }), height: 36,
         backgroundColor: index % 2 ? '#F0F4F8' : '#FFFFFF', textColor: '#243B53',
         bottomBorderColor: '#D9E2EC', bottomBorderStyle: 'hair', alignVertical: 'center', wrap: true,
-        align: [6, 9, 10, 11].includes(column) ? 'right' : [4, 7, 8, statusColumn, 14].includes(column) ? 'center' : 'left' }
+        align: [6, 9, 10, 11].includes(column) ? 'right' : [4, 7, 8, statusColumn].includes(column) ? 'center' : 'left' }
       if (column === statusColumn) {
         styled.fontWeight = 'bold'
         styled.textColor = status === '已提价' ? '#13795B' : status === '不调价' ? '#52606D' : '#9A6700'

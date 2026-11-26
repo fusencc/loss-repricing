@@ -1,4 +1,6 @@
 """ERP 网页服务的地址与可公开的错误证据。"""
+from time import sleep
+
 import httpx
 
 from app.adapters.base import SourceUnavailable
@@ -20,16 +22,21 @@ class ErpAccountRateLimited(ErpBusinessFailure):
         self.args = ('ERP账号操作频繁（500003），当前请求未取到数据',)
 
 
-def retry_erp_read(call):
-    """幂等读取遇到读超时或 HTTP 5xx 时，按原节流间隔总共最多尝试三次。"""
-    for attempt in (1, 2, 3):
+BLOCKED_LIST_RETRY_DELAYS = (16, 32)
+
+
+def retry_erp_read(call, *, delays=(0, 0), wait=sleep):
+    """Retry an idempotent read after a read timeout or HTTP 5xx."""
+    for attempt, delay in enumerate((0, *delays)):
+        if delay:
+            wait(delay)
         try:
             return call()
         except httpx.ReadTimeout:
-            if attempt == 3:
+            if attempt == len(delays):
                 raise
         except httpx.HTTPStatusError as exc:
-            if attempt == 3 or not 500 <= exc.response.status_code <= 599:
+            if attempt == len(delays) or not 500 <= exc.response.status_code <= 599:
                 raise
 
 

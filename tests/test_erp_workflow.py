@@ -7,7 +7,6 @@ import subprocess
 import sys
 from copy import deepcopy
 from decimal import Decimal
-from threading import Event, get_ident
 
 import pytest
 
@@ -87,92 +86,6 @@ def test_failed_cleaning_does_not_publish_pending_prices(tmp_path, monkeypatch):
     assert not list(tmp_path.rglob('pending-prices.json'))
 
 
-def test_roster_overlaps_erp_with_sales_and_isolates_scope_failures(tmp_path, monkeypatch):
-    from app.services import erp_workflow as workflow
-
-    names = ['甲', '丙', '乙', '丁']
-    first, second, third = 'Tiktok一部', 'Tiktok五部', 'Tiktok十二部'
-    monkeypatch.setattr(workflow, '_roster', lambda *_: names)
-    monkeypatch.setattr(workflow, 'ERP_ROSTER_DEPARTMENTS', {'甲': first, '乙': first, '丙': second, '丁': third})
-    second_started, first_in_sales = Event(), Event()
-    erp_calls, sales_calls, public_calls, callbacks = [], [], [], []
-    fees = object()
-    fx = {'ref': 'test-shared-fx'}
-
-    def refresh(settings, *, client, auth):
-        public_calls.append(('fees', get_ident(), client, auth))
-        return fees
-
-    def query(settings):
-        public_calls.append(('fx', get_ident()))
-        return fx
-
-    def bulk(settings, *, department, roster_salespeople, web_session, **kwargs):
-        erp_calls.append(('bulk', department, get_ident(), web_session))
-        assert roster_salespeople == {first: ['甲', '乙'], second: ['丙'], third: ['丁']}[department]
-        if department == second:
-            second_started.set()
-            assert first_in_sales.wait(5), '第二部门采集应和首部门算价重叠'
-        return {'capture_id': department, 'capture_complete': False, 'cleaning_status': 'saved'}
-
-    def save(runtime, capture):
-        erp_calls.append(('save', capture['capture_id']))
-        return capture
-
-    def headers(settings, capture, *, web_session, **kwargs):
-        erp_calls.append(('headers', capture['capture_id'], get_ident(), web_session))
-        return {'name': capture['capture_id']}
-
-    def details(settings, capture, *, web_session, **kwargs):
-        erp_calls.append(('details', capture['capture_id'], get_ident(), web_session))
-        if capture['capture_id'] == second:
-            raise RuntimeError('mock ERP detail failure')
-        return {'name': capture['capture_id']}
-
-    def project(runtime, capture, headers, native, name):
-        assert headers == native == {'name': capture['capture_id']}
-        return {**capture, 'capture_id': name}, {'name': name}, {'name': name}
-
-    def sales(settings, capture, *, headers, native, daily_fees, current_fx, client, auth, **kwargs):
-        name = capture['capture_id']
-        sales_calls.append((name, get_ident(), client, auth))
-        if name == '甲':
-            first_in_sales.set()
-            assert second_started.wait(5), '第二人的 ERP 应与首人销售重叠'
-        assert headers == native == {'name': name}
-        assert daily_fees is fees and current_fx is fx
-        return {'status': 'completed', 'ready_prices': 1}
-
-    def submit(scope):
-        callbacks.append((scope['salesperson'], get_ident()))
-        if scope['salesperson'] == '乙':
-            raise RuntimeError('mock submission failure')
-        scope['callback_completed'] = True
-
-    for name, fake in [('refresh_daily_fees', refresh), ('query_current_erp_fx', query),
-                       ('capture_erp_bulk', bulk), ('save_capture', save), ('capture_order_headers', headers),
-                       ('capture_erp_details', details), ('_evaluate_capture', sales), ('project_seller_capture', project)]:
-        monkeypatch.setattr(workflow, name, fake)
-    result = workflow.run_workflow(Settings(_env_file=None, runtime_dir=tmp_path), on_roster_scope=submit)
-
-    assert [call[0] for call in public_calls] == ['fees', 'fx']
-    assert [call[:2] for call in erp_calls] == [(stage, department) for department in (first, second, third)
-                                               for stage in ('bulk', 'save', 'headers', 'details')]
-    erp_thread, erp_session = erp_calls[0][2:]
-    assert all(call[2:] == (erp_thread, erp_session) for call in erp_calls if call[0] != 'save')
-    _, sales_thread, client, auth = public_calls[0]
-    assert public_calls[1] == ('fx', sales_thread)
-    assert erp_thread != sales_thread != get_ident()
-    assert sales_calls == [(name, sales_thread, client, auth) for name in ('甲', '乙', '丁')]
-    assert callbacks == [(name, sales_thread) for name in ('甲', '乙', '丙', '丁')]
-    assert [scope['salesperson'] for scope in result['departments']] == names
-    assert [scope['status'] for scope in result['departments']] == ['completed', 'failed', 'failed', 'completed']
-    assert result['departments'][1]['capture_id'] == second
-    assert result['departments'][-1]['callback_completed']
-    assert result['status'] == 'needs_attention' and result['ready_prices'] == 2
-    assert json.loads(Path(result['artifact_dir'], 'result.json').read_text()) == result
-
-
 @pytest.mark.parametrize('fx_available', [True, False])
 def test_fresh_collection_runs_download_clean_evaluate_and_archive(tmp_path, monkeypatch, fx_available):
     from app.services import erp_workflow
@@ -223,8 +136,7 @@ def test_fresh_collection_runs_download_clean_evaluate_and_archive(tmp_path, mon
     monkeypatch.setattr(erp_workflow, 'query_current_erp_fx', company_fx, raising=False)
     monkeypatch.setattr(erp_workflow, 'capture_recent_price_changes',
         lambda *args,**kwargs:pytest.fail('没有可算价目标时不应查询调价日志'))
-    # 这个用例覆盖普通部门采集，机器当天恰逢固定名单日也使用同一测试范围。
-    workflow = erp_workflow.run_workflow(Settings(_env_file=None, runtime_dir=tmp_path, erp_roster_date=None))
+    workflow = erp_workflow.run_workflow(Settings(_env_file=None, runtime_dir=tmp_path))
     assert connections['bulk'][0] is not None
     assert connections['bulk'] == connections['capture_order_headers'] == connections['capture_erp_details']
     assert connections['fees'] == connections['capture_sales_batch']
