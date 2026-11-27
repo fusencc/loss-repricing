@@ -17,18 +17,18 @@ from app.services.erp_pricing import preview_pricing
 A, B = bulk.ERP_DEPARTMENTS[:2]
 
 
-def sheet(rows):
+def sheet(rows, logistics=None):
     book = Workbook()
-    book.active.append(['订单编号', '订单状态', '平台', '集团', '部门', '店铺', '毛利', '修正毛利', '修正一次毛利'])
+    book.active.append(['订单编号', '订单状态', '平台', '集团', '部门', '店铺', '毛利', '修正毛利', '修正一次毛利', '自选物流'])
     for order, department in rows:
-        book.active.append([order, '可配货', 'Tiktok', '集团二部', department, '测试店铺', '-1', '-1', '-1'])
+        book.active.append([order, '可配货', 'Tiktok', '集团二部', department, '测试店铺', '-1', '-1', '-1', (logistics or {}).get(order)])
     buf = BytesIO()
     book.save(buf)
     book.close()
     return buf.getvalue()
 
 
-def collect(tmp_path, partial):
+def collect(tmp_path, partial, *, logistics=None):
     requests = []
     source = None
     current_ids = []
@@ -60,7 +60,8 @@ def collect(tmp_path, partial):
     def download(path):
         assert path == '/mock.xlsx'
         return sheet([(order, {'b-first': B, 'conflict': B if source == 'loss' else A, 'unknown': '未参与部门'}.get(order, A.upper()))
-                      for order in current_ids if order != 'missing'])
+                      for order in current_ids if order != 'missing'],
+                     logistics=(logistics or {}).get(source))
 
     parent = bulk.capture_erp_bulk(Settings(_env_file=None, runtime_dir=tmp_path), web_session=(post, download),
                                    export_batch_size=1 if partial else 2)
@@ -153,3 +154,22 @@ def test_department_archive_prices_with_offline_evidence(tmp_path):
     report = preview_pricing(load_capture(tmp_path, saved['capture_id']), evidence)
     assert report['summary']['ready_prices'] > 0
     assert report['evaluation_complete_sources'] == list(bulk.SOURCES)
+
+
+@pytest.mark.parametrize("shipping", ["Global economy shipping_来赞宝", "Global standard shipping_来赞宝"])
+def test_sample_logistics_in_one_erp_export_excludes_order_from_every_department_source(tmp_path, shipping):
+    parent = collect(tmp_path, partial=False, logistics={
+        "loss": {"shared": shipping, "a-only": "Global standard shipping"},
+    })
+    original = deepcopy(parent)
+    row = next(row for row in parent["groups"][0]["rows"] if row["orderid"] == "shared")
+    assert row["fields"].get("自选物流") == shipping
+
+    departments, unresolved = department_captures(parent, [A, B])
+    assert not unresolved
+    assert parent == original
+    assert set(departments[A]["observed_sources"]) == {"a-only"}
+    assert set(departments[B]["observed_sources"]) == {"b-first"}
+    report = preview_pricing(save_capture(tmp_path, departments[A]))
+    assert report["summary"]["unique_orders"] == 1
+    assert "shared" not in report["references"]["order_finance"]

@@ -44,16 +44,23 @@ def department_captures(parent, departments):
     names = {d.casefold(): d for d in departments}
     labels = defaultdict(set)
     sources = defaultdict(list)
+    sample_orders = set()
     for group in parent['groups']:
         for order in group['candidate_order_ids']:
             sources[order].append(group['source'])
         for row in group['rows']:
-            department = row['fields'].get('部门')
+            fields = row['fields']
+            logistics = fields.get('自选物流')
+            if isinstance(logistics, str) and logistics.rsplit('_', 1)[-1].strip() == '来赞宝':
+                sample_orders.add(row['orderid'])
+            department = fields.get('部门')
             labels[row['orderid']].add(department.casefold() if isinstance(department, str) else None)
 
     assigned = defaultdict(set)
     unassigned = {}
     for order in sources:
+        if order in sample_orders:
+            continue
         values = labels[order]
         if not values:
             unassigned[order] = 'missing_order_finance'
