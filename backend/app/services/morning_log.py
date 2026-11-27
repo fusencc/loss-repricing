@@ -137,9 +137,10 @@ def save_success_log(config, day, *, factory):
         execution = record.get('execution') or {}
         if record['status'] != '已提价' and not (record['status'] == '已核验' and execution.get('state') == 'verified'):
             continue
-        item_id = display_text(record['key']['item_id'])
-        if not item_id:
-            logger.warning('本条提价记录缺少 itemID，未导出：%s', record['id'])
+        # 罗迪交接文件的 itemID 指父级产品ID，子商品ID只用于保留原订单粒度。
+        product_id = display_text(record['key']['product_id'])
+        if not product_id:
+            logger.warning('本条提价记录缺少产品ID，未导出：%s', record['id'])
             continue
         trace = sources.get(record['id']) or {}
         capture_id = (trace.get('source_versions') or {}).get('erp_capture_id')
@@ -164,11 +165,12 @@ def save_success_log(config, day, *, factory):
                 logger.warning('本条订单店铺或销售员不符，未导出：%s', record['id'])
                 continue
             # 同一订单商品的重复来源只算一次，不合并不同订单里的同一商品。
-            orders.add((order_id, shop, seller, item_id))
+            orders.add((order_id, shop, seller, record['key']['item_id'], product_id))
         times.append(record['updated_at'])
     when = (datetime.fromisoformat(max(times)).astimezone(BEIJING).strftime('%Y-%m-%d %H:%M:%S')
             if times else None)
-    rows = [(item_id, shop, seller, '提价成功') for _, shop, seller, item_id in sorted(orders)]
+    rows = [(product_id, shop, seller, '提价成功')
+            for _, shop, seller, _, product_id in sorted(orders)]
     return _save_book(config, day, 'success-logs', [
         ('成功清单', ('itemID', '店铺', '销售', '状态'), rows),
         ('失败清单', ('itemID', '店铺', '销售', '失败原因'), []),

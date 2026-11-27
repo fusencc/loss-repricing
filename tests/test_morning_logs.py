@@ -95,7 +95,7 @@ def test_success_log_refresh_uses_accepted_upload_not_price_readback(tmp_path, m
     morning_log.save_success_log(config, DAY, factory=factory)
     with closing(load_workbook(path)) as book:
         assert [row[0] for row in list(book['成功清单'].values)[1:]] == (
-            ['1738438844764620110', '1738438844764620111'] if priced else ['1738438844764620110'])
+            ['1738438776194172241', '1738438776194172241'] if priced else ['1738438776194172241'])
     engine.dispose()
 
 
@@ -120,7 +120,7 @@ def test_unmatched_source_order_skips_only_that_order(tmp_path, monkeypatch, cap
         execution.request = request
     path = morning_log.save_success_log(config, DAY, factory=factory)
     with closing(load_workbook(path)) as book:
-        assert [row[0] for row in list(book['成功清单'].values)[1:]] == ['1738438844764620110']
+        assert [row[0] for row in list(book['成功清单'].values)[1:]] == ['1738438776194172241']
     assert '订单归属缺失或不唯一' in caplog.text
     engine.dispose()
 
@@ -147,11 +147,11 @@ def test_background_readback_does_not_write_logs(tmp_path, monkeypatch):
     engine.dispose()
 
 
-def test_success_log_skips_a_record_without_item_id(tmp_path, monkeypatch):
+def test_success_log_skips_a_record_without_product_id(tmp_path, monkeypatch):
     engine, factory, config = setup_log(tmp_path, monkeypatch)
     with factory.begin() as session:
         item = session.get(Item, 'item-0')
-        item.key = {**item.key, 'item_id': ''}
+        item.key = {**item.key, 'product_id': ''}
         execution = session.get(Execution, 'exec-0')
         execution.request = {**execution.request, 'key': item.key}
     path = morning_log.save_success_log(config, DAY, factory=factory)
@@ -160,7 +160,7 @@ def test_success_log_skips_a_record_without_item_id(tmp_path, monkeypatch):
     engine.dispose()
 
 
-def test_success_log_exports_one_text_item_id_per_order_and_item(tmp_path, monkeypatch):
+def test_success_log_exports_product_id_preserving_order_and_child_rows(tmp_path, monkeypatch):
     engine, factory, config = setup_log(tmp_path, monkeypatch)
     with factory.begin() as session:
         first = session.get(Execution, 'exec-0')
@@ -181,9 +181,9 @@ def test_success_log_exports_one_text_item_id_per_order_and_item(tmp_path, monke
         assert book.sheetnames == ['成功清单', '失败清单', '汇总']
         assert list(book['成功清单'].values) == [
             ('itemID', '店铺', '销售', '状态'),
-            ('1738438844764620110', 'Tiktok-583TH', '杨颖', '提价成功'),
-            ('1738438844764620111', 'Tiktok-583TH', '杨颖', '提价成功'),
-            ('1738438844764620110', 'Tiktok-583TH', '杨颖', '提价成功'),
+            ('1738438776194172241', 'Tiktok-583TH', '杨颖', '提价成功'),
+            ('1738438776194172241', 'Tiktok-583TH', '杨颖', '提价成功'),
+            ('1738438776194172241', 'Tiktok-583TH', '杨颖', '提价成功'),
         ]
         assert list(book['失败清单'].values) == [('itemID', '店铺', '销售', '失败原因')]
         assert list(book['汇总'].values)[1][1:] == (3, 3, 0, 0)
