@@ -13,7 +13,7 @@ from sqlalchemy import func, select, update, or_
 from sqlalchemy.exc import IntegrityError
 from app.db import transaction
 from app.models import Batch, Item, Execution, VariantGuard, Protection, Job
-from app.domain.types import Decision, VariantKey, FeeModel, ONLINE_PROFIT_MINIMUM_MARGIN
+from app.domain.types import Decision, VariantKey, FeeModel, OnlineState, ONLINE_PROFIT_MINIMUM_MARGIN
 from app.domain.engine import evaluate, allowed_error, snapshot_problem
 from app.domain.money import MoneyRatio
 from app.domain.price_reference import saved_price_limit
@@ -178,13 +178,21 @@ class PricingService:
                         status='running', created_at=stamp(), snapshot=archive, summary={}))
                     session.flush()
                     write_decisions(session, batch_id, decisions)
+                    if self.config.coordination_required:
+                        from app.services.notifications import write_batch_notices
+                        write_batch_notices(session, batch_id, include_warnings=False)
             except IntegrityError:
                 with self.factory() as session:
                     batch_id = session.scalar(select(Batch.id).where(Batch.run_key == key))
                     if batch_id is None:
                         raise
+        return self.resume_department_batch(batch_id, day)
+
+    def resume_department_batch(self, batch_id, day):
         with self.factory() as session:
-            pending = session.scalars(select(Item.id).where(Item.batch_id == batch_id, Item.phase == 'proposed')).all()
+            seller = Item.decision['trace']['erp_department']['salesperson'].as_string()
+            pending = session.scalars(select(Item.id).where(Item.batch_id == batch_id, Item.phase == 'proposed')
+                                      .order_by(seller.desc(), Item.id)).all()
         for item_id in pending:
             with self.factory() as session:
                 saved = session.scalar(select(Item.decision).where(Item.id == item_id, Item.phase == 'proposed'))
@@ -193,7 +201,14 @@ class PricingService:
             decision = Decision.model_validate(saved)
             if self._submit(item_id, decision, day, department=decision.trace['erp_department'], batch_id=batch_id) is False:
                 self._hold(item_id, '已跨北京时间业务日，本条未提交')
-        self._summarize(batch_id)
+        with transaction(self.factory) as session:
+            # The prior process may have sent these requests. Keep their guards and only query results.
+            interrupted = select(Item.id).where(Item.batch_id == batch_id, Item.phase == 'submitting')
+            session.execute(update(Execution).where(Execution.item_id.in_(interrupted), Execution.state == 'submitting')
+                            .values(state='unknown', updated_at=stamp()))
+            session.execute(update(Item).where(Item.batch_id == batch_id, Item.phase == 'submitting')
+                            .values(phase='unknown', reason='上传中断，结果待确认，不重传', updated_at=stamp()))
+            self._write_batch_summary(session, batch_id)
         return batch_id
 
     def _run_batch(self, run_key, item_id=None):
@@ -541,17 +556,32 @@ class PricingService:
             execution.response = {"status": result.status, "message": result.message}
             execution.updated_at = stamp()
             item.phase = execution.state
-            item.reason = result.message or "上传已受理，等待实际价格回读"
+            item.reason = result.message or "上传已受理"
             if result.status == "rejected":
                 item.status = "待处理"
                 session.get(VariantGuard, execution.variant_id).execution_id = None
             else:
-                item.status = "待核验"
+                item.status = "已提价" if result.status == "accepted" else "待核验"
             item.updated_at = stamp()
         event('execution.result_saved', execution_id=execution_id, item_id=item_id, batch_id=item.batch_id,
               state=execution.state, source=self.adapter.mode, synthetic=getattr(self.adapter, 'synthetic', False))
 
-    def reconcile(self, item_id=None, target_id=None):
+    def reconcile(self, item_id=None, target_id=None, *, tasks_only=False):
+        # 跨进程互斥；并发触发立即返回，不重复查询同一批执行。
+        import fcntl
+        directory = self.config.runtime_dir
+        directory.mkdir(parents=True, exist_ok=True)
+        with (directory / 'task-results.lock').open('a') as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return
+            try:
+                return self._reconcile(item_id, target_id, tasks_only=tasks_only)
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+    def _reconcile(self, item_id=None, target_id=None, *, tasks_only=False):
         # 核验不受暂停开关限制；否则暂停后已送达的请求将永久失去跟踪。
         with self.factory() as session:
             # 依据模式隔离约束：只让原始批次同模式的适配器回读；其他模式的状态和锁原样保留。
@@ -571,6 +601,9 @@ class PricingService:
                 if decision.key.target_identity() != execution.variant_id:
                     raise ValueError("保存的调价请求与执行锁目标不一致")
                 roster_task = self.adapter.mode == 'live' and ROSTER_UPLOAD_TRACE in decision.trace
+                task_only = roster_task or (self.adapter.mode == 'live' and ERP_UPLOAD_TRACE in decision.trace)
+                if tasks_only and not task_only:
+                    continue
                 if roster_task:
                     result = self._roster_transport().lookup(execution.id, execution.task_id, decision)
                 elif self.adapter.mode == 'live' and ERP_UPLOAD_TRACE in decision.trace:
@@ -579,29 +612,32 @@ class PricingService:
                     result = self.adapter.lookup(execution.id, execution.task_id, decision.key)
                 if result.status == 'unknown':
                     continue  # 没有新结果，不动执行锁和已展示的上传状态。
-                if not roster_task and result.price_record is not None:
+                if not task_only and result.price_record is not None:
                     from app.services.price_log_archive import validate_price_record_binding
                     validate_price_record_binding(result.price_record, execution.id, decision.key,
                         decision.upload_price, result.actual_price)
                 difference_ratio = None
-                if (not roster_task and result.status == "accepted" and result.actual_price is not None
+                if (not task_only and result.status == "accepted" and result.actual_price is not None
                         and result.actual_price.is_finite() and result.actual_price > 0):
-                    # 有精确比值就校验并使用它；旧记录仅按持久目标价核验。
                     if decision.target_actual is None or decision.target_actual <= 0:
                         raise ValueError("保存的调价目标价缺失或无效")
-                    if "exact_target_actual" in decision.trace:
-                        exact = decision.trace["exact_target_actual"]
-                        target = MoneyRatio(Decimal(exact["numerator"]), Decimal(exact["denominator"]))
-                    else:
-                        target = MoneyRatio(decision.target_actual)
-                    if target.numerator <= 0:
-                        raise ValueError("保存的精确目标价无效")
-                    difference_ratio = (MoneyRatio(result.actual_price) - target).absolute()
-                    difference = difference_ratio.decimal()
-                    # 按保存请求判定：有参考时优先上限，无参考时仍要求1%利润。
                     rows = decision.trace["online_rows"]
                     if len(rows) != 1:
                         raise ValueError("保存的在线利润模型来源不唯一")
+                    if decision.key.site == "VN" and decision.reason_code != "manual_correction":
+                        # 用保存的上传档位和原始折扣算出越南站的预计营销价。
+                        _, discount = OnlineState.model_validate(rows[0]).actual_price_and_discount()
+                        expected = MoneyRatio(decision.upload_price) * discount
+                    elif "exact_target_actual" in decision.trace:
+                        exact = decision.trace["exact_target_actual"]
+                        expected = MoneyRatio(Decimal(exact["numerator"]), Decimal(exact["denominator"]))
+                    else:
+                        expected = MoneyRatio(decision.target_actual)
+                    if expected.numerator <= 0:
+                        raise ValueError("保存的核验基准价无效")
+                    difference_ratio = (MoneyRatio(result.actual_price) - expected).absolute()
+                    difference = difference_ratio.decimal()
+                    # 按保存请求判定：有参考时优先上限，无参考时仍要求1%利润。
                     model = FeeModel.model_validate(rows[0]["profit_check"]["model"])
                     margin_passed = model.evaluate(MoneyRatio(result.actual_price)).meets_minimum_margin
                     upper = saved_price_limit(decision.trace)
@@ -615,7 +651,7 @@ class PricingService:
                 # SQLite 须在读取前取得写锁，避免并发回查从读事务升级时报忙。
                 if session.get_bind().dialect.name == "sqlite":
                     _lock_runtime_settings(session)
-                control = lock_control(session, decision.key) if self.config.coordination_required and not roster_task else None
+                control = lock_control(session, decision.key) if self.config.coordination_required and not task_only else None
                 # 迁移前同一目标可能已有多个未知执行；锁行串行化全部历史执行的释放。
                 guard = session.scalar(select(VariantGuard).where(
                     VariantGuard.variant_id == execution.variant_id).with_for_update())
@@ -625,14 +661,14 @@ class PricingService:
                 # 单条证据落库与商品锁释放串行，超差不触发站点暂停。
                 if session.get_bind().dialect.name != "sqlite":
                     _lock_runtime_settings(session)
-                last_observed_at = None if roster_task else parse_stamp(current.evidence.get("observed_at"))
+                last_observed_at = None if task_only else parse_stamp(current.evidence.get("observed_at"))
                 if (result.status == "accepted" and last_observed_at is not None
                         and result.observed_at is not None and result.observed_at.utcoffset() is not None
                         and result.observed_at <= last_observed_at):
                     # 超差后须有更新的价格观测，晚到的旧快照或同一时点的冲突值不能解锁。
                     continue
                 item = session.get(Item, current.item_id)
-                if roster_task and result.status == 'accepted':
+                if task_only and result.status == 'accepted':
                     current.state, item.phase, item.status = 'uploaded', 'uploaded', '已提价'
                     item.reason = result.message or '调价任务成功'
                     current.evidence = {**current.evidence, 'row_status': 'success', 'message': item.reason}
@@ -644,6 +680,7 @@ class PricingService:
                       and result.observed_at.tzinfo is not None
                       and parse_stamp(current.created_at) <= result.observed_at <= utcnow() + timedelta(seconds=30)):
                     current.evidence = {"actual_price": str(result.actual_price), "target_actual": str(decision.target_actual),
+                        "verification_actual": str(expected.decimal()),
                         "difference": str(difference), "tolerance": str(allowed_error(decision.key.site)),
                         "observed_at": stamp(result.observed_at), "price_basis": result.price_basis,
                         "message": result.message, "mode": self.adapter.mode,

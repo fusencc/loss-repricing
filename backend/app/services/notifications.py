@@ -5,7 +5,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 import time
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.exc import IntegrityError
-from app.models import Batch, Item, WorkerLease
+from app.models import Batch, Item, WorkerLease, Execution
 from app.models.notifications import Notice
 from app.adapters.dingtalk import DingTalkClient
 from app.adapters.dingtalk_directory import resolve_salesperson_userid
@@ -224,16 +224,26 @@ def _department_notice_groups(session, batch_id):
 
 
 def _department_notice_items(session, notice, name):
+    from types import SimpleNamespace
+    from app.services.records import upload_outcome
     current = []
-    query = select(Item.id, Item.key, Item.status, Item.reason, Item.updated_at, _ERP_SELLER).where(
-        Item.batch_id == notice.batch_id)
+    query = select(Item.id, Item.key, Item.status, Item.phase, Item.reason, Item.updated_at, _ERP_SELLER,
+                   Execution.state, Execution.response, Execution.evidence).outerjoin(
+                       Execution, Execution.item_id == Item.id).where(Item.batch_id == notice.batch_id)
     for start in range(0, len(notice.item_ids), 500):
         rows = session.execute(query.where(Item.id.in_(notice.item_ids[start:start + 500])))
-        current.extend(row for row in rows if isinstance(row.salesperson, str) and row.salesperson.strip() == name)
+        for row in rows:
+            if not isinstance(row.salesperson, str) or row.salesperson.strip() != name:
+                continue
+            item = SimpleNamespace(id=row.id, key=row.key, status=row.status, phase=row.phase,
+                                   reason=row.reason, updated_at=row.updated_at, decision={})
+            execution = SimpleNamespace(state=row.state, response=row.response, evidence=row.evidence) if row.state else None
+            item.status, item.reason = upload_outcome(item, execution)
+            current.append(item)
     return current
 
 
-def write_batch_notices(session, batch_id, *, existing_only=False):
+def write_batch_notices(session, batch_id, *, existing_only=False, include_warnings=True):
     run_key = session.scalar(select(Batch.run_key).where(Batch.id == batch_id, Batch.mode == 'live'))
     groups = (_department_notice_groups(session, batch_id) if run_key and run_key.startswith('erp-department:')
               else _account_notice_groups(session, batch_id))
@@ -262,6 +272,8 @@ def write_batch_notices(session, batch_id, *, existing_only=False):
             # 只吸收确实被另一事务插入的通知。其他约束错误须回滚本次批次汇总。
             if session.scalar(select(Notice.id).where(Notice.dedupe_key == key).with_for_update()) is None:
                 raise
+    if not include_warnings:
+        return added
     # 告警独立发给管理员，不能因商品已分配销售员而漏发；每批去重。
     warned=[item for item in session.scalars(select(Item).where(Item.batch_id==batch_id)) if _warnings(item)]
     if warned:
@@ -360,19 +372,19 @@ def _renew_dispatch(factory,owner):
         return changed.rowcount==1
 
 
-def dispatch_notices(factory,config):
+def dispatch_notices(factory,config, *, notice_ids=None):
     owner=str(uuid4())
     if not _acquire_dispatch(factory,owner):
         return dict(notification_status(factory,config),busy=True)
     try:
-        return _dispatch_notices(factory,config,owner)
+        return _dispatch_notices(factory,config,owner, notice_ids=notice_ids)
     finally:
         with factory.begin() as session:
             session.execute(update(WorkerLease).where(WorkerLease.name==DISPATCH_LEASE,
                 WorkerLease.owner==owner).values(expires=0,heartbeat=stamp()))
 
 
-def _dispatch_notices(factory,config,owner):
+def _dispatch_notices(factory,config,owner, *, notice_ids=None):
     # This transition is durable before a new HTTP send; prior process may have submitted.
     with factory.begin() as session:
         session.execute(update(Notice).where(Notice.delivery_state=='sending').values(
@@ -391,7 +403,8 @@ def _dispatch_notices(factory,config,owner):
                 eligible = or_(eligible, and_(Notice.batch_id.is_(None), Notice.recipient_id == 'admin',
                                               Notice.summary['kind'].as_string() == 'operation'))
             ids=list(session.scalars(select(Notice.id).outerjoin(Batch, Batch.id == Notice.batch_id).where(
-                eligible, Notice.synthetic.is_(False), Notice.delivery_state.in_(['pending','accepted','delivered']))
+                eligible, Notice.synthetic.is_(False), Notice.delivery_state.in_(['pending','accepted','delivered']),
+                Notice.id.in_(notice_ids) if notice_ids is not None else True)
                 .order_by(Notice.created_at, Notice.id)))
         for notice_id in ids:
             if not _renew_dispatch(factory,owner):
@@ -428,6 +441,8 @@ def _dispatch_notices(factory,config,owner):
                             notice.last_error = '本批已无此销售员的记录'
                             notice.updated_at = stamp()
                             continue
+                        if any(item.phase in {'proposed', 'submitting'} for item in current):
+                            continue  # 只等待本人的上传，不等待独立结果核验。
                         notice.item_ids = [item.id for item in current]
                         notice.summary = dict(_summary(current), erp_salesperson=name)
                     elif not operation:

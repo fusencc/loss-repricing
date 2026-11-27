@@ -23,7 +23,23 @@ from app.services.store import ERP_RECONCILIATION_PREFIX, stamp, write_decisions
 PREVIEW_ID = re.compile(r'[a-f0-9]{32}')
 
 
-def _prepare_preview(capture, evidence, exports, current_fx=None, order_preparation=None, online_preparation=None):
+def apply_recent_price_protection(decisions, official_history):
+    """近期调价目标已在取数前排除，不能再被归类为缺失在线商品。"""
+    if official_history is None:
+        return
+    for decision in decisions:
+        record=official_history['records'].get(decision.key.item_id,{})
+        if (decision.reason_code=='missing_mapping' and record.get('status')=='ok'
+                and record.get('count',0)>0):
+            decision.status='不调价'
+            decision.ready=False
+            decision.reason_code='recent_price_change'
+            decision.reason=f"近三天存在{record['count']}条调价日志"
+            decision.trace['recent_price_protection']={
+                'source_id':official_history['source_id'],'count':record['count']}
+
+
+def _prepare_preview(capture, evidence, exports, current_fx=None, order_preparation=None, online_preparation=None, official_history=None):
     mapping = None
     if exports is not None:
         capture = BulkCapture.model_validate(capture)
@@ -35,6 +51,7 @@ def _prepare_preview(capture, evidence, exports, current_fx=None, order_preparat
         evaluate(preparation.snapshot, preparation.evaluated_at)
         if preparation.snapshot is not None else []
     )
+    apply_recent_price_protection(decisions, official_history)
     report = preparation.report
     if order_preparation is not None:
         notes = defaultdict(list)
@@ -92,7 +109,7 @@ def save_pricing_preview(runtime_dir, capture_id, evidence=None, **options):
 
 def save_capture_preview(runtime_dir, capture, evidence=None, *, exports=None, current_fx=None,
                          sales_source=None, native_source=None, order_preparation=None, order_headers_source=None,
-                         local_history_source=None, platform_source=None, online_preparation=None, fixed_fees_source=None):
+                         local_history_source=None, platform_source=None, online_preparation=None, fixed_fees_source=None, official_history=None):
     capture_id = capture['capture_id']
     if order_preparation is not None and (evidence is not None or exports is not None):
         raise ValueError('实时订单准备不能与文件对账输入混用')
@@ -101,7 +118,7 @@ def save_capture_preview(runtime_dir, capture, evidence=None, *, exports=None, c
         if source is not None and (source['erp_capture_id'], source['synthetic'], source['sample_only']) != scope:
             raise ValueError('来源与采集或样本属性不一致')
     preparation = _prepare_preview(capture, evidence, exports, current_fx=current_fx,
-        order_preparation=order_preparation, online_preparation=online_preparation)
+        order_preparation=order_preparation, online_preparation=online_preparation, official_history=official_history)
     artifact = dict(preparation.report, preview_id=uuid4().hex)
     if sales_source is not None:
         # 来源观察可回查，不将原始在线／费率字段冒充已审核的完整定价输入。

@@ -88,6 +88,25 @@ def test_record_projection_exposes_optional_saved_reference_without_changing_sta
     assert rows['i0']['decision'].get('sku_price_reference') is None
 
 
+@pytest.mark.parametrize(('upload', 'amount', 'expected'), [
+    ('40100', '26.1534', {'amount': '26.1534', 'limit': '2'}),
+    ('0', '26.1534', None),
+    ('40100', 'NaN', None),
+])
+def test_record_exposes_only_saved_vietnam_rounding_gap(client, upload, amount, expected):
+    with client.app.state.factory.begin() as session:
+        item = session.get(Item, 'i0')
+        item.key = dict(item.key, site='VN')
+        row = dict(item.decision['trace']['online_rows'][0], key=item.key)
+        item.reason = '站点价格档位导致实际价无效或超出误差容限'
+        item.decision = dict(item.decision, reason_code='rounding_error', upload_price=upload,
+            trace=dict(item.decision['trace'], online_rows=[row], station_currency='VND',
+                       actual_price_error=amount, allowed_error='2'))
+    record = next(row for row in client.get('/api/records').json()['items'] if row['id'] == 'i0')
+    assert record['decision']['vietnam_rounding_gap'] == expected
+    assert record['reason'] == '站点价格档位导致实际价无效或超出误差容限'
+
+
 def test_department_records_are_public_but_management_remains_protected(client):
     response = client.get('/api/records')
     assert response.status_code == 200
@@ -322,7 +341,7 @@ def test_preparations_and_failed_attempts_belong_to_one_successful_price_change(
     assert len(combine_pricing_process(deepcopy(rows) + [row('unknown', 'unknown', '09')])) == 2
     assert len(combine_pricing_process(deepcopy(rows) + [row('later', None, '11')])) == 2
     # 失败/未知不能凭旧受理回执成为合并主记录，准备记录也必须继续可见。
-    for state in ('failed', 'mismatch', 'unknown', 'submitting'):
+    for state in ('failed', 'unknown', 'submitting'):
         uncertain = row('uncertain', state, '10')
         uncertain['execution']['submit_status'] = 'accepted'
         assert len(combine_pricing_process([uncertain, row('prepare', None, '09')])) == 2
@@ -368,7 +387,7 @@ def test_live_roster_receipt_changes_display_and_merge_but_preserves_readback(cl
         assert session.get(Item, 'i0').status == '待核验'
         session.get(Batch, 'b0').run_key = 'ordinary-live-job'
     rows = {row['id']: row for row in client.get('/api/records').json()['items']}
-    assert rows['i0']['status'] == '待核验' and 'earlier' in rows
+    assert rows['i0']['status'] == '已提价' and 'earlier' not in rows
 
 
 def test_live_roster_separates_sellers_even_with_the_same_project_owner(client):
@@ -380,8 +399,8 @@ def test_live_roster_separates_sellers_even_with_the_same_project_owner(client):
             batch.run_key = f'erp-roster:job:{name}:{batch.business_date}'
             batch.snapshot = {'source_versions': {'erp_roster_salesperson': name}}
     rows = {row['id']: row for row in client.get('/api/records').json()['items']}
-    assert rows['i0']['seller'] == {'id': 'erp-roster:桂露', 'name': '桂露'}
-    assert rows['i3']['seller'] == {'id': 'erp-roster:莫雯舒', 'name': '莫雯舒'}
+    assert rows['i0']['seller'] == {'id': 'erp:桂露', 'name': '桂露'}
+    assert rows['i3']['seller'] == {'id': 'erp:莫雯舒', 'name': '莫雯舒'}
 
 @pytest.mark.parametrize('suffix', ['曹雪娇', 'stock:曹雪娇'])
 def test_roster_department_uses_saved_batch_scope_when_online_snapshot_has_no_department(client, suffix):
@@ -452,3 +471,30 @@ def test_unmatched_execution_request_cannot_supply_another_products_prices(clien
             created_at='2026-11-17T01:00:00+00:00', updated_at='2026-11-17T02:00:00+00:00'))
     row = next(r for r in client.get('/api/records').json()['items'] if r['id'] == 'i3')
     assert row['decision']['current_actual'] == '12.00'
+
+
+def test_department_and_historical_roster_share_seller_display_identity():
+    from types import SimpleNamespace
+    from app.services.records import record_seller
+    name = '刘付文昌'
+    historical = SimpleNamespace(mode='live', business_date='2026-11-25',
+        run_key=f'erp-roster:job:{name}:2026-11-25',
+        snapshot={'source_versions': {'erp_roster_salesperson': name}})
+    current = SimpleNamespace(mode='live', business_date='2026-11-27',
+        run_key='erp-department:2026-11-27:Tiktok一部', snapshot={})
+    old_item = SimpleNamespace(decision={}, key={})
+    new_item = SimpleNamespace(decision={'trace': {'erp_department': {'salesperson': name}}}, key={})
+    assert record_seller(old_item, historical, {}, {}) == record_seller(new_item, current, {}, {})
+
+
+def test_recent_protection_reason_uses_saved_count_without_mutating_record(client):
+    with client.app.state.factory.begin() as session:
+        item = session.get(Item, 'i0')
+        item.status = '不调价'
+        item.reason = '近72小时已有官方调价记录，本轮不调价'
+        item.decision = dict(item.decision, reason_code='recent_price_change',
+            trace=dict(item.decision['trace'], recent_price_protection={'count': 3}))
+    rows = {row['id']: row for row in client.get('/api/records').json()['items']}
+    assert rows['i0']['reason'] == '近三天存在3条调价日志'
+    with client.app.state.factory.begin() as session:
+        assert session.get(Item, 'i0').reason == '近72小时已有官方调价记录，本轮不调价'

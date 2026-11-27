@@ -1,10 +1,12 @@
 """销售记录页的只读投影；不调用采集、调价或通知，不返回原始证据。"""
 from collections import Counter
 import logging
+import sqlite3
+from contextlib import closing
+from pathlib import Path
 from functools import lru_cache
 from types import SimpleNamespace
 from app.config import get_settings
-from app.services.erp_capture_store import load_capture
 
 logger = logging.getLogger(__name__)
 from decimal import Decimal, InvalidOperation
@@ -84,7 +86,7 @@ def record_seller(item, batch, ownerships, names):
     source = roster_record_source(batch)
     roster_seller = display_text(source.get('erp_roster_salesperson'))
     if roster_seller:
-        return {'id': f'erp-roster:{roster_seller}', 'name': roster_seller}
+        return {'id': f'erp:{roster_seller}', 'name': roster_seller}
     # 与现有权限规则共用 scope 顺序：目标级优先，其次店铺/站点；这里只展示，不改变授权。
     owner = next((ownerships[s] for s in ownership_scopes(item.key) if s in ownerships), None)
     if owner is None:
@@ -218,8 +220,8 @@ def selected_order_first_margin(decision):
     return {'amount': rows[0]['loss_amount'], 'currency': rows[0]['currency']}
 
 
-def roster_outcome(item, execution):
-    """名单以本条上传受理为准；价格回读保留为证据，不作为再次上传的依据。"""
+def upload_outcome(item, execution):
+    """记录以本条上传受理为准；价格回读保留为证据，不作为再次上传的依据。"""
     if execution is not None:
         submit = (execution.response or {}).get('status')
         if execution.state == 'failed' or submit == 'rejected' or (execution.evidence or {}).get('row_status') == 'rejected':
@@ -233,6 +235,18 @@ def roster_outcome(item, execution):
     elif (item.decision or {}).get('reason_code') == 'pending_submission':
         return '待核验', '已有未完成的提交，请勿重复上传'
     return item.status, item.reason
+
+
+def saved_vietnam_rounding_gap(decision, trace):
+    if decision.get('reason_code') != 'rounding_error':
+        return None
+    upload = _decimal(decision.get('upload_price'))
+    amount = _decimal(trace.get('actual_price_error'))
+    limit = _decimal(trace.get('allowed_error'))
+    if (all(value is not None and value.is_finite() for value in (upload, amount, limit))
+            and upload > 0 and amount > limit >= 0):
+        return {'amount': str(amount), 'limit': str(limit)}
+    return None
 
 
 def public_record(item, batch, execution, department, seller):
@@ -268,7 +282,11 @@ def public_record(item, batch, execution, department, seller):
         except InvalidOperation:
             price_change = None
     reconciliation = (batch.snapshot or {}).get('erp_reconciliation') or {}
-    status, reason = roster_outcome(item, execution) if roster_record_source(batch) else (item.status, item.reason)
+    status, reason = upload_outcome(item, execution)
+    if status == '不调价' and decision.get('reason_code') == 'recent_price_change':
+        count = (trace.get('recent_price_protection') or {}).get('count')
+        if count:
+            reason = f'近三天存在{count}条调价日志'
     return {
         'id': item.id, 'batch_id': item.batch_id,
         'key': {field: item.key.get(field, '') for field in KEY_FIELDS},
@@ -284,6 +302,8 @@ def public_record(item, batch, execution, department, seller):
             'stages': price_stages(decision, trace, batch.snapshot, item.key) if decision else None,
             'sku_price_reference': trace.get('sku_price_reference'),
             'price_limit': trace.get('price_limit'),
+            'vietnam_rounding_gap': (saved_vietnam_rounding_gap(decision, trace)
+                                      if status == '待处理' and item.key.get('site') == 'VN' else None),
         } if decision else None,
         'corrected_first_margin': first_margin,
         'execution': {
@@ -318,7 +338,7 @@ def combine_pricing_process(items):
             and i['execution'].get('row_status') != 'rejected'
             and i['execution'].get('submit_status') != 'rejected'
             and (i.get('status') == '已提价' or i['execution']['state'] in {'accepted', 'uploaded', 'verified'}
-                 or (i['execution']['state'] != 'mismatch' and i['execution'].get('submit_status') == 'accepted')))]
+                 or i['execution'].get('submit_status') == 'accepted'))]
         if len(successes) != 1:
             continue
         final = successes[0]
@@ -349,12 +369,22 @@ def department_records(session, department=None, *, mode=None, runtime_dir=None)
                                 mode=row.mode, snapshot={key: row._mapping[key] for key in fields})
         for row in session.execute(query)
     }
-    item_query = (select(Item, Batch.id).join(Batch, Item.batch_id == Batch.id)
+    # 部门目录只取归属字段；排序时不携带整份算价/订单证据。
+    item_query = (select(Item.id, Batch.id.label('batch_id'), Item.key,
+                        Item.decision['trace']['erp_department'].label('erp_department'),
+                        Item.decision['trace']['online_rows'].label('online_rows'))
+                  .join(Batch, Item.batch_id == Batch.id)
                   .order_by(Item.updated_at.desc(), Batch.business_date.desc(), Item.id.desc()))
     if mode is not None:
         item_query = item_query.where(Batch.mode == mode)
-    rows = [(item, batches[batch_id], record_department(item, batches[batch_id]))
-            for item, batch_id in session.execute(item_query) if batch_id in batches]
+    rows = []
+    for row in session.execute(item_query):
+        batch = batches.get(row.batch_id)
+        if batch is None:
+            continue
+        scope = SimpleNamespace(key=row.key, decision={'trace': {
+            'erp_department': row.erp_department, 'online_rows': row.online_rows or []}})
+        rows.append((row.id, batch, record_department(scope, batch)))
     counts = Counter(row[2] for row in rows)
     fixed_names = ['Tiktok一部', 'Tiktok五部', 'Tiktok十二部', 'Tiktok二十二部']
     names_in_records = sorted(name for name in counts if name is not None and name not in fixed_names)
@@ -365,7 +395,12 @@ def department_records(session, department=None, *, mode=None, runtime_dir=None)
     if department is not None and department not in {d['id'] for d in departments}:
         raise ValueError('所选部门不存在或已没有记录，请重新打开页面选择部门')
     selected = department if department is not None else departments[0]['id'] if departments else None
-    chosen = [row for row in rows if ('department:' + row[2] if row[2] is not None else 'unassigned') == selected]
+    selected_rows = [row for row in rows if ('department:' + row[2] if row[2] is not None else 'unassigned') == selected]
+    details = {}
+    for offset in range(0, len(selected_rows), 500):
+        ids = [row[0] for row in selected_rows[offset:offset + 500]]
+        details.update((item.id, item) for item in session.scalars(select(Item).where(Item.id.in_(ids))))
+    chosen = [(details[ident], batch, dept) for ident, batch, dept in selected_rows if ident in details]
     ownerships = {row.scope_key: row for row in session.scalars(select(Ownership))}
     names = dict(session.execute(select(UserAccount.id, UserAccount.display_name)).all())
     @lru_cache(maxsize=None)
@@ -377,18 +412,16 @@ def department_records(session, department=None, *, mode=None, runtime_dir=None)
         if not capture_id or capture_id != versions.get('erp_capture_id'):
             return None
         try:
-            capture = load_capture(runtime_dir if runtime_dir is not None else get_settings().runtime_dir, capture_id)
-            if (capture.get('capture_id') != capture_id or capture.get('source_kind') != 'erp_web_backend'
-                    or capture.get('synthetic', False) is not False or capture.get('sample_only') is not False
-                    or capture.get('department') != source.get('department')
-                    or (capture.get('salesperson') or {}).get('name') != source.get('salesperson')
-                    or source.get('salesperson') != versions.get('erp_roster_salesperson')
-                    or source.get('department') != versions.get('erp_roster_department')):
-                return None
-            value = display_text(capture.get('queried_at'))
+            # 清洗索引已按 capture_id 留存原始 queried_at，无需解压整批财务归档。
+            root = runtime_dir if runtime_dir is not None else get_settings().runtime_dir
+            path = (Path(root) / 'erp-clean.sqlite3').resolve()
+            with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as db:
+                row = db.execute('SELECT queried_at FROM captures WHERE capture_id = ?',
+                                 (capture_id,)).fetchone()
+            value = display_text(row[0]) if row else None
             if value and datetime.fromisoformat(value.replace('Z', '+00:00')).tzinfo:
                 return value
-        except (OSError, ValueError, TypeError, KeyError) as exc:
+        except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
             logger.warning('采集时间读取失败，时间显示为空：%s', type(exc).__name__)
         return None
 

@@ -31,6 +31,7 @@ export interface RecordItem {
     stages: RecordStages | null
     sku_price_reference?: SkuPriceReference | null
     price_limit?: PriceLimit | null
+    vietnam_rounding_gap?: { amount: string; limit: string } | null
     trace: { station_currency: string | null } } | null
   corrected_first_margin: { amount: string; currency: string } | null
   execution: { state: string; submit_status?: string | null; row_status?: string | null; task_id: string | null; uploaded_price: string | null; actual_price: string | null
@@ -41,7 +42,7 @@ export interface RecordData {
   departments: { id: string; name: string; total: number }[]; department: string | null
   total: number; shops: number; counts: Partial<Record<ItemStatus, number>>; items: RecordItem[]
 }
-// 页面只展示三态；上传受理和实际售价核验是不同的证据。
+// 页面只展示三态；上传结果未知的记录并入待处理，保留明确的原因说明。
 export const recordDisplayStates = ['已提价', '待处理', '不调价'] as const
 export type RecordDisplayState = typeof recordDisplayStates[number]
 
@@ -124,12 +125,11 @@ export function filterRecordBusinessDates(items: RecordItem[], { start, end }: B
 export function recordStatusLabel(item: RecordItem): RecordDisplayState {
   const execution = item.execution
   const state = execution?.state
-  if (state === 'failed' || execution?.row_status === 'rejected' || execution?.submit_status === 'rejected'
-    || state === 'unknown' || state === 'submitting') return '待处理'
-  // 后端把有受理回执的历史名单记录投影为已提价，普通批次仍保留回读超差状态。
-  if (item.status === '已提价' || state === 'uploaded') return '已提价'
-  if (state === 'mismatch') return '待处理'
-  if (state === 'accepted' || state === 'verified' || execution?.submit_status === 'accepted') return '已提价'
+  if (state === 'failed' || execution?.row_status === 'rejected' || execution?.submit_status === 'rejected') return '待处理'
+  if (state === 'unknown' || state === 'submitting') return '待处理'
+  if (item.status === '已提价') return '已提价'
+  if (state === 'accepted' || state === 'uploaded' || state === 'verified' || execution?.submit_status === 'accepted') return '已提价'
+  if (state === 'mismatch' || item.status === '待核验') return '待处理'
   return item.status === '不调价' ? '不调价' : '待处理'
 }
 
@@ -139,15 +139,37 @@ export function countRecordStatuses(items: RecordItem[]): Record<RecordDisplaySt
   return counts
 }
 
-// 销售人员只需看到明确的下一步；待处理说明统一，不改写原始原因、执行状态或回执证据。
+const pendingReasonGuidance = new Map([
+  ['候选明细未匹配到当前在线子 SKU', '系统没找到对应的 SKU'],
+  ['平台、店铺、产品、商品、子 SKU 或仓配映射缺失', '系统没找到对应的 SKU'],
+  ['站点价格档位导致实际价无效或超出误差容限', '系统算出的售价不符合站点规则'],
+  ['本站点与仓配组合缺少已验证的单品上传和回读证据', '这个站点和发货仓暂不能自动改价'],
+  ['提交前商品、仓配或现价与算价依据不一致', '改价前商品信息对不上仓'],
+  ['提交前无法确认单品当前价格或操作日志', '售价或改价记录未确认'],
+  ['提交前刷新后候选已消失', '复查时没找到待改价商品'],
+])
+
+// 待处理只显示固定的销售员提示，后台原因仅用于匹配。
 export function recordStateReason(item: RecordItem): string {
   const status = recordStatusLabel(item)
   if (status === '待处理') {
     const state = item.execution?.state
+    if (item.execution?.row_status === 'rejected' || item.execution?.submit_status === 'rejected') {
+      return '改价未通过，请核对商品和要改的售价'
+    }
     if (state === 'unknown' || state === 'submitting' || state === 'mismatch'
-      || (item.status === '待核验' && state !== 'failed' && item.execution?.row_status !== 'rejected'
-        && item.execution?.submit_status !== 'rejected')) return '上传结果待确认，请勿重复上传'
-    return '处理异常需要人工提价'
+      || (item.status === '待核验' && state !== 'failed')) return '改价结果待确认，请到店铺后台查看，勿重复改价'
+    if (state === 'failed') return '改价未提交成功，请把商品 ID 发给技术'
+    const gap = item.decision?.vietnam_rounding_gap
+    if (gap) {
+      const amount = formatDecimal(gap.amount)
+      const limit = formatDecimal(gap.limit)
+      return amount === limit
+        ? `取整后价差超过 ${limit} 越南盾（旧规则）`
+        : `取整后与目标价约差 ${amount} 越南盾（旧上限 ${limit} 盾）`
+    }
+    const reason = item.reason?.trim().replace(/（排查编号 [^）]+）$/, '') ?? ''
+    return pendingReasonGuidance.get(reason) ?? '暂未查明原因，请把商品 ID 发给技术'
   }
   if (status === '已提价') return '提价上传完成'
   const reason = item.reason

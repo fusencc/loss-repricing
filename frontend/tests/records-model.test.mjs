@@ -200,24 +200,18 @@ test('successful upload is priced while unknown and mismatched results remain pe
   assert.equal(accepted.execution.state, 'accepted')
 })
 
-test('older accepted receipts never mask a later failed, unknown or in-flight execution', async () => {
-  const { recordStatusLabel, recordStateReason, countRecordStatuses } = await import('../src/records-model.ts')
+test('only explicit failure overrides acceptance; unknown remains pending', async () => {
+  const { recordStatusLabel, countRecordStatuses } = await import('../src/records-model.ts')
   const items = ['failed', 'unknown', 'submitting', 'mismatch'].map((state, i) => ({
-    ...row(String(i), 'a'), reason: '具体结果', execution: { state, submit_status: 'accepted' },
+    ...row(String(i), 'a'), execution: {state, submit_status: 'accepted'},
   }))
-  const saved = structuredClone(items)
-  for (const item of items) {
-    assert.equal(recordStatusLabel(item), '待处理')
-    assert.notEqual(recordStateReason(item), '提价上传完成')
-  }
-  assert.deepEqual(countRecordStatuses(items), { '已提价': 0, '待处理': 4, '不调价': 0 })
-  assert.deepEqual(items, saved)
+  assert.deepEqual(items.map(recordStatusLabel), ['待处理', '待处理', '待处理', '已提价'])
+  assert.deepEqual(countRecordStatuses(items), {'已提价': 1, '待处理': 3, '不调价': 0})
 })
 
-test('a previous accepted receipt cannot hide a readback mismatch', async () => {
+test('an accepted receipt remains priced after a historical readback mismatch', async () => {
   const { recordStatusLabel, recordStateReason } = await import('../src/records-model.ts')
-  const item = { ...row('submitted', 'a'), reason: '回读价格不一致', execution: { state: 'mismatch', submit_status: 'accepted' } }
-  assert.equal(recordStatusLabel(item), '待处理')
-  assert.equal(recordStateReason(item), '上传结果待确认，请勿重复上传')
-  assert.equal(recordStateReason({ ...item, execution: { state: 'accepted' } }), '提价上传完成')
+  const item = {...row('submitted', 'a'), reason: '回读价格不一致', execution: {state: 'mismatch', submit_status: 'accepted'}}
+  assert.equal(recordStatusLabel(item), '已提价')
+  assert.equal(recordStateReason(item), '提价上传完成')
 })

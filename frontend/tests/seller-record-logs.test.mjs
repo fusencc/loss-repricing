@@ -110,7 +110,7 @@ test('upload is a peer price field and all execution statuses occupy a separate 
     if (status === '已核验') row.execution.state = 'verified'
     const original = structuredClone(row)
     const html = await render(row)
-    assert.match(html, new RegExp(`<div class="records-stage-field" data-field="uploaded-price"><dt>上传含税价</dt><dd><strong>18\\.24 PHP</strong></dd></div><div class="records-stage-field" data-field="updated-time"><dt>最近更新</dt><dd class="records-log-time"><span>—</span></dd></div></dl>(?:<!--.*?-->)*<div class="records-log-state" aria-label="执行状态"><span class="${tone} records-status"><i></i>${label}</span><p class="records-log-reason">${status === '已核验' ? '提价上传完成' : status === '不调价' ? '原因未记录' : status === '待核验' ? '上传结果待确认，请勿重复上传' : '处理异常需要人工提价'}</p></div>`))
+    assert.match(html, new RegExp(`<div class="records-stage-field" data-field="uploaded-price"><dt>上传含税价</dt><dd><strong>18\\.24 PHP</strong></dd></div><div class="records-stage-field" data-field="updated-time"><dt>最近更新</dt><dd class="records-log-time"><span>—</span></dd></div></dl>(?:<!--.*?-->)*<div class="records-log-state" aria-label="执行状态"><span class="${tone} records-status"><i></i>${label}</span><p class="records-log-reason">${status === '已核验' ? '提价上传完成' : status === '不调价' ? '原因未记录' : status === '待核验' ? '改价结果待确认，请到店铺后台查看，勿重复改价' : '暂未查明原因，请把商品 ID 发给技术'}</p></div>`))
     assert.equal((html.match(/class="records-log-state"/g) ?? []).length, 1)
     assert.doesNotMatch(html, /<dl[^>]*>(?:(?!<\/dl>).)*records-log-state/s)
     assert.doesNotMatch(html, /<header class="records-log-heading">(?:(?!<\/header>).)*records-log-state/s)
@@ -271,17 +271,18 @@ test('identity copy buttons expose names and empty local live regions; missing v
   assert.doesNotMatch(missing, /records-id-copy-button/)
 })
 
-test('pending badges show manual pricing instruction while skipped records retain saved reasons', async () => {
+test('pending badges show the current cause and action while skipped records retain saved reasons', async () => {
   for (const status of ['待处理', '待核验', '不调价']) {
     const row = item()
     row.status = status
-    row.reason = '近72小时内有调价记录\n人工保护；来源待核实'
+    row.reason = status === '不调价' ? '近72小时内有调价记录\n人工保护；来源待核实'
+      : '候选明细未匹配到当前在线子 SKU'
     row.process = [{ reason: '旧尝试原因，不应替代当前原因' }]
     const original = structuredClone(row)
     const html = await render(row)
     if (status === '不调价') assert.match(html, /<p class="records-log-reason">近72小时内有调价记录\n人工保护；来源待核实<\/p>/)
     else {
-      assert.match(html, status === '待核验' ? /<p class="records-log-reason">上传结果待确认，请勿重复上传<\/p>/ : /<p class="records-log-reason">处理异常需要人工提价<\/p>/)
+      assert.match(html, status === '待核验' ? /<p class="records-log-reason">改价结果待确认，请到店铺后台查看，勿重复改价<\/p>/ : /<p class="records-log-reason">系统没找到对应的 SKU<\/p>/)
       assert.doesNotMatch(html, /近72小时内有调价记录|人工保护；来源待核实/)
     }
     assert.doesNotMatch(html, /旧尝试原因|实际有效价已回读核验成功/)
@@ -296,7 +297,7 @@ test('missing saved reasons are explicit and never inferred from other evidence'
       Object.assign(row, { status, reason, seven_days_sales: 22 })
       const html = await render(row)
       if (status === '不调价') assert.match(html, /<p class="records-log-reason">原因未记录<\/p>/)
-      else assert.match(html, status === '待核验' ? /<p class="records-log-reason">上传结果待确认，请勿重复上传<\/p>/ : /<p class="records-log-reason">处理异常需要人工提价<\/p>/)
+      else assert.match(html, status === '待核验' ? /<p class="records-log-reason">改价结果待确认，请到店铺后台查看，勿重复改价<\/p>/ : /<p class="records-log-reason">暂未查明原因，请把商品 ID 发给技术<\/p>/)
       assert.doesNotMatch(html, /三天调价保护|7天销量|实际有效价已回读核验成功/)
     }
   }

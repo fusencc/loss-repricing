@@ -815,6 +815,43 @@ def test_verification_tolerance_ignores_global_decimal_rounding(safety_context, 
         assert (session.get(VariantGuard, original.variant_id).execution_id is None) == (state == "verified")
 
 
+@pytest.mark.parametrize(("actual", "state"), [("20052", "verified"), ("20053", "mismatch")])
+def test_vietnam_uses_upload_grid_for_pricing_and_checks_two_dong_after_upload(safety_context, actual, state):
+    factory, cfg, adapter, clock = safety_context
+    original_collect = adapter.collect
+
+    def collect_vietnam(day):
+        data = original_collect(day).model_dump(mode="json")
+        for line in data["lines"]:
+            line["key"]["site"] = "VN"
+            line.update(currency="VND", loss_amount="-21")
+        for online in data["online"]:
+            online["key"]["site"] = "VN"
+            online.update(currency="VND", retail_price="40000", marketing_price="20000")
+        data["fx_rates"]["VND"] = "3500"
+        data["contracts"] = {
+            "VN": dict(data["contracts"]["MY"], site="VN", price_step="100", rounding="ROUND_UP")
+        }
+        return Snapshot.model_validate(data)
+
+    adapter.collect = collect_vietnam
+    update_settings(factory, dict(site_enabled=["VN"]))
+    service = PricingService(factory, adapter, cfg)
+    service.run_batch("vietnam-upload-grid")
+    original = executions(factory)[0]
+    assert original.request["target_actual"] == "20021"
+    assert original.request["upload_price"] == "40100"
+    assert original.request["trace"]["rounded_actual"] == "20050"
+    adapter.results[original.id] = LookupResult("accepted", Decimal(actual), clock[0])
+    service.reconcile(item_id=original.item_id)
+    with factory() as session:
+        result = session.get(Execution, original.id)
+        assert result.state == state
+        assert result.evidence["verification_actual"] == "20050"
+        assert result.evidence["difference"] == str(Decimal(actual) - Decimal("20050"))
+        assert result.evidence["tolerance"] == "2"
+
+
 def test_verification_uses_exact_target_instead_of_saved_repeating_decimal(safety_context):
     factory, cfg, adapter, clock = safety_context
     service = PricingService(factory, adapter, cfg)

@@ -1,0 +1,17 @@
+[Unit]
+Description=Loss Repricing task results (no price readback)
+After=network.target
+[Service]
+User=lossrepricing
+Group=lossrepricing
+WorkingDirectory=/opt/loss-repricing/source
+Environment=PYTHONPATH=/opt/loss-repricing/source/backend
+Environment=LR_ADAPTER_MODE=live
+Environment=LR_LIVE_SUBMIT_ENABLED=false
+Environment=LR_DING_ENABLED=false
+ExecStart=/opt/loss-repricing/venv/bin/python -m app.task_results
+Restart=on-failure
+UMask=0077
+NoNewPrivileges=true
+[Install]
+WantedBy=multi-user.target

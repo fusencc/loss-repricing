@@ -97,7 +97,7 @@ def notices_context(tmp_path, monkeypatch):
         {'name': name, 'user_id': 'ding-' + name, 'active': True}
         for name in ('seller', 'other', 'manager')
     ]}), encoding='utf-8')
-    cfg=SimpleNamespace(runtime_dir=tmp_path,notification_mode='live',ding_enabled=False,session_secret='x'*32,admin_username='admin',
+    cfg=SimpleNamespace(runtime_dir=tmp_path,worker_poll_seconds=5,notification_mode='live',ding_enabled=False,session_secret='x'*32,admin_username='admin',
                         ding_corp_id='corp',ding_client_id='client',ding_client_secret='secret',ding_agent_id='123',public_base_url='https://example.com')
     yield factory,cfg
     engine.dispose()
@@ -643,20 +643,17 @@ def test_robot_read_receipt_requires_exact_recipient():
     assert c.query_notice('opaque','seller')['state']=='read'
 
 
-def test_notification_only_tick_never_enqueues_demo_batches(notices_context):
-    from app.notification_worker import notification_tick
-    from app.models import Batch
+def test_notification_service_does_not_create_notices_for_existing_batches(notices_context):
+    from types import SimpleNamespace
+    from threading import Event
+    from app.notification_worker import _serve
     from app.models.notifications import Notice
-    factory,cfg=notices_context
-    with factory.begin() as session:
-        session.get(Batch, 'b').mode = 'demo'
-    notification_tick(factory,cfg)
-    with factory.begin() as s:
-        assert s.query(Notice).count()==0
-        s.get(Batch,'b').mode='live'
-    notification_tick(factory,cfg)
-    with factory() as s:
-        assert s.query(Notice).count()==1
+
+    factory, cfg = notices_context
+    stop = Event()
+    _serve(factory, cfg, SimpleNamespace(is_set=stop.is_set, wait=lambda _: stop.set()))
+    with factory() as session:
+        assert session.query(Notice).count() == 0
 
 
 def test_receipt_polling_backs_off_without_resending(notices_context,monkeypatch):

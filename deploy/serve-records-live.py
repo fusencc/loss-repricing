@@ -68,19 +68,29 @@ def create_records_app(database_path: Path, bindings_path: Path):
         return data
 
     def payload(department):
-        with cache_lock:
+        entry = cache.get(department)
+        if entry and time.monotonic() - entry[1] < 5:
+            return entry[2]
+        # 只允许一个重算；已有视图的读者不排队等待其他部门的重算。
+        if not cache_lock.acquire(blocking=entry is None):
+            return entry[2]
+        try:
             version = version_db.execute('PRAGMA data_version').fetchone()[0]
             binding_time = bindings_path.stat().st_mtime_ns if bindings_path.exists() else None
-            stamp = (version, binding_time)
+            clean_path = Path(get_settings().runtime_dir) / 'erp-clean.sqlite3'
+            clean_stamp = tuple(path.stat().st_mtime_ns if path.exists() else None
+                               for path in (clean_path, Path(str(clean_path) + '-wal')))
+            stamp = (version, binding_time, clean_stamp)
             entry = cache.get(department)
-            now = time.monotonic()
-            if entry and entry[0] == stamp and now - entry[1] < 30:
+            if entry and (entry[0] == stamp or time.monotonic() - entry[1] < 5):
                 return entry[2]
             result = encode_records(read_records(department))
             if len(cache) >= 16 and department not in cache:
                 cache.pop(next(iter(cache)))
-            cache[department] = (stamp, now, result)
+            cache[department] = (stamp, time.monotonic(), result)
             return result
+        finally:
+            cache_lock.release()
 
     @app.get('/api/records')
     def records(department: str | None = None):

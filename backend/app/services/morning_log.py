@@ -8,7 +8,7 @@ from pathlib import Path
 import shutil
 import subprocess
 
-from openpyxl import Workbook, load_workbook
+from openpyxl import Workbook
 from openpyxl.cell import WriteOnlyCell
 from sqlalchemy import select
 
@@ -36,22 +36,22 @@ def _sheet(workbook, title, headers, rows):
         sheet.append(cells)
 
 
-def _tk_filename(day):
-    return f'{day.month}.{day.day}早上运行日志.xlsx'
-
-
 def _records(factory, day):
     from app.services.records import (combine_pricing_process, public_record, record_department,
                                       record_seller, KEY_FIELDS)
     with factory() as session:
         ownerships = {row.scope_key: row for row in session.scalars(select(Ownership))}
         names = dict(session.execute(select(UserAccount.id, UserAccount.display_name)).all())
-        rows = session.execute(select(Item, Batch, Execution).join(Batch, Batch.id == Item.batch_id)
+        # 部门快照可达数 MB；每批只读一次，不能随每条商品重复传输、解码。
+        batches = {batch.id: batch for batch in session.scalars(select(Batch).where(
+            Batch.mode == 'live', Batch.business_date == day.isoformat()))}
+        rows = session.execute(select(Item, Execution)
             .outerjoin(Execution, Execution.item_id == Item.id)
-            .where(Batch.mode == 'live', Batch.business_date == day.isoformat())
-            .order_by(Item.updated_at.desc(), Item.id.desc()))
+            .where(Item.batch_id.in_(batches))
+            .order_by(Item.updated_at.desc(), Item.id.desc()).execution_options(yield_per=100))
         projected, sources = [], {}
-        for item, batch, execution in rows:
+        for item, execution in rows:
+            batch = batches[item.batch_id]
             record = public_record(item, batch, execution, record_department(item, batch),
                                    record_seller(item, batch, ownerships, names))
             if record['synthetic']:
@@ -64,10 +64,10 @@ def _records(factory, day):
         return combine_pricing_process(projected), sources
 
 
-def _save_book(config, day, directory, sheets):
+def _save_book(config, day, directory, sheets, *, suffix=''):
     path = config.runtime_dir / directory / day.isoformat()
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    filename = path / _tk_filename(day)
+    filename = path / f'{day.month}.{day.day}早上运行日志{suffix}.xlsx'
     intent = filename.with_suffix('.publish-intent.json')
     if intent.exists():
         pending = json.loads(intent.read_text(encoding='utf-8'))
@@ -121,24 +121,11 @@ def _order_owners(config, capture_id):
     capture = load_capture(config.runtime_dir, capture_id)
     catalog = {}
     for group in capture['groups']:
-        for file in group.get('files', []):
-            if '-order-finance-' not in Path(file['file']).name:
-                continue
-            book = load_workbook(file['file'], read_only=True, data_only=True)
-            try:
-                for sheet in book:
-                    rows = sheet.iter_rows(values_only=True)
-                    headers = next(rows, ())
-                    columns = ('订单编号', '店铺', '销售员')
-                    if not all(column in headers for column in columns):
-                        continue
-                    indexes = [headers.index(column) for column in columns]
-                    for row in rows:
-                        order, shop, seller = (row[index] for index in indexes)
-                        if all(isinstance(value, str) and value.strip() for value in (order, shop, seller)):
-                            catalog.setdefault(order, set()).add((shop, seller))
-            finally:
-                book.close()
+        for row in group.get('rows', []):
+            fields = row.get('fields') or {}
+            order, shop, seller = (fields.get(column) for column in ('订单编号', '店铺', '销售员'))
+            if all(isinstance(value, str) and value.strip() for value in (order, shop, seller)):
+                catalog.setdefault(order, set()).add((shop, seller))
     return catalog
 
 
@@ -187,7 +174,7 @@ def save_success_log(config, day, *, factory):
         ('失败清单', ('itemID', '店铺', '销售', '失败原因'), []),
         ('汇总', ('运行时间', '总条数', '成功/处理中', '明确失败', '已剔除'),
          [(when, len(orders), len(orders), 0, 0)]),
-    ])
+    ], suffix='-调价')
 
 
 def _dws(args, directory):

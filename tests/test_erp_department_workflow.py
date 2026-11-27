@@ -111,7 +111,14 @@ def test_workflow_continues_after_incomplete_or_failed_department(tmp_path, monk
             raise RuntimeError('synthetic departmental lookup failure')
         return None, None
 
+    from threading import Barrier
+    parallel = Barrier(3)
     def evaluate(settings, capture, *, client, auth, **kwargs):
+        summary_file, = tmp_path.glob('erp-workflows/*/result.json')
+        department = next(row for row in json.loads(summary_file.read_text())['departments']
+                          if row['department'] == capture['department'])
+        assert department['status'] == 'processing'
+        parallel.wait(timeout=2)
         attempted.append(('evaluate', capture['department']))
         clients.append((client, auth))
         if capture['capture_id'] == 'Tiktok一部':
@@ -128,15 +135,15 @@ def test_workflow_continues_after_incomplete_or_failed_department(tmp_path, monk
     monkeypatch.setattr(erp_workflow, '_capture_erp_sources', lookup)
     monkeypatch.setattr(erp_workflow, '_evaluate_capture', evaluate)
     result = erp_workflow.run_workflow(Settings(_env_file=None, runtime_dir=tmp_path))
-    assert attempted == ([('lookup', d) for d in bulk.ERP_DEPARTMENTS] +
-                         [('evaluate', d) for d in bulk.ERP_DEPARTMENTS if d != 'Tiktok五部'])
+    assert attempted[:4] == [('lookup', d) for d in bulk.ERP_DEPARTMENTS]
+    assert sorted(attempted[4:]) == sorted(('evaluate', d) for d in bulk.ERP_DEPARTMENTS if d != 'Tiktok五部')
     assert len(sessions) == 5
     assert [dept['status'] for dept in result['departments']] == ['blocked', 'failed', 'completed', 'completed']
     assert result['status'] == 'needs_attention'
     assert result['ready_prices'] == 2
     assert all(session is sessions[0] for session in sessions)
-    assert all(client is clients[0][0] and auth is clients[0][1] for client, auth in clients)
-    assert clients[0][0].is_closed
+    assert len({id(client) for client, auth in clients}) == 3
+    assert all(client.is_closed for client, auth in clients)
     assert not result['execution_allowed']
     assert json.loads((Path(result['artifact_dir']) / 'result.json').read_text()) == result
 
@@ -237,6 +244,7 @@ def test_round_reuses_real_erp_and_sales_authentication_and_clock(tmp_path, monk
     clients = [
         real_client(transport=httpx.MockTransport(sales_handler)),
         real_client(transport=httpx.MockTransport(erp_handler)),
+        *[real_client(transport=httpx.MockTransport(sales_handler)) for _ in range(4)],
     ]
     mock_clients = iter(clients)
     monkeypatch.setattr(httpx, 'Client', lambda **kwargs: next(mock_clients))
@@ -272,6 +280,5 @@ def test_round_reuses_real_erp_and_sales_authentication_and_clock(tmp_path, monk
     assert result['status'] == 'completed'
     assert len(erp_calls) == 5 and sum(path.endswith('/login') for path, _ in erp_calls) == 1
     assert [when for _,when in erp_calls] == list(range(0, 5 * 16, 16))
-    assert len(sales_calls) == 13 and sum(path.endswith('/token') for path, _ in sales_calls) == 1
-    assert [when for _,when in sales_calls[1:]] == list(range(0, 24, 2))
+    assert len(sales_calls) == 16 and sum(path.endswith('/token') for path, _ in sales_calls) == 4
     assert all(client.is_closed for client in clients)

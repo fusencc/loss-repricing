@@ -123,27 +123,14 @@ def test_operation_waits_until_eight_and_never_falls_back_to_sales(runtime, monk
     assert send.call_args.args[0] == 'only-admin' and '钉盘' in send.call_args.args[2]
 
 
-def test_notification_loop_keeps_running_while_price_job_waits(runtime, monkeypatch):
+def test_notification_service_checks_operations_without_price_worker(runtime, monkeypatch):
+    from types import SimpleNamespace
+    from app.notification_worker import _serve
+
     factory, config, _ = runtime
-    entered_job, notified = Event(), Event()
-
-    class StopWorker(BaseException):
-        pass
-
-    class Service:
-        def reconcile(self):
-            pass
-
-        def run_batch(self, job_id):
-            entered_job.set()
-            assert notified.wait(5), 'notification polling waited for the price job'
-            raise StopWorker
-
-    service = Service()
-    service.config = config
-    worker = Worker(factory, service)
-    monkeypatch.setattr(worker, '_notification_tick', lambda: entered_job.is_set() and notified.set())
-    enqueue(factory, 'run', {})
-    with pytest.raises(StopWorker):
-        worker.run_forever(poll_seconds=0.01)
-    assert notified.is_set()
+    update_settings(factory, {'schedule_enabled': True})
+    monkeypatch.setattr('app.services.notifications.utcnow', lambda: datetime(2026, 11, 26, 1, tzinfo=timezone.utc))
+    stop = Event()
+    _serve(factory, config, SimpleNamespace(is_set=stop.is_set, wait=lambda _: stop.set()))
+    with factory() as session:
+        assert session.scalar(select(Notice)).summary['code'] == 'daily_missing'

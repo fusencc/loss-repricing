@@ -488,7 +488,8 @@ def _decide(
         "target_actual": target_actual, "upload_price": upload_price,
         "predicted_profit": rounded_profit, "upload_column": contract.upload_column,
     }
-    if upload_price <= 0 or error_ratio > MoneyRatio(tolerance):
+    # 越南站按合同进档；2 越南盾容差用于上传后的实际售价核对。
+    if upload_price <= 0 or (key.site != "VN" and error_ratio > MoneyRatio(tolerance)):
         return finish("rounding_error", "站点价格档位导致实际价无效或超出误差容限", **prices)
     if upper is not None and rounded_ratio > upper:
         return finish('reference_price_exceeded', '进档后营销价超过参考上限，不调价', status='不调价', **prices)

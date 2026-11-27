@@ -121,7 +121,7 @@ def test_slow_source_failure_waits_five_minutes_from_failure(tmp_path, monkeypat
     service.ready = True
     worker.tick(461)
     worker.tick(759)
-    assert service.calls == 1 and len(reconciles) >= 2
+    assert service.calls == 1 and reconciles == []
     worker.tick(760)
     assert service.calls == 2
     with factory() as session:
@@ -147,8 +147,7 @@ def test_ready_job_runs_before_slow_reconciliation_and_rounds_do_not_repeat_imme
             clock[0] = now
             enqueue(factory, 'run', {})
             worker.tick(now)
-        assert timeline == [('run', 100), ('reconcile', 100), ('run', 175),
-                            ('run', 230), ('reconcile', 230)]
+        assert timeline == [('run', 100), ('run', 175), ('run', 230)]
     finally:
         engine.dispose()
 
@@ -168,24 +167,19 @@ def test_expired_daily_retry_does_not_process_the_new_business_day(tmp_path):
     engine.dispose()
 
 
-def test_notice_dispatch_failure_does_not_skip_reconciliation_or_daily_job(tmp_path, monkeypatch):
+def test_interrupted_daily_job_is_not_marked_done(tmp_path, monkeypatch):
+    import pytest
+
     engine, factory, service = setup(tmp_path)
-    service.config = Settings(_env_file=None, runtime_dir=tmp_path)
-    reconciles, logged = [], []
-    def unavailable(*_):
-        raise RuntimeError("notification dispatch failed")
-    monkeypatch.setattr("app.services.notifications.dispatch_notices", unavailable)
-    monkeypatch.setattr(service, "reconcile", lambda: reconciles.append(True))
-    monkeypatch.setattr("app.worker.event", lambda name, **kwargs: logged.append(name))
-    update_settings(factory, {"schedule_enabled": True})
-    worker = Worker(factory, service)
-    worker._notification_tick()
-    worker.tick(datetime(2026, 11, 4, 21, 0, tzinfo=timezone.utc).timestamp())
-    assert reconciles == [True] and service.calls == 1
-    assert "worker.notice_dispatch_failed" in logged
+    service.config = Settings(_env_file=None, runtime_dir=tmp_path, ding_tk_morning_log_folder='own')
+    update_settings(factory, {'schedule_enabled': True})
+    now = datetime(2026, 11, 4, 21, 0, tzinfo=timezone.utc).timestamp()
+    monkeypatch.setattr(service, 'run_batch', lambda _: (_ for _ in ()).throw(KeyboardInterrupt()))
+    with pytest.raises(KeyboardInterrupt):
+        Worker(factory, service).tick(now)
     with factory() as session:
-        job = session.query(Job).filter_by(dedupe_key="daily:2026-11-05").one()
-        assert job.state == "done" and job.batch_id == "batch-result"
+        job = session.query(Job).one()
+        assert job.state == 'running' and not job.payload.get('archive_pending')
     engine.dispose()
 
 
@@ -204,7 +198,8 @@ def test_former_roster_day_does_not_override_disabled_schedule(tmp_path):
 
 def test_former_roster_day_uses_regular_schedule_and_batch(tmp_path, monkeypatch):
     engine, factory, service = setup(tmp_path)
-    service.config = Settings(_env_file=None, runtime_dir=tmp_path, coordination_required=False)
+    service.config = Settings(_env_file=None, runtime_dir=tmp_path, coordination_required=False,
+                              ding_tk_morning_log_folder='test')
     update_settings(factory, {'schedule_enabled': True})
     written_days = []
     def write_log(worker, config, day):
@@ -266,7 +261,9 @@ def test_daily_capture_keeps_completed_department_when_another_needs_retry(tmp_p
     service.factory = factory
     service.adapter = SimpleNamespace(mode='live')
     saved = []
-    def capture(config):
+    def capture(config, *, on_department, departments_to_collect):
+        assert 'Tiktok五部' in departments_to_collect
+        on_department({"department":"Tiktok五部","status":"completed"})
         assert not config.live_submit_enabled
         return {'group_capture_id': 'parent', 'departments': [
             {'department': 'Tiktok一部', 'status': 'failed'},
@@ -276,6 +273,8 @@ def test_daily_capture_keeps_completed_department_when_another_needs_retry(tmp_p
         saved.append(prepared)
         return 'batch-5'
     service.run_department_batch = execute
+    service.close = lambda: None
+    monkeypatch.setattr('app.services.execution.PricingService', lambda *args: service)
     monkeypatch.setattr(scheduled_departments, 'run_workflow', capture)
     monkeypatch.setattr('app.services.erp_department_pricing.load_department_batch',
                         lambda folder, day, scope: scope['department'])

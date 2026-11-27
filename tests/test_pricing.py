@@ -389,10 +389,10 @@ def test_rounding_shortfall_is_corrected_to_first_one_percent_tick():
         ("MY", "MYR", "0.1", "-0.02", "0.02", True),
         ("MY", "MYR", "0.1", "-0.03", "0.02", False),
         ("VN", "VND", "5", "-2", "2", True),
-        ("VN", "VND", "5", "-2.1", "2", False),
+        ("VN", "VND", "5", "-2.1", "2", True),
     ],
 )
-def test_rounded_effective_price_must_stay_within_station_tolerance(site, currency, step, loss, tolerance, ready):
+def test_upload_rounding_applies_tolerance_except_in_vietnam(site, currency, step, loss, tolerance, ready):
     variant = key(site=site)
     rows = [line(variant, currency=currency, loss_amount=loss)]
     states = [online(variant, currency=currency)]

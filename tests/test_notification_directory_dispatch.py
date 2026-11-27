@@ -224,3 +224,54 @@ def test_department_notice_still_requires_item_access_in_the_web_inbox(notices_c
         notice = session.scalars(select(Notice)).one()
         assert notice_visible(session, Principal('seller', 'seller', 'seller', 'sales'), notice)
         assert not notice_visible(session, Principal('other', 'other', 'seller', 'sales'), notice)
+
+
+def test_department_waits_for_upload_then_reports_acceptance(notices_context, monkeypatch):
+    from app.models import Execution
+    factory, config = notices_context
+    enable(config)
+    with factory.begin() as session:
+        session.get(Batch, 'b').run_key = 'erp-department:2026-11-05:Tiktok一部'
+        item = session.get(Item, 'i')
+        item.phase = 'proposed'
+        item.decision = {'trace': {'erp_department': {'salesperson': 'seller'}}}
+    sent = []
+    monkeypatch.setattr(DingTalkClient, 'send_notice', lambda _, *args: sent.append(args) or {'state': 'accepted', 'task_id': 'task'})
+    enqueue_batch_notices(factory, 'b')
+    with factory() as session:
+        ids = list(session.scalars(select(Notice.id)))
+    dispatch_notices(factory, config, notice_ids=ids)
+    assert not sent
+    with factory.begin() as session:
+        item = session.get(Item, 'i')
+        item.phase, item.status = 'accepted', '待核验'
+        session.add(Execution(id='execution', item_id=item.id, variant_id=item.variant_id,
+            state='accepted', response={'status': 'accepted'}, request={}, evidence={},
+            created_at=item.updated_at, updated_at=item.updated_at))
+    dispatch_notices(factory, config, notice_ids=[])
+    assert not sent
+    dispatch_notices(factory, config, notice_ids=ids)
+    assert len(sent) == 1 and '已提价 1' in sent[0][2] and '待处理 0' in sent[0][2]
+
+
+def test_department_reports_unknown_without_waiting_for_result_or_other_salespeople(notices_context, monkeypatch):
+    from app.notification_worker import _serve
+    from threading import Event
+    from types import SimpleNamespace
+
+    factory, config = notices_context
+    enable(config)
+    with factory.begin() as session:
+        session.get(Batch, 'b').run_key = 'erp-department:2026-11-05:Tiktok一部'
+        item = session.get(Item, 'i')
+        item.phase, item.status = 'unknown', '待核验'
+        item.decision = {'trace': {'erp_department': {'salesperson': 'seller'}}}
+        session.add(Item(id='next', batch_id='b', variant_id='next', key=item.key,
+            status='待提价', phase='proposed', reason='', updated_at=item.updated_at,
+            decision={'trace': {'erp_department': {'salesperson': 'manager'}}}))
+    enqueue_batch_notices(factory, 'b')
+    sent = []
+    monkeypatch.setattr(DingTalkClient, 'send_notice', lambda _, *args: sent.append(args) or {'state': 'accepted', 'task_id': 'task'})
+    stop = Event()
+    _serve(factory, config, SimpleNamespace(is_set=stop.is_set, wait=lambda _: stop.set()))
+    assert len(sent) == 1 and sent[0][0] == 'ding-seller' and '待处理 1' in sent[0][2]

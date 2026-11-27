@@ -3,7 +3,7 @@ from datetime import date, datetime, timezone
 from threading import Event, Thread
 from uuid import uuid4
 import time
-from sqlalchemy import update, or_
+from sqlalchemy import or_, select, true, update
 from sqlalchemy.exc import IntegrityError
 from app.db import transaction
 from app.models import Job, WorkerLease
@@ -19,7 +19,7 @@ class Worker:
         self.factory, self.service = factory, service
         self.owner = str(uuid4())
         self.current_job = None
-        self.last_reconcile = -1e10
+        self.last_archive_refresh = -1e10
         self._held_lease = False
         self._failures = {}
         self.log_sink = get_sink(getattr(service, 'config', None), 'worker')
@@ -43,15 +43,6 @@ class Worker:
                 enqueue_operation_alert(session, code, reference, utcnow(), job_id=job_id, error_id=error_id)
         except Exception as exc:
             self._failure('worker.notice_dispatch_failed', exc)
-
-    def _notification_tick(self):
-        from app.services.notifications import dispatch_notices
-        try:
-            dispatch_notices(self.factory, self.service.config)
-        except Exception as exc:
-            self._failure('worker.notice_dispatch_failed', exc)
-        else:
-            self._failures.pop('worker.notice_dispatch_failed', None)
 
     def acquire(self, now):
         try:
@@ -95,27 +86,27 @@ class Worker:
         service_config = getattr(self.service, "config", None)
         if config["schedule_enabled"] and local.hour >= 5:
             enqueue(self.factory, "run", {"date": local.date().isoformat()}, f"daily:{local.date().isoformat()}")
-        reconcile_due = now - self.last_reconcile >= 60
-        markers = []
-        if reconcile_due and service_config and (service_config.ding_tk_morning_log_folder
-                                                or service_config.ding_cancellation_log_folder):
-            markers = sorted((service_config.runtime_dir / 'morning-logs').glob('*/refresh-pending.json'))
+        archive_due = now - self.last_archive_refresh >= 60
+        archive_jobs = []
+        if archive_due and service_config and self._archive_enabled(service_config):
+            with self.factory() as session:
+                archive_jobs = list(session.scalars(select(Job.id).where(
+                    Job.state == 'done', Job.payload['archive_pending'].as_boolean() == true()).order_by(Job.created_at)))
         job = claim_job(self.factory, self.owner, time.time() if use_wall_clock else now)
         if job is not None:
             metadata = job.payload.get('_log_context', {})
             metadata = metadata if isinstance(metadata, dict) else {}
             with bind_context(job_id=job.id, **{k: metadata[k] for k in ('request_id', 'operation_id') if k in metadata}):
-                self._run_job(job, now, tick_started)
-        if reconcile_due:
-            try:
-                if job is None or job.kind != 'reconcile':
-                    self.service.reconcile()
-                # 本轮新产生的归档补写标记留给下次轮询。
-                for marker in markers:
-                    if marker.exists():
-                        self._morning_log(service_config, date.fromisoformat(marker.parent.name))
-            finally:
-                self.last_reconcile = now + (time.monotonic() - tick_started)
+                try:
+                    if self._run_job(job, now, tick_started):
+                        archive_jobs.append(job.id)
+                finally:
+                    self.current_job = None
+        for job_id in archive_jobs:
+            with bind_context(job_id=job_id):
+                self._archive_job(service_config, job_id)
+        if archive_due:
+            self.last_archive_refresh = now + (time.monotonic() - tick_started)
 
     def _run_job(self, job, now, tick_started):
         self.current_job = job.id
@@ -123,6 +114,7 @@ class Worker:
         event('job.started', kind=job.kind)
         state, error, batch_id, retry = "done", None, None, 0
         alert, error_id = None, None
+        archive_pending = False
         try:
             scheduled_day = job.payload.get("date")
             current_time = now + (time.monotonic() - tick_started)
@@ -141,17 +133,15 @@ class Worker:
                     batch_id = self.service.run_batch(job.id, item_id=job.payload["item_id"])
                 else:
                     batch_id = self.service.run_batch(job.id)
-                if daily and getattr(service_config, "adapter_mode", None) == "live":
-                    error = self._morning_log(service_config, date.fromisoformat(scheduled_day))
-                    if error:
-                        alert = 'archive_failed'
+                archive_pending = bool(daily and getattr(service_config, 'adapter_mode', None) == 'live'
+                                       and self._archive_enabled(service_config))
             elif job.kind == "erp_reconciliation":
                 from app.services.erp_pricing import save_preview_reconciliation
                 batch_id = save_preview_reconciliation(
                     self.factory, self.service.config, job.payload["capture_id"], job.payload["preview_id"],
                     job.payload["artifact_sha256"])
             elif job.kind == "reconcile":
-                self.service.reconcile()
+                self.service.reconcile(tasks_only=True)
             elif job.kind == "correction":
                 from app.services.corrections import run_correction
                 batch_id = run_correction(self.service, job.payload["correction_id"])
@@ -175,27 +165,38 @@ class Worker:
             error_id = event('job.failed', exception=exc)
             if error_id:
                 error += f"；排查编号：{error_id}"
-        finally:
-            try:
-                with transaction(self.factory) as session:
-                    session.execute(update(Job).where(Job.id == job.id, Job.owner == self.owner).values(
-                        state=state, error=error, batch_id=batch_id, lease_until=retry))
-                    session.execute(update(WorkerLease).where(WorkerLease.name == "worker", WorkerLease.owner == self.owner)
-                        .values(last_error=error, heartbeat=stamp()))
-                event('job.completed', state=state, batch_id=batch_id, duration_ms=(time.monotonic() - started) * 1000)
-            finally:
-                self.current_job = None
+        with transaction(self.factory) as session:
+            current = session.get(Job, job.id, with_for_update=True)
+            if current.owner != self.owner:
+                return False
+            current.state, current.error, current.batch_id, current.lease_until = state, error, batch_id, retry
+            if archive_pending:
+                current.payload = {**current.payload, 'archive_pending': True}
+            session.execute(update(WorkerLease).where(WorkerLease.name == "worker", WorkerLease.owner == self.owner)
+                .values(last_error=error, heartbeat=stamp()))
+        event('job.completed', state=state, batch_id=batch_id, duration_ms=(time.monotonic() - started) * 1000)
         if alert:
             self._alert(alert, job.id, job_id=job.id, error_id=error_id)
+        return archive_pending
+
+    @staticmethod
+    def _archive_enabled(config):
+        return bool(config.ding_tk_morning_log_folder or config.ding_cancellation_log_folder)
+
+    def _archive_job(self, config, job_id):
+        with self.factory() as session:
+            day = date.fromisoformat(session.get(Job, job_id).payload['date'])
+        error = self._morning_log(config, day)
+        with transaction(self.factory) as session:
+            current = session.get(Job, job_id, with_for_update=True)
+            current.error = error
+            if error is None:
+                current.payload = {key: value for key, value in current.payload.items() if key != 'archive_pending'}
+        if error:
+            self._alert('archive_failed', job_id, job_id=job_id)
 
     def _morning_log(self, config, day):
         from app.services.morning_log import publish_morning_log, save_morning_log, save_success_log
-        marker = config.runtime_dir / 'morning-logs' / day.isoformat() / 'refresh-pending.json'
-        try:
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            marker.touch()
-        except OSError as exc:
-            self._failure('worker.morning_log_failed', exc)
         errors = []
         for success, save, folder in (
                 (False, save_morning_log, config.ding_tk_morning_log_folder),
@@ -209,12 +210,6 @@ class Worker:
                 # 两处独立归档；日志失败不能重采订单或重传价格，也不能跳过另一处。
                 error_id = event('worker.cancellation_log_failed' if success else 'worker.morning_log_failed', exception=exc)
                 errors.append(f"{'成功订单清单' if success else '完整提价日志'}未写入钉盘，排查编号：{error_id}")
-        if not errors:
-            try:
-                marker.unlink(missing_ok=True)
-            except OSError as exc:
-                error_id = event('worker.morning_log_failed', exception=exc)
-                errors.append(f'日志已写入，刷新标记未清理，排查编号：{error_id}')
         return '；'.join(errors) or None
 
     def run_forever(self, poll_seconds=5):
@@ -230,17 +225,8 @@ class Worker:
                     except Exception as exc:
                         # 数据库故障不会触发直接外部重传，保留错误位置而非吞掉技术证据。
                         self._failure('worker.heartbeat_failed', exc)
-        threads = [Thread(target=renew, daemon=True)]
-        if getattr(getattr(self.service, 'config', None), 'coordination_required', False):
-            # External message delivery must not run on the price loop or the lease heartbeat.
-            def notify():
-                with bind_sink(self.log_sink):
-                    while not stop.is_set():
-                        self._notification_tick()
-                        stop.wait(poll_seconds)
-            threads.append(Thread(target=notify, daemon=True))
-        for thread in threads:
-            thread.start()
+        thread = Thread(target=renew, daemon=True)
+        thread.start()
         try:
             with bind_sink(self.log_sink):
                 while True:
@@ -255,8 +241,7 @@ class Worker:
                     time.sleep(poll_seconds)
         finally:
             stop.set()
-            for thread in threads:
-                thread.join(timeout=2)
+            thread.join(timeout=2)
 
 
 def main():

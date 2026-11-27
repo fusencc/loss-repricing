@@ -1,0 +1,21 @@
+[Unit]
+Description=Loss Repricing DingTalk notifications
+After=network.target
+
+[Service]
+User=lossrepricing
+Group=lossrepricing
+WorkingDirectory=/opt/loss-repricing/source
+Environment=PYTHONPATH=/opt/loss-repricing/source/backend
+Environment=LR_ADAPTER_MODE=live
+Environment=LR_LIVE_SUBMIT_ENABLED=false
+Environment=LR_DING_ENABLED=true
+EnvironmentFile=/opt/loss-repricing/roster-notifications.env
+ExecStart=/opt/loss-repricing/venv/bin/python -m app.notification_worker
+Restart=on-failure
+RestartSec=15
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

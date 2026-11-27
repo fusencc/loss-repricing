@@ -1,4 +1,5 @@
 """ERP 候选至待提价文件的只读编排；复用统一规则，不调用模型或价格上传。"""
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
 from pathlib import Path
 from uuid import uuid4
@@ -21,8 +22,8 @@ from app.adapters.official_price_logs import capture_recent_price_changes, recen
 from app.domain.types import VariantKey
 from app.observability import event
 from decimal import Decimal
-from app.adapters.sales_batch_export import capture_sales_batch, export_activity_hints, select_export_candidates
-from app.adapters.sales_platform_capture import capture_platform_controls
+from app.adapters.sales_batch_export import capture_sales_batch, select_export_candidates
+from app.adapters.sales_batch_controls import capture_batch_controls
 from app.adapters.live_online_preparation import prepare_online_states
 from app.services.erp_capture_store import (
     json_artifact_bytes, load_capture, rebuild_clean_capture, save_capture, write_json, write_verified,
@@ -49,8 +50,11 @@ def filter_candidate_history(settings, targets, *, client=None, auth=None):
     return history,eligible,filtered
 
 
-def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, progress=None):
+def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, progress=None, on_department=None,
+                 departments_to_collect=None):
     """先采一次集团四来源，再按财务表部门批查订单；指定采集编号时回放。"""
+    if departments_to_collect is None:
+        departments_to_collect = ERP_DEPARTMENTS
     if capture_id is not None:
         rebuild_clean_capture(settings.runtime_dir, capture_id)
         capture = load_capture(settings.runtime_dir, capture_id)
@@ -63,7 +67,7 @@ def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, prog
     departments = []
     summary = {
         'mode': 'department_capture', 'status': 'running', 'execution_allowed': False,
-        'department_order': list(ERP_DEPARTMENTS), 'departments': departments,
+        'department_order': list(departments_to_collect), 'departments': departments,
         'ready_prices': 0, 'artifact_dir': str(directory.resolve()),
     }
     manifest = directory / 'result.json'
@@ -93,7 +97,7 @@ def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, prog
             if progress:
                 progress('阶段 2/2：按财务表部门分组，批量读取订单店铺归属和原生商品明细。')
             pending = {}
-            for department in ERP_DEPARTMENTS:
+            for department in departments_to_collect:
                 capture = None
                 result = {'department': department, 'status': 'collecting', 'ready_prices': 0}
                 departments.append(result)
@@ -108,21 +112,32 @@ def run_workflow(settings, *, capture_id=None, evidence=None, exports=None, prog
                     result.update(_workflow_failure(error, capture))
                 write_json(manifest, summary)
 
-        for result in departments:
-            department = result['department']
-            if department not in pending:
-                continue
-            capture, headers, native = pending.pop(department)
-            try:
-                result.update(_evaluate_capture(settings, capture, replay=False, progress=progress,
-                    headers=headers, native=native, daily_fees=daily_fees, current_fx=current_fx,
-                    client=client, auth=auth))
-            except Exception as error:
-                result.update(_workflow_failure(error, capture))
-            summary['ready_prices'] += result['ready_prices']
-            write_json(manifest, summary)
-            if progress:
-                progress(f"{department} 处理结果：{result['status']}。")
+        def evaluate_department(result):
+            department=result['department']
+            capture,headers,native=pending[department]
+            with httpx.Client(timeout=60,trust_env=False,follow_redirects=False) as department_client:
+                department_auth=SalesAuth(settings,department_client)
+                try:
+                    return _evaluate_capture(settings,capture,replay=False,progress=progress,
+                        headers=headers,native=native,daily_fees=daily_fees,current_fx=current_fx,
+                        client=department_client,auth=department_auth)
+                except Exception as error:
+                    return _workflow_failure(error,capture)
+
+        with ThreadPoolExecutor(max_workers=len(ERP_DEPARTMENTS)) as pool:
+            ready = [result for result in departments if result['department'] in pending]
+            for result in ready:
+                result['status'] = 'processing'
+            if ready:
+                write_json(manifest, summary)
+            futures = {pool.submit(evaluate_department, result): result for result in ready}
+            for future in as_completed(futures):
+                result=futures[future]
+                result.update(future.result())
+                summary['ready_prices']+=result['ready_prices']
+                write_json(manifest,summary)
+                if on_department:on_department(result)
+                if progress:progress(f"{result['department']} 处理结果：{result['status']}。")
 
     if parent['capture_complete'] and not unassigned and all(d['status'] == 'completed' for d in departments):
         summary['status'] = 'completed'
@@ -244,9 +259,9 @@ def _evaluate_capture(settings, capture, *, replay, evidence=None, exports=None,
             platform_targets = [{'erp_shop':t['erp_shop'],'product_id':t['key']['product_id'],
                 'item_id':t['key']['item_id']} for t in pricing_targets]
             try:
-                platform = capture_platform_controls(settings,capture,platform_targets,progress=progress,
+                platform = capture_batch_controls(settings,capture,platform_targets,progress=progress,
                                                      client=client,auth=auth,
-                                                     activity_hints=export_activity_hints(sales) if sales else None)
+                                                     sales=sales)
             except SourceUnavailable:
                 platform_status = 'unavailable'
             else:
@@ -269,7 +284,7 @@ def _evaluate_capture(settings, capture, *, replay, evidence=None, exports=None,
         current_fx=current_fx, sales_source=sales_ref, native_source=native_ref,
         order_preparation=order_preparation, order_headers_source=headers_ref,
         local_history_source=local_history_ref, platform_source=platform_ref,
-        online_preparation=online_preparation, fixed_fees_source=fixed_fees_ref)
+        online_preparation=online_preparation, fixed_fees_source=fixed_fees_ref, official_history=official_history)
     ready = [row for row in report['decisions'] if row['ready']]
     other = [row for row in report['decisions'] if not row['ready']]
     unresolved = bool(report['global_issues'] or report['issues'] or any(

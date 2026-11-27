@@ -20,16 +20,10 @@ def setup_log(tmp_path, monkeypatch):
     engine, factory = create_database(f'sqlite:///{tmp_path / "logs.db"}')
     Base.metadata.create_all(engine)
     config = Settings(_env_file=None, runtime_dir=tmp_path)
-    export = tmp_path / 'loss_allocatable-order-finance-001.xlsx'
-    book = Workbook()
-    sheet = book.active
-    sheet.append(['订单编号', '交易号', '店铺', '销售员'])
-    sheet.append(['erp-order', '0587373171290572533', 'Tiktok-583TH', '杨颖'])
-    sheet.append(['unknown-order', '0587373171290572534', 'Tiktok-583TH', '杨颖'])
-    sheet.append(['second-order', None, 'Tiktok-583TH', '杨颖'])
-    book.save(export)
     monkeypatch.setattr('app.services.erp_capture_store.load_capture', lambda *_: {
-        'groups': [{'files': [{'file': str(export)}]}]})
+        'groups': [{'rows': [{'orderid': order, 'fields': {
+            '订单编号': order, '店铺': 'Tiktok-583TH', '销售员': '杨颖'}}
+            for order in ('erp-order', 'unknown-order', 'second-order')]}]})
     with factory.begin() as session:
         session.add(Batch(id='batch', run_key='erp-roster:job:杨颖:2026-11-25',
                           business_date='2026-11-25', mode='live', status='completed',
@@ -179,8 +173,10 @@ def test_success_log_exports_one_text_item_id_per_order_and_item(tmp_path, monke
         request['trace']['source_rows'] = [{'order_id': 'erp-order'}]
         second.request = request
     path = morning_log.save_success_log(config, DAY, factory=factory)
-    assert path.name == '11.25早上运行日志.xlsx'
-    assert path.parent != morning_log.save_morning_log(config, DAY, factory=factory).parent
+    assert path.name == '11.25早上运行日志-调价.xlsx'
+    detail_path = morning_log.save_morning_log(config, DAY, factory=factory)
+    assert detail_path.name == '11.25早上运行日志.xlsx'
+    assert path.parent != detail_path.parent
     with closing(load_workbook(path)) as book:
         assert book.sheetnames == ['成功清单', '失败清单', '汇总']
         assert list(book['成功清单'].values) == [
@@ -214,7 +210,11 @@ def test_daily_run_writes_both_logs_only_after_all_price_attempts(tmp_path, monk
         return 'batch'
 
     def publish(config, path, *, success=False):
+        from app.models import Job
         assert events[:2] == ['first-item-finished', 'last-item-finished']
+        with factory() as session:
+            job = session.query(Job).one()
+            assert job.state == 'done' and job.payload['archive_pending']
         events.append(('publish', success))
 
     monkeypatch.setattr(morning_log, 'publish_morning_log', publish)
@@ -225,7 +225,9 @@ def test_daily_run_writes_both_logs_only_after_all_price_attempts(tmp_path, monk
     assert events == ['first-item-finished', 'last-item-finished', ('publish', False), ('publish', True)]
     worker.tick(now + 61)
     assert len(events) == 4
-    assert not (tmp_path / 'morning-logs' / DAY.isoformat() / 'refresh-pending.json').exists()
+    with factory() as session:
+        from app.models import Job
+        assert 'archive_pending' not in session.query(Job).one().payload
     engine.dispose()
 
 
@@ -243,7 +245,7 @@ def test_two_destinations_are_independent_and_second_still_runs_after_failure(tm
     monkeypatch.setattr(morning_log, 'publish_morning_log', publish)
     worker = Worker(factory, SimpleNamespace(config=config))
     assert worker._morning_log(config, DAY)
-    assert calls == [(False, '11.25早上运行日志.xlsx'), (True, '11.25早上运行日志.xlsx')]
+    assert calls == [(False, '11.25早上运行日志.xlsx'), (True, '11.25早上运行日志-调价.xlsx')]
     engine.dispose()
 
 
@@ -363,50 +365,55 @@ def test_historical_log_failure_is_retried_after_worker_restart(tmp_path, monkey
         with factory.begin() as session:
             session.get(Item, 'item-1').status = '待处理'
             session.get(Execution, 'exec-1').state = 'failed'
+    from app.models import Job
+    from app.services.store import enqueue
     monkeypatch.setattr(morning_log, 'publish_morning_log', publish)
-    worker = Worker(factory, SimpleNamespace(config=config, reconcile=reconcile))
-    now = datetime(2026, 11, 25, 8, tzinfo=timezone.utc).timestamp()
-    # 已结束整轮的日志写入失败，才保留原业务日的补写意图。
+    now = datetime(2026, 11, 24, 8, tzinfo=timezone.utc).timestamp()
+    day = '2026-11-24'
+    job_id = enqueue(factory, 'run', {'date': day}, f'daily:{day}')
     reconcile()
-    assert worker._morning_log(config, date(2026, 11, 24))
-    marker = tmp_path / 'morning-logs' / '2026-11-24' / 'refresh-pending.json'
-    assert marker.exists()
+    worker = Worker(factory, SimpleNamespace(config=config, run_batch=lambda _: 'batch'))
+    worker.tick(now)
+    with factory() as session:
+        job = session.get(Job, job_id)
+        assert job.state == 'done' and job.payload['archive_pending'] and job.error
     assert len(calls) == 2
     unavailable[0] = False
-    # 同一个租约所有者模拟重启后的恢复路径，避免等待旧租约超时。
-    restarted = Worker(factory, SimpleNamespace(config=config, reconcile=lambda: None))
-    restarted.owner = worker.owner
-    restarted.tick(now + 61)
-    assert calls == [('11.24早上运行日志.xlsx', False), ('11.24早上运行日志.xlsx', True)] * 2
-    assert not marker.exists()
-    with closing(load_workbook(marker.parent / '11.24早上运行日志.xlsx')) as book:
+    restarted = Worker(factory, SimpleNamespace(config=config))
+    restarted.tick(now + 86400)
+    assert calls == [('11.24早上运行日志.xlsx', False), ('11.24早上运行日志-调价.xlsx', True)] * 2
+    with factory() as session:
+        job = session.get(Job, job_id)
+        assert 'archive_pending' not in job.payload and job.error is None
+    with closing(load_workbook(tmp_path / 'morning-logs' / day / '11.24早上运行日志.xlsx')) as book:
         assert {row[2]: row[8] for row in list(book['明细'].values)[1:]}['SKU-1'] == '待处理'
     engine.dispose()
 
 
-def test_marker_cleanup_failure_does_not_block_claiming_price_job(tmp_path, monkeypatch):
-    from pathlib import Path
+def test_interrupted_archive_resumes_without_rerunning_prices(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from datetime import datetime, timezone
     from app.worker import Worker
+    from app.models import Job
     from app.services.store import enqueue
+
     engine, factory, config = setup_log(tmp_path, monkeypatch)
-    config = config.model_copy(update={'ding_tk_morning_log_folder': 'own',
-        'ding_cancellation_log_folder': 'luodi', 'erp_roster_schedule_enabled': False})
-    original_unlink = Path.unlink
-    def unlink(path, *args, **kwargs):
-        if path.name == 'refresh-pending.json':
-            raise OSError('cannot remove marker')
-        return original_unlink(path, *args, **kwargs)
-    monkeypatch.setattr(Path, 'unlink', unlink)
-    monkeypatch.setattr(morning_log, 'publish_morning_log', lambda *_, **kw: None)
-    calls = []
-    enqueue(factory, 'run', {'date': DAY.isoformat()}, f'daily:{DAY.isoformat()}')
-    def run(key):
-        calls.append(key)
-        return 'batch'
-    service = SimpleNamespace(config=config, reconcile=lambda: None, run_batch=run)
-    Worker(factory, service).tick(datetime(2026, 11, 25, 8, tzinfo=timezone.utc).timestamp())
-    assert len(calls) == 1
-    assert (tmp_path / 'morning-logs' / DAY.isoformat() / 'refresh-pending.json').exists()
+    config.ding_tk_morning_log_folder = 'own'
+    day = DAY.isoformat()
+    job_id = enqueue(factory, 'run', {'date': day}, f'daily:{day}')
+    now = datetime(2026, 11, 25, 8, tzinfo=timezone.utc).timestamp()
+
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(morning_log, 'publish_morning_log', interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        Worker(factory, SimpleNamespace(config=config, run_batch=lambda _: 'batch')).tick(now)
+    with factory() as session:
+        job = session.get(Job, job_id)
+        assert job.state == 'done' and job.payload['archive_pending']
+    archived = []
+    monkeypatch.setattr(morning_log, 'publish_morning_log', lambda config, path, **kw: archived.append(path.name))
+    Worker(factory, SimpleNamespace(config=config)).tick(now + 121)
+    assert archived == ['11.25早上运行日志.xlsx']
     engine.dispose()

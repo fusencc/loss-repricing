@@ -338,3 +338,18 @@ def configure_direct(config, rate, site):
     config['freight']=[{'id':1,'siteCode':site,'mainlandId':1,'shop3pf':1,'priceType':1,'fixedFreight':'0',
         'firstWeight':rate['freight']['base_weight_g'],'firstAmount':rate['freight']['base_price'],
         'secondWeight':rate['freight']['step_weight_g'],'secondAmount':rate['freight']['step_price']}]
+
+
+def test_export_controls_use_explicit_company_status_without_fabricating_platform_status():
+    from app.adapters.live_online_preparation import prepare_online_states
+    c,t,s=sources()
+    s['platform']['source_mode']='sales_batch_export_with_parent_list'
+    data=s['platform']['records'][0]['data']
+    for key in ['product_status','status','is_not_for_sale']:data.pop(key)
+    data['skus'][0].pop('status_info')
+    r=prepare_online_states(c,t,**s)
+    assert len(r['online'])==1 and not r['issues']
+    assert r['online'][0]['state']['sellable'] is True
+    s['platform']['records'][0]['company_parent']['productStatus']=2
+    r=prepare_online_states(c,t,**s)
+    assert r['online'][0]['state']['sellable'] is False

@@ -1,63 +1,62 @@
-"""真实通知专用进程；不加载调价适配器，不领取或执行价格任务。"""
+"""独立投递真实通知，不加载调价适配器，也不领取价格任务。"""
 import json
 import signal
+from pathlib import Path
 from threading import Event
-from sqlalchemy import select
+
 from sqlalchemy.engine import make_url
+
 from app.config import get_settings
-from app.db import Base, create_database
-from app.models import Batch
-from app.services.notifications import dispatch_notices, write_batch_notices
+from app.db import create_database
+from app.observability import bind_sink, configure_logging, event
+from app.services.notifications import dispatch_notices
 from app.services.store import stamp
 
 
-def notification_tick(factory, config):
-    # 持久批次即投递意图来源；覆盖人工实时入档路径，demo/file 不进入真实发送。
-    with factory.begin() as session:
-        for batch_id in session.scalars(select(Batch.id).where(Batch.mode == 'live')):
-            write_batch_notices(session, batch_id)
-    return dispatch_notices(factory, config)
-
-
 def main():
-    import fcntl  # 常驻锁仅在 WSL 入口使用；通用通知函数仍可在 Windows 测试。
-    config=get_settings()
-    if config.notification_mode != 'live' or not config.ding_enabled:
-        raise SystemExit('真实机器人通知未启用')
-    archive=config.live_history_database_url.get_secret_value()
-    url=make_url(archive)
-    if url.get_backend_name() != 'sqlite' or not url.database:
-        raise SystemExit('本机通知服务必须绑定明确的真实档案数据库')
-    from pathlib import Path
-    if not Path(url.database).is_file():
-        raise SystemExit('真实档案不存在')
-    lock=open(config.runtime_dir / 'notification-worker.lock','w')
-    try:
-        fcntl.flock(lock,fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        return
-    engine,factory=create_database(archive)
-    Base.metadata.create_all(engine)
-    stop=Event()
-    for sig in (signal.SIGTERM,signal.SIGINT):
-        signal.signal(sig,lambda *_:stop.set())
-    health=config.runtime_dir / 'notification-worker-health.json'
-    started=stamp()
-    try:
-        while not stop.is_set():
-            try:
-                result=notification_tick(factory,config)
-                state={'state':'running','started_at':started,'heartbeat':stamp(),**result}
-            except Exception as exc:
-                # 异常正文可能包含业务数据或认证字段，只记类型；独立条目状态仍由 outbox 保存。
-                state={'state':'error','started_at':started,'heartbeat':stamp(),'error_type':type(exc).__name__}
-            temporary=health.with_suffix('.tmp')
-            temporary.write_text(json.dumps(state,ensure_ascii=False))
-            temporary.replace(health)
-            stop.wait(max(5,config.worker_poll_seconds))
-    finally:
-        engine.dispose()
-        lock.close()
+    import fcntl
+
+    config = get_settings()
+    archive = config.live_history_database_url.get_secret_value() or (
+        config.database_url if config.adapter_mode == 'live' else '')
+    if not archive:
+        raise SystemExit('通知服务需绑定真实提价档案')
+    url = make_url(archive)
+    if url.get_backend_name() == 'sqlite' and (not url.database or not Path(url.database).is_file()):
+        raise SystemExit('真实提价档案尚未建立')
+
+    config.runtime_dir.mkdir(parents=True, exist_ok=True)
+    sink = configure_logging(config, 'worker')
+    with (config.runtime_dir / 'notification-worker.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        engine, factory = create_database(archive)
+        stop = Event()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, lambda *_: stop.set())
+        try:
+            with bind_sink(sink):
+                _serve(factory, config, stop)
+        finally:
+            engine.dispose()
+
+
+def _serve(factory, config, stop):
+    health = config.runtime_dir / 'notification-worker-health.json'
+    started = stamp()
+    while not stop.is_set():
+        try:
+            result = dispatch_notices(factory, config)
+            state = {'state': 'running', 'started_at': started, 'heartbeat': stamp(), **result}
+        except Exception as exc:
+            event('worker.notice_dispatch_failed', exception=exc)
+            state = {'state': 'error', 'started_at': started, 'heartbeat': stamp(), 'error_type': type(exc).__name__}
+        temporary = health.with_suffix('.tmp')
+        temporary.write_text(json.dumps(state, ensure_ascii=False), encoding='utf-8')
+        temporary.replace(health)
+        stop.wait(max(5, config.worker_poll_seconds))
 
 
 if __name__ == '__main__':

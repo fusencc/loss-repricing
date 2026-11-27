@@ -27,9 +27,9 @@ from fake_adapter import DemoAdapter
     (False, 'live_price', 'accepted'), (True, 'live_price', 'accepted'),
     (False, 'wrong_sku', 'unknown'), (True, 'no_new_task', 'unknown'),
     (False, 'pending_task', 'unknown'), (False, 'failed_task', 'rejected'),
-    (False, 'changed_retail', 'blocked'), (False, 'logs_unavailable', 'blocked'),
+    (False, 'changed_retail', 'accepted'), (False, 'logs_unavailable', 'blocked'),
 ])
-def test_single_department_upload_and_live_price_lookup(tmp_path, monkeypatch, response_lost, readback, expected_status):
+def test_single_department_upload_and_task_only_lookup(tmp_path, monkeypatch, response_lost, readback, expected_status):
     now = datetime.now(timezone.utc)
     day = now.astimezone(BEIJING).date()
     snapshot = DemoAdapter(tmp_path).collect(day)
@@ -48,22 +48,6 @@ def test_single_department_upload_and_live_price_lookup(tmp_path, monkeypatch, r
     task = {'id': 'new', 'type': 2, 'status': 2, 'shopName': shop, 'productId': key.product_id,
             'sellerSkuId': key.item_id, 'priceIncludeVat': str(decision.upload_price)}
 
-    def current(_cfg, source, targets, **kwargs):
-        assert targets == [{'erp_shop': shop, 'product_id': key.product_id, 'item_id': key.item_id}]
-        live_reads.append(source['capture_id'])
-        retail = live_retail if sent or readback == 'changed_retail' else online.retail_price
-        sku_text = 'OTHER' if sent and readback == 'wrong_sku' else key.sku
-        return {'records': [{
-            'company_parent': {'shopName': shop, 'shopId': key.shop_id, 'productId': key.product_id,
-                               'localMainSku': online.main_sku},
-            'data': {'id': key.product_id, 'skus': [{'id': key.item_id, 'seller_sku': sku_text,
-                     'price': {'sale_price': str(retail), 'currency': online.currency}}]},
-            'current_variants': [{'shopName': shop, 'shopId': key.shop_id, 'productId': key.product_id,
-                                  'sellerSkuId': key.item_id, 'sellerSku': sku_text, 'currency': online.currency,
-                                  'overseasStockSum': '0', 'priceIncludeVat': str(retail),
-                                  'discount': '10' if sent else None, 'marketPrice': str(live_actual) if sent else None}],
-            'company_activity_locked': bool(sent), 'variants_observed_at': now.isoformat()}]}
-
     def request(req):
         if req.url.path == LOGIN_PATH:
             return httpx.Response(200, json={'access_token': 'fake', 'expires_in': 600})
@@ -79,11 +63,10 @@ def test_single_department_upload_and_live_price_lookup(tmp_path, monkeypatch, r
             rows = [task | {'id': 'old'}]
             if sent and readback != 'no_new_task':
                 status = {'pending_task': 1, 'failed_task': 3}.get(readback, 2)
-                rows.append(task | {'status': status})
+                rows.append(task | {'status': status, 'sellerSkuId': 'OTHER' if readback == 'wrong_sku' else key.item_id})
             return httpx.Response(200, json={'resp_code': 0, 'datas': {'count': len(rows), 'data': rows}})
         pytest.fail(f'Unexpected endpoint {req.url.path}')
 
-    monkeypatch.setattr('app.adapters.erp_price_upload.capture_platform_controls', current)
     config = Settings(_env_file=None, runtime_dir=tmp_path, live_submit_enabled=True,
                       vendor_username='mock', vendor_password='mock')
     execution_id = str(uuid4())
@@ -97,6 +80,7 @@ def test_single_department_upload_and_live_price_lookup(tmp_path, monkeypatch, r
             return
         proof = transport.prepare(execution_id, 'batch', day, shop, decision)
         assert proof['previous_log_ids'] == ['old'] and not sent
+        assert live_reads == []  # 上传前只使用本轮算价证据，不再读取商品现态。
         decision.trace[ERP_UPLOAD_TRACE] = proof
         if not response_lost and readback == 'live_price':
             from app.adapters.excel import price_upload_workbook
@@ -122,12 +106,8 @@ def test_single_department_upload_and_live_price_lookup(tmp_path, monkeypatch, r
         end_day = tomorrow.astimezone(BEIJING).date() if task_id else day
         assert log_queries[-1]['createTimeEnd'] == f'{end_day} 23:59:59'
         assert outcome.status == expected_status
-        if expected_status == 'accepted':
-            assert outcome.actual_price == live_actual and outcome.observed_at == now
-            assert outcome.price_basis == 'actual_including_vat'
-        else:
-            assert outcome.actual_price is None
-        assert len(live_reads) == (2 if readback in {'live_price', 'wrong_sku'} else 1)
+        assert outcome.actual_price is None and outcome.observed_at is None
+        assert live_reads == []  # MockTransport rejects any product/variant query.
     assert len(sent) == 1
     headers = f"Content-Type: {sent[0].headers['content-type']}\r\n\r\n".encode()
     body = BytesParser(policy=policy.default).parsebytes(headers + sent[0].content)

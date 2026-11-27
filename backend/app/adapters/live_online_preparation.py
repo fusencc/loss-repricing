@@ -43,6 +43,7 @@ def prepare_online_states(capture,targets,*,sales,platform,local_history,fixed_f
         raise ValueError('开放调价日志来源合同或运行环境不一致')
     sources=locals().copy()
     for name,schema in SCHEMAS.items():_bound(capture,sources[name],schema)
+    batch_controls = platform.get('source_mode') == 'sales_batch_export_with_parent_list'
     observed=max([source_time(sources[name]['completed_at']) for name in SCHEMAS]+[source_time(official_history['completed_at'])])
     evaluated=observed
     result={'schema_version':'erp-live-online-preparation-v2','version':'erp-live-online-v2',
@@ -167,14 +168,20 @@ def prepare_online_states(capture,targets,*,sales,platform,local_history,fixed_f
                 fee['proof']['vat_source'] = {**rate['vat_source'],
                     'source_ref': export_proof['ref'] if export_proof else control['ref'],
                     'observed_at': sales['completed_at'] if export_proof else control['observed_at']}
-            if (type(control.get('company_activity_locked')) is not bool
-                    or type(data.get('is_not_for_sale')) is not bool
-                    or not isinstance(data.get('product_status'),str) or not isinstance(data.get('status'),str)
-                    or not isinstance(sku.get('status_info'),dict) or not isinstance(sku['status_info'].get('status'),str)
-                    or type(parent.get('productStatus')) is not int):
-                raise ValueError('平台可售或公司活动状态字段未知')
-            sellable=(parent['productStatus']==4 and data['product_status']=='ACTIVATE' and data['status']=='ACTIVATE'
-                and data['is_not_for_sale'] is False and sku['status_info']['status']=='NORMAL')
+            if batch_controls:
+                # 批量路径以公司在线父商品状态为准，不伪造未查询的平台SKU状态。
+                if type(parent.get('productStatus')) is not int:
+                    raise ValueError('批量商品可售状态未知')
+                sellable = parent['productStatus'] == 4
+            else:
+                if (type(control.get('company_activity_locked')) is not bool
+                        or type(data.get('is_not_for_sale')) is not bool
+                        or not isinstance(data.get('product_status'),str) or not isinstance(data.get('status'),str)
+                        or not isinstance(sku.get('status_info'),dict) or not isinstance(sku['status_info'].get('status'),str)
+                        or type(parent.get('productStatus')) is not int):
+                    raise ValueError('平台可售或公司活动状态字段未知')
+                sellable=(parent['productStatus']==4 and data['product_status']=='ACTIVATE' and data['status']=='ACTIVATE'
+                    and data['is_not_for_sale'] is False and sku['status_info']['status']=='NORMAL')
             # 官方返回的是日志数量，不含具体生效时间；不能构造last_increase_at。
             try:
                 recent = recent_price_log_for(official_history,key)
